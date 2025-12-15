@@ -11,8 +11,8 @@ naga_oil.workspace = true
 include_absolute_path.workspace = true
 seq-macro.workspace = true
 pollster.workspace = true
+profiling.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-asset = { path = "../zenith-asset" }
 zenith-build = { path = "../zenith-build" }
-zenith-task = { path = "../zenith-task" }

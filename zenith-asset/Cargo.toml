@@ -15,6 +15,6 @@ serde = { workspace = true, features = ["derive"] }
 image.workspace = true
 gltf.workspace = true
 bincode = { workspace = true, features = ["serde"] }
+profiling.workspace = true
 
 zenith-core = { path = "../zenith-core" }
-zenith-task = { path = "../zenith-task" }

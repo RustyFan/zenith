@@ -156,7 +156,7 @@ impl Default for CameraController {
             accum_local_yaw: Default::default(),
 
             move_speed: 70.,
-            mouse_sensitivity: 1.,
+            mouse_sensitivity: 0.4,
             rotation_smoothing_factor: 0.5,
 
             accum_dx: 0.0,
@@ -190,6 +190,7 @@ impl CameraController {
     }
 
     /// Receive and process window events.
+    #[profiling::function]
     pub fn on_window_event(&mut self, event: &WindowEvent, window: &Window) {
         match event {
             WindowEvent::MouseInput { button, state, .. } => {
@@ -213,6 +214,7 @@ impl CameraController {
     }
 
     /// Receive and process device events.
+    #[profiling::function]
     pub fn on_device_event(&mut self, event: &DeviceEvent) {
         match event {
             DeviceEvent::MouseMotion { delta } => {
@@ -226,6 +228,7 @@ impl CameraController {
     }
 
     /// Update camera with axis speed.
+    #[profiling::function]
     pub fn update_cameras<'a>(&mut self,
                               delta_time: f32,
                               forward_axis_speed: f32,

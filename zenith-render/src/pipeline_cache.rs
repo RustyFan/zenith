@@ -17,6 +17,7 @@ impl PipelineCache {
 
     /// If this pipeline is exist, return the cached pipeline.
     /// If this pipeline is NOT exists, create one and return it.
+    #[profiling::function]
     pub fn get_or_create_graphic_pipeline(
         &mut self,
         device: &wgpu::Device,

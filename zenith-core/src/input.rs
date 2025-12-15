@@ -265,11 +265,13 @@ impl InputActionMapper {
     }
 
     /// Receive and process window events.
+    #[profiling::function]
     pub fn on_window_event(&mut self, event: &WindowEvent) {
         self.input.on_window_event(event);
     }
 
     /// Update input mapping states.
+    #[profiling::function]
     pub fn tick(&mut self, delta_time: f32) {
         self.input.tick();
 

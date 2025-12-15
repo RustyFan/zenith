@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_core::file::load_with_memory_mapping;
-use zenith_task::TaskResult;
 
 pub mod render;
 pub mod manager;
@@ -109,7 +108,8 @@ impl AssetType {
 ///
 /// ```
 /// use zenith_asset::AssetUrl;
-/// let asset_url = AssetUrl("mesh/cerberus/scene.mesh");
+/// use std::path::PathBuf;
+/// let asset_url: AssetUrl = PathBuf::from("mesh/cerberus/scene.mesh").into();
 /// ```
 #[derive(Clone, Debug, From, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetUrl {
@@ -177,13 +177,12 @@ impl<A: Asset> AssetHandle<A> {
     }
 }
 
-/// Local asset reference which can only be used in a scope which restrict the borrowing lifetime.
-pub struct AssetRef<'a, T> {
+pub struct AssetRef<'a, A> {
     asset: Arc<dyn Asset>,
-    _marker: PhantomData<&'a T>,
+    _marker: PhantomData<&'a A>,
 }
 
-impl<'a, T: Asset> AssetRef<'a, T> {
+impl<'a, A: Asset> AssetRef<'a, A> {
     fn new(asset: Arc<dyn Asset>) -> Option<Self> {
         Some(Self {
             asset,
@@ -192,16 +191,19 @@ impl<'a, T: Asset> AssetRef<'a, T> {
     }
 }
 
-impl<'a, T: Asset> Deref for AssetRef<'a, T> {
-    type Target = T;
+impl<'a, A: Asset> Deref for AssetRef<'a, A> {
+    type Target = A;
 
     fn deref(&self) -> &Self::Target {
-        self.asset.as_ref().as_any().downcast_ref::<T>().unwrap()
+        unsafe {
+            // Safety: asset type is checked by TypeId in AssetRegistry when calling get()
+            self.asset.as_ref().as_any().downcast_ref::<A>().unwrap_unchecked()
+        }
     }
 }
 
-impl<'a, T: Asset> AsRef<T> for AssetRef<'a, T> {
-    fn as_ref(&self) -> &T {
+impl<'a, A: Asset> AsRef<A> for AssetRef<'a, A> {
+    fn as_ref(&self) -> &A {
         &self
     }
 }
@@ -235,7 +237,6 @@ pub trait RawResourceLoader {
     type Raw: RawResource;
 
     fn load(path: &Path) -> Result<Self::Raw>;
-    fn load_async(path: &Path) -> TaskResult<Result<Self::Raw>>;
 }
 
 /// Raw resource baker interface.
@@ -268,7 +269,8 @@ fn serialize_asset<A: Asset + Encode>(asset: &A, absolute_path: &PathBuf) -> Res
 }
 
 fn deserialize_asset<A: Asset + Encode + DeserializeOwned>(absolute_path: &PathBuf) -> Result<A> {
-    let mmap = load_with_memory_mapping(absolute_path)?;
+    let absolute_path = absolute_path.canonicalize()?;
+    let mmap = load_with_memory_mapping(&absolute_path)?;
 
     let (asset, _): (A, usize) = bincode::serde::decode_from_slice(&mmap, bincode::config::standard())
         .expect(&format!("Failed to deserialize asset {:?}", absolute_path));

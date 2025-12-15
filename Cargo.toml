@@ -8,7 +8,6 @@ members = [
 
     "zenith",
     "zenith-core",
-    "zenith-task",
     "zenith-render",
     "zenith-rendergraph",
     "zenith-renderer",
@@ -33,15 +32,13 @@ miette = "7.6.0"
 naga_oil = "0.18.0"
 include_absolute_path = "0.1.7"
 derive_builder = "0.20.2"
-crossbeam-queue = "0.3"
 parking_lot = "0.12"
 seq-macro = "0.3.6"
 image = "0.25"
-smol = "2.0.2"
 bincode = "2.0.1"
-glob = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 memmap2 = "0.9"
-naga = { version = "25.0.1", features = ["serialize", "deserialize"] }
 paste = "1.0.15"
 pollster = "0.4"
+puffin_http = "0.16.1"
+profiling = { version = "1.0.17", features = ["profile-with-puffin"] }

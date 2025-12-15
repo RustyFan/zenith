@@ -1,6 +1,7 @@
 ﻿use std::sync::Arc;
 use log::info;
 use winit::application::ApplicationHandler;
+use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
@@ -19,10 +20,14 @@ pub struct EngineLoop<A> {
 
 impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let window_attributes = Window::default_attributes()
+            .with_min_inner_size(LogicalSize::new(32, 32))
+            .with_inner_size(LogicalSize::new(1920, 1080));
+
         // TODO: only renderable app should create window
         let main_window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes())
+                .create_window(window_attributes)
                 .unwrap(),
         );
 
@@ -34,6 +39,7 @@ impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
         main_window.request_redraw();
     }
 
+    #[profiling::function]
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         let engine = self.engine.as_mut().unwrap();
         if engine.should_exit() {
@@ -43,6 +49,7 @@ impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
         self.process_window_event(&event);
     }
 
+    #[profiling::function]
     fn device_event(&mut self, event_loop: &ActiveEventLoop, _device_id: DeviceId, event: DeviceEvent) {
         let engine = self.engine.as_mut().unwrap();
         if engine.should_exit() {
@@ -72,7 +79,8 @@ impl<A: RenderableApp> EngineLoop<A> {
         event_loop.run_app(&mut self)?;
         Ok(())
     }
-    
+
+    #[profiling::function("main_loop")]
     fn process_window_event(&mut self, event: &WindowEvent) {
         // TODO: multi-window support
         self.app.on_window_event(event, self.engine.as_ref().unwrap().main_window.as_ref());
@@ -99,11 +107,14 @@ impl<A: RenderableApp> EngineLoop<A> {
 
                 engine.render(app);
                 engine.main_window.request_redraw();
+
+                profiling::finish_frame!();
             }
             _ => {}
         }
     }
 
+    #[profiling::function]
     fn tick(&mut self) {
         if self.should_exit {
             return;

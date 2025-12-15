@@ -1,20 +1,24 @@
-﻿use std::sync::Arc;
+﻿use crate::RenderableApp;
+use std::sync::Arc;
 use winit::window::Window;
-use zenith_render::{RenderDevice, PipelineCache};
+use zenith_render::{PipelineCache, RenderDevice};
 use zenith_rendergraph::{RenderGraphBuilder, RenderResource, TextureState};
-use crate::RenderableApp;
 
 pub struct Engine {
     pub main_window: Arc<Window>,
     pub render_device: RenderDevice,
     
     pipeline_cache: PipelineCache,
+    _puffin_server: puffin_http::Server,
 
     pub(crate) should_exit: bool,
 }
 
 impl Engine {
     pub fn new(main_window: Arc<Window>) -> Result<Self, anyhow::Error> {
+        let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
+        let _puffin_server = puffin_http::Server::new(&server_addr)?;
+
         let render_device = RenderDevice::new(main_window.clone())?;
         let pipeline_cache = PipelineCache::new();
 
@@ -23,14 +27,17 @@ impl Engine {
             render_device,
 
             pipeline_cache,
+            _puffin_server,
 
             should_exit: false,
         })
     }
 
+    #[profiling::function]
     pub fn tick(&mut self, _delta_time: f32) {
     }
 
+    #[profiling::function]
     pub fn render<A: RenderableApp>(&mut self, app: &mut A) {
         let device = self.render_device.device();
         let queue = self.render_device.queue();
@@ -90,6 +97,7 @@ impl Engine {
         }
     }
 
+    #[profiling::function]
     pub fn resize(&mut self, width: u32, height: u32) {
         self.render_device.resize(width, height);
     }

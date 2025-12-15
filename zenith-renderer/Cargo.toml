@@ -9,6 +9,7 @@ bytemuck.workspace  = true
 glam.workspace = true
 log.workspace = true
 gltf.workspace = true
+profiling.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-asset = { path = "../zenith-asset" }

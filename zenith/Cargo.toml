@@ -7,14 +7,14 @@ edition = "2021"
 winit = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
-wgpu = { workspace = true } 
-smol.workspace = true
+wgpu = { workspace = true }
 paste.workspace = true
 pollster.workspace = true
+profiling.workspace = true
+puffin_http.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-asset = { path = "../zenith-asset" }
-zenith-task = { path = "../zenith-task" }
 zenith-render = { path = "../zenith-render" }
 zenith-renderer = { path = "../zenith-renderer" }
 zenith-rendergraph = { path = "../zenith-rendergraph" }

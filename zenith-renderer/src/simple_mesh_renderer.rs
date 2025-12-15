@@ -59,6 +59,7 @@ impl MeshRenderData {
 }
 
 impl SimpleMeshRenderer {
+    #[profiling::function]
     pub fn from_model(device: &RenderDevice, data: MeshRenderData) -> Self {
         let mat = data.material.get().unwrap();
         let material = Self::create_material_resources(device, &mat);
@@ -83,7 +84,8 @@ impl SimpleMeshRenderer {
     pub fn set_base_color(&mut self, color: [f32; 3]) {
         self.base_color = color;
     }
-    
+
+    #[profiling::function]
     fn create_mesh_buffers(device: &RenderDevice, mesh: &Mesh) -> MeshBuffers {
         let device = device.device();
 
@@ -106,7 +108,8 @@ impl SimpleMeshRenderer {
             // _name: mesh.name.clone(),
         }
     }
-    
+
+    #[profiling::function]
     fn create_material_resources(render_device: &RenderDevice, material: &Material) -> MaterialResources {
         let device = render_device.device();
         
@@ -171,7 +174,8 @@ impl SimpleMeshRenderer {
             _material: material.clone(),
         }
     }
-    
+
+    #[profiling::function]
     fn create_default_texture(render_device: &RenderDevice) -> (RenderResource<wgpu::Texture>, Arc<wgpu::Sampler>) {
         let device = render_device.device();
         
@@ -224,7 +228,8 @@ impl SimpleMeshRenderer {
         
         (RenderResource::new(texture), Arc::new(sampler))
     }
-    
+
+    #[profiling::function]
     fn create_shader() -> GraphicShader {
         define_shader! {
             let shader = Graphic(mesh, "mesh.wgsl", ShaderEntry::Mesh, wgpu::VertexStepMode::Vertex, 1, 1)
@@ -232,6 +237,7 @@ impl SimpleMeshRenderer {
         shader.unwrap()
     }
 
+    #[profiling::function]
     pub fn build_render_graph(
         &self, 
         builder: &mut RenderGraphBuilder, 

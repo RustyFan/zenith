@@ -16,3 +16,5 @@ glam = { workspace = true }
 derive_more.workspace = true
 winit.workspace = true
 memmap2.workspace = true
+profiling.workspace = true
+puffin_http.workspace = true

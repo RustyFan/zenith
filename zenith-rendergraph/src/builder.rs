@@ -134,6 +134,7 @@ impl RenderGraphBuilder {
     //     }
     // }
 
+    #[profiling::function]
     pub fn build(self, device: &wgpu::Device) -> RenderGraph {
         let resources = self.initial_resources
             .into_iter()

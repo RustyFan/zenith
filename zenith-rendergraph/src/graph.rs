@@ -98,6 +98,7 @@ impl RenderGraph {
 
     }
 
+    #[profiling::function]
     pub fn compile(
         self,
         device: &wgpu::Device,
@@ -125,6 +126,7 @@ impl RenderGraph {
         }
     }
 
+    #[profiling::function]
     fn create_graphic_pipeline(
         &self,
         node_name: &str,
@@ -209,6 +211,7 @@ pub struct CompiledRenderGraph {
 }
 
 impl CompiledRenderGraph {
+    #[profiling::function]
     pub fn execute(self, device: &wgpu::Device, queue: &wgpu::Queue) -> PresentableRenderGraph {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("render graph main command encoder"),
@@ -218,51 +221,64 @@ impl CompiledRenderGraph {
         // let mut compute_pipe_index = 0u32;
 
         for node in self.nodes.into_iter() {
-            Self::transition_resources(
-                &mut encoder,
-                &self.resources,
-                node
-                    .inputs
-                    .iter()
-                    .map(|access| (access.id, access.access))
-                    .chain(node.outputs.iter().map(|access| (access.id, access.access)))
-            );
+            {
+                profiling::scope!("rendergraph::barriers");
+                Self::transition_resources(
+                    &mut encoder,
+                    &self.resources,
+                    node
+                        .inputs
+                        .iter()
+                        .map(|access| (access.id, access.access))
+                        .chain(node.outputs.iter().map(|access| (access.id, access.access)))
+                );
+            }
 
-            match node.pipeline_state {
-                NodePipelineState::Graphic { pipeline_desc, mut job_functor } => {
-                    let name = node.name;
-                    let pipeline = self.graphic_pipelines.get(graphic_pipe_index as usize).unwrap();
-                    graphic_pipe_index += 1;
+            {
+                match node.pipeline_state {
+                    NodePipelineState::Graphic { pipeline_desc, mut job_functor } => {
+                        let name = node.name;
+                        let pipeline = self.graphic_pipelines.get(graphic_pipe_index as usize).unwrap();
+                        graphic_pipe_index += 1;
 
-                    if let Some(record) = job_functor.take() {
-                        let mut ctx = GraphicNodeExecutionContext {
-                            name: name.as_str(),
-                            pipeline_desc: &pipeline_desc,
-                            device,
-                            queue,
-                            resources: &self.resources,
-                            pipeline: pipeline.clone(),
-                        };
-                        record(&mut ctx, &mut encoder);
-                    } else {
-                        warn!("Missing job of graphic node {}!", name);
+                        if let Some(record) = job_functor.take() {
+                            let mut ctx = GraphicNodeExecutionContext {
+                                name: name.as_str(),
+                                pipeline_desc: &pipeline_desc,
+                                device,
+                                queue,
+                                resources: &self.resources,
+                                pipeline: pipeline.clone(),
+                            };
+                            let scope = || {
+                                profiling::scope!(format!("rendergraph::node_recording [{}]", name));
+                                record(&mut ctx, &mut encoder);
+                            };
+                            scope();
+                        } else {
+                            warn!("Missing job of graphic node {}!", name);
+                        }
                     }
-                }
-                NodePipelineState::Compute{ .. } => {
-                    // compute_pipe_index += 1;
-                    unimplemented!()
-                }
-                NodePipelineState::Lambda{ mut job_functor } => {
-                    let name = node.name;
+                    NodePipelineState::Compute{ .. } => {
+                        // compute_pipe_index += 1;
+                        unimplemented!()
+                    }
+                    NodePipelineState::Lambda{ mut job_functor } => {
+                        let name = node.name;
 
-                    if let Some(record) = job_functor.take() {
-                        let mut ctx = LambdaNodeExecutionContext {
-                            queue,
-                            resources: &self.resources,
-                        };
-                        record(&mut ctx, &mut encoder);
-                    } else {
-                        warn!("Missing job of lambda node {}!", name);
+                        if let Some(record) = job_functor.take() {
+                            let mut ctx = LambdaNodeExecutionContext {
+                                queue,
+                                resources: &self.resources,
+                            };
+                            let scope = || {
+                                profiling::scope!(format!("rendergraph::node_recording [{}]", name));
+                                record(&mut ctx, &mut encoder);
+                            };
+                            scope();
+                        } else {
+                            warn!("Missing job of lambda node {}!", name);
+                        }
                     }
                 }
             }
@@ -536,6 +552,7 @@ impl<'node> LambdaNodeExecutionContext<'node> {
 pub struct PresentableRenderGraph {}
 
 impl PresentableRenderGraph {
+    #[profiling::function]
     pub fn present(self, present_surface: wgpu::SurfaceTexture) -> Result<(), Box<anyhow::Error>> {
         present_surface.present();
 

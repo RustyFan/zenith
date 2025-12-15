@@ -127,6 +127,7 @@ impl GraphicShader {
     }
 
     /// Create a shader module.
+    #[profiling::function]
     pub fn create_shader_module(
         &self,
         device: &wgpu::Device,
@@ -138,6 +139,11 @@ impl GraphicShader {
             self.reflection_info,
             shader_defs,
             |path| {
+                profiling::scope!("GraphicShader::load_shader");
+
+                #[cfg(target_os = "windows")]
+                let path = path.replace("/", "\\");
+
                 let path = PathBuf::from(path);
                 path.canonicalize()?;
                 std::fs::read_to_string(path)

@@ -5,7 +5,6 @@ use zenith_core::file::load_with_memory_mapping;
 use zenith_core::log::info;
 use crate::render::{Material, MaterialBuilder, Mesh, MeshBuilder, MeshCollection, TextureBuilder, TextureFormat, Vertex};
 use crate::{Asset, RawResourceBaker, AssetRegistry, RawResource, RawResourceLoader, AssetUrl, serialize_asset};
-use zenith_task::{submit, TaskResult};
 
 #[derive(Debug, Clone)]
 pub struct GltfLoader;
@@ -32,6 +31,7 @@ impl RawResource for RawGltf {
 impl RawResourceLoader for GltfLoader {
     type Raw = RawGltf;
 
+    #[profiling::function]
     fn load(path: &Path) -> Result<Self::Raw> {
         let mmap = load_with_memory_mapping(path)?;
 
@@ -46,16 +46,8 @@ impl RawResourceLoader for GltfLoader {
         };
         
         Self::load_gltf(path, &mut raw)?;
-        
+
         Ok(raw)
-    }
-
-    fn load_async(raw_content_path: &Path) -> TaskResult<Result<Self::Raw>> {
-        let path = raw_content_path.to_owned();
-
-        submit(move || {
-            Self::load(&path)
-        })
     }
 }
 
@@ -68,6 +60,7 @@ impl RawGltfProcessor {
 }
 
 impl RawGltfProcessor {
+    #[profiling::function]
     fn process_node(
         base_directory: &PathBuf,
         node: &gltf::Node,
@@ -97,6 +90,7 @@ impl RawGltfProcessor {
         Ok(())
     }
 
+    #[profiling::function]
     fn bake_mesh(
         primitive: &Primitive,
         buffers: &[BufferData],
@@ -153,6 +147,7 @@ impl RawGltfProcessor {
         Ok(mesh)
     }
 
+    #[profiling::function]
     fn generate_flat_normals(positions: &Vec<[f32; 3]>) -> Result<Vec<[f32; 3]>> {
         if positions.len() % 3 != 0 {
             return Err(anyhow!("Position count must be divisible by 3 for flat normals"));
@@ -175,6 +170,7 @@ impl RawGltfProcessor {
         Ok(normals)
     }
 
+    #[profiling::function]
     fn bake_materials(gltf: &Document, images: &[ImageData]) -> Result<Vec<Material>> {
         let mut materials = Vec::new();
 
@@ -241,6 +237,7 @@ impl RawGltfProcessor {
         Ok(materials)
     }
 
+    #[profiling::function]
     fn create_texture_from_gltf_image(image_data: &ImageData) -> Result<crate::render::Texture> {
         // Convert GLTF format to wgpu-compatible format and pixels
         let (wgpu_pixels, texture_format) = Self::convert_gltf_pixels_to_wgpu(image_data);
@@ -254,6 +251,7 @@ impl RawGltfProcessor {
             .map_err(|e| anyhow!("Failed to build texture: {}", e))
     }
 
+    #[profiling::function]
     fn convert_gltf_pixels_to_wgpu(data: &ImageData) -> (Vec<u8>, TextureFormat) {
         match data.format {
             gltf::image::Format::R8G8B8 => {
@@ -311,6 +309,7 @@ impl RawGltfProcessor {
 impl RawResourceBaker for RawGltfProcessor {
     type Raw = RawGltf;
 
+    #[profiling::function]
     fn bake(raw: Self::Raw, registry: &AssetRegistry, base_directory: &PathBuf, url: &AssetUrl) -> Result<()> {
         let RawGltf {
             gltf,
@@ -360,6 +359,7 @@ impl RawResourceBaker for RawGltfProcessor {
 }
 
 impl GltfLoader {
+    #[profiling::function]
     fn load_gltf<P: AsRef<Path>>(path: P, raw: &mut RawGltf) -> Result<()> {
         let base_dir = path.as_ref().parent().ok_or(anyhow!("Invalid gltf load path."))?;
 
@@ -430,6 +430,7 @@ impl GltfLoader {
         Ok(())
     }
 
+    #[profiling::function]
     fn decode_image(data: &[u8], filename: &str) -> Result<ImageData> {
         // Fast path: try to guess format from magic bytes first (no file extension parsing)
         let format = image::guess_format(data).unwrap_or_else(|_| {

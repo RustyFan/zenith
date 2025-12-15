@@ -15,9 +15,10 @@ pub struct RenderDevice {
 }
 
 impl RenderDevice {
+    #[profiling::function]
     pub fn new(window: Arc<Window>) -> Result<Self, anyhow::Error> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
+            backends: wgpu::Backends::VULKAN,
             flags: wgpu::InstanceFlags::VALIDATION,
             ..Default::default()
         });
@@ -89,6 +90,7 @@ impl RenderDevice {
 
     /// Acquire next frame from swapchain.
     /// If acquire fails, this function will panic.
+    #[profiling::function]
     pub fn acquire_next_frame(&self) -> wgpu::SurfaceTexture {
         match self.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -113,6 +115,7 @@ impl RenderDevice {
     }
 
     /// Resize the swapchain with specific width and height.
+    #[profiling::function]
     pub fn resize(&mut self, width: u32, height: u32) {
         self.surface_config.width = width.max(1);
         self.surface_config.height = height.max(1);
