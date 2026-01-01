@@ -1,7 +1,7 @@
 ﻿use std::sync::Arc;
 use log::info;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
@@ -9,20 +9,42 @@ use crate::app::{RenderableApp};
 use crate::Engine;
 
 pub struct EngineLoop<A> {
-    engine: Option<Engine>,
     app: A,
+    engine: Option<Engine>,
 
     frame_count: u64,
-    last_tick: std::time::Instant,
+    last_tick_time: std::time::Instant,
     last_time_printed: std::time::Instant,
-    should_exit: bool,
 }
 
 impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_attributes = Window::default_attributes()
+        let window_size = LogicalSize::new(1920, 1080);
+
+        // Calculate center position on primary monitor
+        let position = event_loop.primary_monitor()
+            .or_else(|| event_loop.available_monitors().next())
+            .map(|monitor| {
+                let monitor_size = monitor.size();
+                let monitor_pos = monitor.position();
+                let scale_factor = monitor.scale_factor();
+
+                // Convert logical window size to physical pixels
+                let physical_window_width = (window_size.width as f64 * scale_factor) as i32;
+                let physical_window_height = (window_size.height as f64 * scale_factor) as i32;
+
+                let x = monitor_pos.x + (monitor_size.width as i32 - physical_window_width) / 2;
+                let y = monitor_pos.y + (monitor_size.height as i32 - physical_window_height) / 2;
+                PhysicalPosition::new(x, y)
+            });
+
+        let mut window_attributes = Window::default_attributes()
             .with_min_inner_size(LogicalSize::new(32, 32))
-            .with_inner_size(LogicalSize::new(1920, 1080));
+            .with_inner_size(window_size);
+
+        if let Some(pos) = position {
+            window_attributes = window_attributes.with_position(pos);
+        }
 
         // TODO: only renderable app should create window
         let main_window = Arc::new(
@@ -31,9 +53,9 @@ impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
                 .unwrap(),
         );
 
-        let mut engine = Engine::new(main_window.clone()).unwrap();
+        let engine = Engine::new(main_window.clone()).unwrap();
 
-        self.app.prepare(&mut engine.render_device, main_window.clone()).unwrap();
+        self.app.prepare(&engine.render_device, main_window.clone()).unwrap();
         self.engine = Some(engine);
 
         main_window.request_redraw();
@@ -44,6 +66,7 @@ impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
         let engine = self.engine.as_mut().unwrap();
         if engine.should_exit() {
             event_loop.exit();
+            engine.render_device.wait_until_idle().unwrap();
         }
 
         self.process_window_event(&event);
@@ -54,6 +77,7 @@ impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
         let engine = self.engine.as_mut().unwrap();
         if engine.should_exit() {
             event_loop.exit();
+            engine.render_device.wait_until_idle().unwrap();
         }
         
         self.app.on_device_event(&event);
@@ -67,9 +91,8 @@ impl<A: RenderableApp> EngineLoop<A> {
             app,
 
             frame_count: 0u64,
-            last_tick: std::time::Instant::now(),
+            last_tick_time: std::time::Instant::now(),
             last_time_printed: std::time::Instant::now(),
-            should_exit: false,
         })
     }
 
@@ -97,7 +120,7 @@ impl<A: RenderableApp> EngineLoop<A> {
             WindowEvent::CloseRequested => {
                 let engine = self.engine.as_mut().unwrap();
 
-                engine.should_exit = true;
+                engine.request_exit();
             }
             WindowEvent::RedrawRequested => {
                 self.tick();
@@ -108,7 +131,7 @@ impl<A: RenderableApp> EngineLoop<A> {
                 engine.render(app);
                 engine.main_window.request_redraw();
 
-                profiling::finish_frame!();
+                // profiling::finish_frame!();
             }
             _ => {}
         }
@@ -116,18 +139,22 @@ impl<A: RenderableApp> EngineLoop<A> {
 
     #[profiling::function]
     fn tick(&mut self) {
-        if self.should_exit {
-            return;
-        }
-
         let delta_time = {
             let now = std::time::Instant::now();
-            let delta_time = now - self.last_tick;
-            self.last_tick = now;
+            let delta_time = now - self.last_tick_time;
+            self.last_tick_time = now;
 
             let last_time_print_elapsed = (now - self.last_time_printed).as_secs_f32();
             if last_time_print_elapsed > 1. {
-                info!("Frame rate: {} fps", self.frame_count as f32 / last_time_print_elapsed);
+                let fps: u32 = (self.frame_count as f32 / last_time_print_elapsed).ceil() as u32;
+                let engine = self.engine.as_ref().unwrap();
+                info!(
+                    "Frame rate: {} fps, pipelines: {}, deferred: {}b/{}t",
+                    fps,
+                    engine.pipeline_cache_size(),
+                    engine.render_device.deferred_buffer_count(),
+                    engine.render_device.deferred_texture_count()
+                );
                 self.last_time_printed = now;
                 self.frame_count = 0;
             }
@@ -137,7 +164,7 @@ impl<A: RenderableApp> EngineLoop<A> {
 
         let engine = self.engine.as_mut().unwrap();
         let app = &mut self.app;
-        
+
         engine.tick(delta_time);
         app.tick(delta_time);
 

@@ -93,15 +93,15 @@ impl TextureFormat {
         }
     }
 
-    pub fn to_wgpu_format(&self) -> wgpu::TextureFormat {
+    pub fn to_vk_format(&self) -> ash::vk::Format {
         match self {
-            TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,
-            TextureFormat::R8G8 => wgpu::TextureFormat::Rg8Unorm,
-            TextureFormat::R8G8B8A8 => wgpu::TextureFormat::Rgba8UnormSrgb,
-            TextureFormat::R16 => wgpu::TextureFormat::R16Unorm,
-            TextureFormat::R16G16 => wgpu::TextureFormat::Rg16Unorm,
-            TextureFormat::R16G16B16A16 => wgpu::TextureFormat::Rgba16Unorm,
-            TextureFormat::R32G32B32A32Float => wgpu::TextureFormat::Rgba32Float,
+            TextureFormat::R8 => ash::vk::Format::R8_UNORM,
+            TextureFormat::R8G8 => ash::vk::Format::R8G8_UNORM,
+            TextureFormat::R8G8B8A8 => ash::vk::Format::R8G8B8A8_SRGB,
+            TextureFormat::R16 => ash::vk::Format::R16_UNORM,
+            TextureFormat::R16G16 => ash::vk::Format::R16G16_UNORM,
+            TextureFormat::R16G16B16A16 => ash::vk::Format::R16G16B16A16_UNORM,
+            TextureFormat::R32G32B32A32Float => ash::vk::Format::R32G32B32A32_SFLOAT,
         }
     }
     

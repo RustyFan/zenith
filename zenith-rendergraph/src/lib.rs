@@ -1,11 +1,16 @@
 mod builder;
 mod node;
 mod graph;
-mod resource;
 mod interface;
+mod resource;
 
-pub use interface::{Buffer, Texture, BufferDesc, TextureDesc, BufferState, TextureState, RenderResource};
-pub use resource::{RenderGraphResource, RenderGraphResourceAccess};
+pub use resource::{
+    RenderGraphResource, RenderGraphResourceAccess, GraphResource
+};
 pub use builder::{RenderGraphBuilder, GraphicNodeBuilder, GraphicPipelineBuilder};
-pub use node::{RenderGraphNode, GraphicPipelineDescriptor, ColorInfo, ColorInfoBuilder, ColorInfoBuilderError, DepthStencilInfo, DepthStencilInfoBuilder, DepthStencilInfoBuilderError};
-pub use graph::{RenderGraph, CompiledRenderGraph, PresentableRenderGraph, GraphicNodeExecutionContext, PipelineBinder};
+pub use node::{RenderGraphNode, GraphicPipelineDescriptor, ColorInfo, DepthStencilInfo, VertexBindingDesc, VertexAttributeDesc};
+pub use graph::{
+    RenderGraph, CompiledRenderGraph, RetiredRenderGraph,
+    GraphicNodeExecutionContext, LambdaNodeExecutionContext,
+};
+// pub use interface::{Buffer, Texture, BufferDesc, TextureDesc, BufferState, TextureState};

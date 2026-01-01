@@ -10,11 +10,11 @@ derive_more.workspace = true
 parking_lot.workspace = true
 derive_builder.workspace = true
 glam.workspace = true
-wgpu.workspace = true
 serde = { workspace = true, features = ["derive"] }
 image.workspace = true
 gltf.workspace = true
 bincode = { workspace = true, features = ["serde"] }
 profiling.workspace = true
+ash.workspace = true
 
 zenith-core = { path = "../zenith-core" }

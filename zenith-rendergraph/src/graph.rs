@@ -1,90 +1,117 @@
-use crate::interface::RenderResource;
-use std::cell::{Cell};
-use bytemuck::NoUninit;
-use derive_more::From;
-use log::{warn};
-use zenith_core::collections::SmallVec;
-use zenith_render::PipelineCache;
+//! Render graph execution and resource management.
+
+use crate::interface::{Buffer, BufferState, ResourceState, Texture, TextureState};
 use crate::node::{NodePipelineState, RenderGraphNode};
-use crate::interface::{Buffer, BufferState, GraphResourceAccess, Texture, TextureState};
+use crate::resource::{
+    GraphResourceId, GraphResourceView, RenderGraphResourceAccess,
+};
 use crate::GraphicPipelineDescriptor;
-use crate::resource::{GraphResourceId, GraphResourceView, GraphResourceState, RenderGraphResourceAccess};
+use anyhow::anyhow;
+use std::cell::Cell;
+use std::sync::Arc;
+use zenith_core::collections::SmallVec;
+use zenith_rhi::swapchain::SwapchainWindow;
+use zenith_rhi::{CommandPool, Semaphore};
+use zenith_rhi::{buffer_barrier, texture_barrier, vk, ColorBlendAttachment, GraphicPipeline, GraphicPipelineKey, PipelineCache, RenderDevice, ShaderResourceBinder, Swapchain, VertexAttribute, VertexBinding};
 
 pub(crate) enum ResourceStorage {
     ManagedBuffer {
         name: String,
         resource: Buffer,
-        state_tracker: ResourceStateTracker<BufferState>
+        state_tracker: BufferStateTracker,
     },
     ManagedTexture {
         name: String,
         resource: Texture,
-        state_tracker: ResourceStateTracker<TextureState>
+        state_tracker: TextureStateTracker,
     },
     ImportedBuffer {
         name: String,
-        resource: RenderResource<Buffer>,
-        state_tracker: ResourceStateTracker<BufferState>
+        resource: Arc<Buffer>,
+        state_tracker: BufferStateTracker,
     },
     ImportedTexture {
         name: String,
-        resource: RenderResource<Texture>,
-        state_tracker: ResourceStateTracker<TextureState>
+        resource: Arc<Texture>,
+        state_tracker: TextureStateTracker,
     },
 }
 
 impl ResourceStorage {
     pub(crate) fn name(&self) -> &str {
         match self {
-            ResourceStorage::ManagedBuffer { name, .. } => &name,
-            ResourceStorage::ManagedTexture { name, .. } => &name,
-            ResourceStorage::ImportedBuffer { name, .. } => &name,
-            ResourceStorage::ImportedTexture { name, .. } => &name,
+            ResourceStorage::ManagedBuffer { name, .. } => name,
+            ResourceStorage::ManagedTexture { name, .. } => name,
+            ResourceStorage::ImportedBuffer { name, .. } => name,
+            ResourceStorage::ImportedTexture { name, .. } => name,
         }
     }
 
+    pub(crate) fn is_buffer(&self) -> bool {
+        match self {
+            ResourceStorage::ManagedBuffer { .. } | ResourceStorage::ImportedBuffer { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_texture(&self) -> bool {
+        match self {
+            ResourceStorage::ManagedTexture { .. } | ResourceStorage::ImportedTexture { .. } => true,
+            _ => false,
+        }
+    }
+
+
     pub(crate) fn as_buffer(&self) -> &Buffer {
         match self {
-            ResourceStorage::ManagedBuffer { resource, .. } => { &resource }
-            ResourceStorage::ImportedBuffer { resource, .. } => { &resource }
-            ResourceStorage::ManagedTexture { .. } | ResourceStorage::ImportedTexture { .. } => {
-                unreachable!("Expect buffer, but resource is a texture!");
-            }
+            ResourceStorage::ManagedBuffer { resource, .. } => resource,
+            ResourceStorage::ImportedBuffer { resource, .. } => resource,
+            _ => unreachable!("Expected buffer, but resource is a texture!"),
         }
     }
 
     pub(crate) fn as_texture(&self) -> &Texture {
         match self {
-            ResourceStorage::ManagedTexture { resource, .. } => { &resource }
-            ResourceStorage::ImportedTexture { resource, .. } => { &resource }
-            ResourceStorage::ManagedBuffer { .. } | ResourceStorage::ImportedBuffer { .. } => {
-                unreachable!("Expect texture, but resource is a buffer!");
-            }
+            ResourceStorage::ManagedTexture { resource, .. } => resource,
+            ResourceStorage::ImportedTexture { resource, .. } => resource,
+            _ => unreachable!("Expected texture, but resource is a buffer!"),
         }
     }
 }
 
-#[derive(From)]
-pub(crate) struct ResourceStateTracker<T: GraphResourceState> {
-    current_state: Cell<T>,
+pub(crate) struct BufferStateTracker {
+    current_access: Cell<BufferState>,
 }
 
-impl<T: GraphResourceState> ResourceStateTracker<T> {
-    #[allow(dead_code)]
-    pub(crate) fn current(&self) -> T {
-        self.current_state.get()
+impl BufferStateTracker {
+    pub(crate) fn new(access: BufferState) -> Self {
+        Self { current_access: Cell::new(access) }
     }
 
-    pub(crate) fn should_transition_to(&self, next_state: T, skip_if_same: bool) -> bool {
-        if skip_if_same {
-            self.current_state.get() != next_state
-        } else {
-            true
-        }
+    pub(crate) fn current(&self) -> BufferState {
+        self.current_access.get()
     }
 
-    pub(crate) fn transition_to(&self, next_state: T) {
-        self.current_state.set(next_state);
+    pub(crate) fn transition_to(&self, next_access: BufferState) {
+        self.current_access.set(next_access);
+    }
+}
+
+pub(crate) struct TextureStateTracker {
+    current_access: Cell<TextureState>,
+}
+
+impl TextureStateTracker {
+    pub(crate) fn new(state: TextureState) -> Self {
+        Self { current_access: Cell::new(state) }
+    }
+
+    pub(crate) fn current(&self) -> TextureState {
+        self.current_access.get()
+    }
+
+    pub(crate) fn transition_to(&self, next_state: TextureState) {
+        self.current_access.set(next_state);
     }
 }
 
@@ -95,473 +122,635 @@ pub struct RenderGraph {
 
 impl RenderGraph {
     pub fn validate(&self) {
-
+        // TODO: Validate graph structure
     }
 
     #[profiling::function]
     pub fn compile(
-        self,
-        device: &wgpu::Device,
+        mut self,
+        device: &RenderDevice,
         pipeline_cache: &mut PipelineCache,
     ) -> CompiledRenderGraph {
         let mut graphic_pipelines = vec![];
-        let _compute_pipelines = vec![];
 
         for node in &self.nodes {
             match &node.pipeline_state {
                 NodePipelineState::Graphic { pipeline_desc, .. } => {
-                    let pipeline = self.create_graphic_pipeline(node.name(), device, pipeline_cache, pipeline_desc);
-                    graphic_pipelines.push(pipeline);
+                    if pipeline_desc.valid() {
+                        let pipeline = self.create_graphic_pipeline(pipeline_cache, pipeline_desc);
+                        graphic_pipelines.push(Some(pipeline));
+                    } else {
+                        graphic_pipelines.push(None);
+                    }
                 }
-                NodePipelineState::Compute { .. } => { unimplemented!() }
+                NodePipelineState::Compute { .. } => unimplemented!(),
                 NodePipelineState::Lambda { .. } => {}
             }
         }
 
+        // find the first present node (i.e. first node which outputs to swapchain texture)
+        let first_present_node_index = self.nodes.iter()
+            .position(|node| {
+                node.outputs.iter()
+                    .filter_map(|output| {
+                        let res = utility::resource_storage_ref(&self.resources, output.id);
+                        match res {
+                            ResourceStorage::ManagedTexture { resource, .. }  => {
+                                Some(resource)
+                            }
+                            ResourceStorage::ImportedTexture { resource, .. } => {
+                                Some(resource.as_ref())
+                            }
+                            _ => None,
+                        }
+                    })
+                    .any(|tex| tex.is_swapchain_texture())
+            });
+
+        let (serial_nodes, present_nodes) = if let Some(present_node_index) = first_present_node_index {
+            (self.nodes.drain(0..present_node_index).collect(), self.nodes)
+        } else {
+            (self.nodes, vec![])
+        };
+
         CompiledRenderGraph {
-            nodes: self.nodes,
+            serial_nodes,
+            present_nodes,
             resources: self.resources,
+            graphic_pipe_index: 0,
             graphic_pipelines,
-            _compute_pipelines,
         }
     }
 
     #[profiling::function]
     fn create_graphic_pipeline(
         &self,
-        node_name: &str,
-        device: &wgpu::Device,
         pipeline_cache: &mut PipelineCache,
         desc: &GraphicPipelineDescriptor,
-    ) -> wgpu::RenderPipeline {
-        let color_attachments = desc.color_attachments
+    ) -> Arc<GraphicPipeline> {
+        let vertex_shader = desc.vertex_shader.as_ref();
+
+        let color_attachments: Vec<ColorBlendAttachment> = desc
+            .color_attachments
             .iter()
-            .map(|(resource, color_info)| {
-                let storage = utility::resource_storage_ref(&self.resources, resource.id);
-
-                match storage {
-                    ResourceStorage::ManagedTexture { resource, .. } => {
-                        wgpu::ColorTargetState {
-                            format: resource.format(),
-                            blend: color_info.blend,
-                            write_mask: color_info.write_mask.unwrap_or(wgpu::ColorWrites::ALL),
-                        }
-                    }
-                    ResourceStorage::ImportedTexture { resource, .. } => {
-                        wgpu::ColorTargetState {
-                            format: resource.format(),
-                            blend: color_info.blend,
-                            write_mask: color_info.write_mask.unwrap_or(wgpu::ColorWrites::ALL),
-                        }
-                    }
-                    _ => unreachable!("Color attachment had bound to a non-texture resource!")
-                }
+            .map(|(_, color_info)| ColorBlendAttachment {
+                blend_enable: color_info.blend_enable,
+                src_color: color_info.src_color_blend,
+                dst_color: color_info.dst_color_blend,
+                color_op: color_info.color_blend_op,
+                src_alpha: color_info.src_alpha_blend,
+                dst_alpha: color_info.dst_alpha_blend,
+                alpha_op: color_info.alpha_blend_op,
+                write_mask: color_info.write_mask,
             })
-            .map(Some)
-            .collect::<SmallVec<[Option<wgpu::ColorTargetState>; 8]>>();
+            .collect();
 
-        let depth_stencil_attachment = desc.depth_stencil_attachment
-            .as_ref()
-            .map(|(resource, depth)| {
-                let storage = utility::resource_storage_ref(&self.resources, resource.id);
+        let color_formats: Vec<vk::Format> = desc
+            .color_attachments
+            .iter()
+            .map(|(resource, _)| {
+                utility::resource_storage_ref(&self.resources, resource.id).as_texture().format()
+            })
+            .collect();
 
-                match storage {
-                    ResourceStorage::ManagedTexture { resource, .. } => {
-                        wgpu::DepthStencilState {
-                            format: resource.format(),
-                            depth_write_enabled: depth.depth_write,
-                            depth_compare: depth.compare,
-                            stencil: depth.stencil.clone(),
-                            bias: depth.bias,
-                        }
-                    }
-                    ResourceStorage::ImportedTexture { resource, .. } => {
-                        wgpu::DepthStencilState {
-                            format: resource.format(),
-                            depth_write_enabled: depth.depth_write,
-                            depth_compare: depth.compare,
-                            stencil: depth.stencil.clone(),
-                            bias: depth.bias,
-                        }
-                    }
-                    _ => unreachable!()
-                }
-            });
+        let depth_format = desc.depth_stencil_attachment.as_ref().map(|(resource, _)| {
+            utility::resource_storage_ref(&self.resources, resource.id).as_texture().format()
+        });
 
-        let shader = desc
-            .shader
-            .as_ref()
-            .expect(&format!("Missing raster shader for node {}", node_name));
+        let depth_info = desc.depth_stencil_attachment.as_ref().map(|(_, info)| info);
 
-        pipeline_cache
-            .get_or_create_graphic_pipeline(
-                device,
-                shader,
-                &color_attachments,
-                depth_stencil_attachment)
-            .expect(&format!("Failed to compile graphic pipeline: {}", shader.name()))
+        // Convert vertex bindings from descriptor
+        let vertex_bindings: Vec<VertexBinding> = desc
+            .vertex_bindings
+            .iter()
+            .map(|b| VertexBinding {
+                binding: b.binding,
+                stride: b.stride,
+                input_rate: b.input_rate,
+            })
+            .collect();
+
+        // Convert vertex attributes from descriptor
+        let vertex_attributes: Vec<VertexAttribute> = desc
+            .vertex_attributes
+            .iter()
+            .map(|a| VertexAttribute {
+                location: a.location,
+                binding: a.binding,
+                format: a.format,
+                offset: a.offset,
+            })
+            .collect();
+
+        let key = GraphicPipelineKey {
+            vertex_shader: vertex_shader.unwrap().clone(),
+            fragment_shader: desc.fragment_shader.clone(),
+            vertex_bindings,
+            vertex_attributes,
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            primitive_restart: false,
+            polygon_mode: vk::PolygonMode::FILL,
+            cull_mode: vk::CullModeFlags::NONE,
+            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+            depth_clamp: false,
+            depth_bias_enable: false,
+            depth_bias_constant: 0,
+            depth_bias_slope: 0,
+            line_width: f32::to_bits(1.0) as i32,
+            samples: vk::SampleCountFlags::TYPE_1,
+            sample_shading: false,
+            min_sample_shading: 0,
+            depth_test: depth_info.map(|d| d.depth_test_enable).unwrap_or(false),
+            depth_write: depth_info.map(|d| d.depth_write_enable).unwrap_or(false),
+            depth_compare_op: depth_info.map(|d| d.depth_compare_op).unwrap_or(vk::CompareOp::LESS),
+            depth_bounds_test: false,
+            stencil_test: depth_info.map(|d| d.stencil_test_enable).unwrap_or(false),
+            stencil_front: Default::default(),
+            stencil_back: Default::default(),
+            color_attachments,
+            blend_constants: [0; 4],
+            dynamic_states: vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR],
+            color_formats,
+            depth_format,
+            stencil_format: None,
+            descriptor_set_layouts: desc.descriptor_set_layouts.iter().map(|l| l.handle()).collect(),
+            push_constant_size: desc.merged_reflection.as_ref().map(|r| r.push_constant_size).unwrap_or(0),
+        };
+
+        pipeline_cache.get_or_create(&key).expect("Failed to create graphics pipeline")
     }
 }
 
 pub struct CompiledRenderGraph {
-    nodes: Vec<RenderGraphNode>,
+    serial_nodes: Vec<RenderGraphNode>,
+    present_nodes: Vec<RenderGraphNode>,
     resources: Vec<ResourceStorage>,
-    graphic_pipelines: Vec<wgpu::RenderPipeline>,
-    _compute_pipelines: Vec<wgpu::ComputePipeline>,
+    graphic_pipe_index: u32,
+    graphic_pipelines: Vec<Option<Arc<GraphicPipeline>>>,
 }
 
 impl CompiledRenderGraph {
     #[profiling::function]
-    pub fn execute(self, device: &wgpu::Device, queue: &wgpu::Queue) -> PresentableRenderGraph {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render graph main command encoder"),
-        });
+    pub fn execute(&mut self, device: &RenderDevice) {
+        let cmd = device.execute_command_pool().allocate().expect("Failed to allocate command buffer");
+        unsafe {
+            device.handle().begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            ).unwrap();
+        }
 
-        let mut graphic_pipe_index = 0u32;
-        // let mut compute_pipe_index = 0u32;
+        let nodes: Vec<RenderGraphNode> = self.serial_nodes.drain(..).collect();
+        for node in nodes {
+            match node.pipeline_state {
+                NodePipelineState::Graphic { pipeline_desc, mut job_functor } => {
+                    {
+                        profiling::scope!("rendergraph::barriers");
+                        // TODO: facilitate VkSubpassDependency2 for render targets barriers inside renderpass
+                        let output_iter = node.outputs.iter()
+                            .map(|a| (a.id, a.access));
 
-        for node in self.nodes.into_iter() {
-            {
-                profiling::scope!("rendergraph::barriers");
-                Self::transition_resources(
-                    &mut encoder,
-                    &self.resources,
-                    node
-                        .inputs
-                        .iter()
-                        .map(|access| (access.id, access.access))
-                        .chain(node.outputs.iter().map(|access| (access.id, access.access)))
-                );
-            }
-
-            {
-                match node.pipeline_state {
-                    NodePipelineState::Graphic { pipeline_desc, mut job_functor } => {
-                        let name = node.name;
-                        let pipeline = self.graphic_pipelines.get(graphic_pipe_index as usize).unwrap();
-                        graphic_pipe_index += 1;
-
-                        if let Some(record) = job_functor.take() {
-                            let mut ctx = GraphicNodeExecutionContext {
-                                name: name.as_str(),
-                                pipeline_desc: &pipeline_desc,
-                                device,
-                                queue,
-                                resources: &self.resources,
-                                pipeline: pipeline.clone(),
-                            };
-                            let scope = || {
-                                profiling::scope!(format!("rendergraph::node_recording [{}]", name));
-                                record(&mut ctx, &mut encoder);
-                            };
-                            scope();
-                        } else {
-                            warn!("Missing job of graphic node {}!", name);
-                        }
+                        Self::transition_resources(
+                            device, cmd, &self.resources,
+                            node.inputs.iter()
+                                .map(|a| (a.id, a.access))
+                                .chain(output_iter),
+                        );
                     }
-                    NodePipelineState::Compute{ .. } => {
-                        // compute_pipe_index += 1;
-                        unimplemented!()
-                    }
-                    NodePipelineState::Lambda{ mut job_functor } => {
-                        let name = node.name;
 
-                        if let Some(record) = job_functor.take() {
-                            let mut ctx = LambdaNodeExecutionContext {
-                                queue,
-                                resources: &self.resources,
-                            };
-                            let scope = || {
-                                profiling::scope!(format!("rendergraph::node_recording [{}]", name));
-                                record(&mut ctx, &mut encoder);
-                            };
-                            scope();
-                        } else {
-                            warn!("Missing job of lambda node {}!", name);
-                        }
+                    let name = node.name;
+                    let pipeline = self.graphic_pipelines.get(self.graphic_pipe_index as usize).unwrap();
+                    let pipeline = pipeline.as_ref().map(|pipe| pipe.as_ref());
+                    self.graphic_pipe_index += 1;
+
+                    if let Some(record) = job_functor.take() {
+                        profiling::scope!("rendergraph::node_recording", &name);
+
+                        let mut ctx = GraphicNodeExecutionContext {
+                            name: name.as_str(),
+                            pipeline_desc: &pipeline_desc,
+                            device,
+                            resources: &self.resources,
+                            pipeline,
+                        };
+                        record(&mut ctx, cmd);
+                    } else {
+                        log::warn!("Missing job of graphic node {}!", name);
+                    }
+                }
+                NodePipelineState::Compute { .. } => unimplemented!(),
+                NodePipelineState::Lambda { mut job_functor } => {
+                    {
+                        profiling::scope!("rendergraph::barriers");
+                        let output_iter = node.outputs.iter()
+                            .map(|a| (a.id, a.access));
+
+                        Self::transition_resources(
+                            device, cmd, &self.resources,
+                            node.inputs.iter()
+                                .map(|a| (a.id, a.access))
+                                .chain(output_iter),
+                        );
+                    }
+
+                    let name = node.name;
+                    if let Some(record) = job_functor.take() {
+                        profiling::scope!("rendergraph::node_recording", &name);
+
+                        let mut ctx = LambdaNodeExecutionContext { device, resources: &self.resources };
+                        record(&mut ctx, cmd);
+                    } else {
+                        log::warn!("Missing job of lambda node {}!", name);
                     }
                 }
             }
         }
 
-        queue.submit(Some(encoder.finish()));
+        unsafe {
+            device.handle().end_command_buffer(cmd).unwrap();
+        };
 
-        PresentableRenderGraph {
+        device.submit_commands(
+            cmd,
+            device.graphics_queue(),
+            &[],
+            vk::PipelineStageFlags2::NONE,
+            &[],
+            vk::PipelineStageFlags2::NONE,
+            device.frame_resource_fence(),
+        );
+    }
+
+    // TODO: swapchain window should reference the swapchain
+    pub fn present(mut self, swapchain: &mut Swapchain, device: &mut RenderDevice) -> anyhow::Result<RetiredRenderGraph> {
+        let (image_index, _) = swapchain.acquire_next_image(device.handle())?;
+        swapchain.reset_current_fence(device.handle())?;
+
+        device.reset_frame_resources();
+        device.present_command_pool().reset()?;
+
+        let cmd = device.present_command_pool().allocate().expect("Failed to allocate command buffer");
+        unsafe {
+            device.handle().begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
         }
+
+        for node in self.present_nodes {
+            match node.pipeline_state {
+                NodePipelineState::Graphic { pipeline_desc, mut job_functor } => {
+                    {
+                        profiling::scope!("rendergraph::barriers");
+                        // TODO: facilitate VkSubpassDependency2 for render targets barriers inside renderpass
+                        let output_iter = node.outputs.iter()
+                            .map(|a| (a.id, a.access));
+
+                        Self::transition_resources(
+                            device, cmd, &self.resources,
+                            node.inputs.iter()
+                                .map(|a| (a.id, a.access))
+                                .chain(output_iter),
+                        );
+                    }
+
+                    let name = node.name;
+                    let pipeline = self.graphic_pipelines.get(self.graphic_pipe_index as usize).unwrap();
+                    let pipeline = pipeline.as_ref().map(|pipe| pipe.as_ref());
+                    self.graphic_pipe_index += 1;
+
+                    if let Some(record) = job_functor.take() {
+                        profiling::scope!("rendergraph::node_recording", &name);
+
+                        let mut ctx = GraphicNodeExecutionContext {
+                            name: name.as_str(),
+                            pipeline_desc: &pipeline_desc,
+                            device,
+                            resources: &self.resources,
+                            pipeline,
+                        };
+                        record(&mut ctx, cmd);
+                    } else {
+                        log::warn!("Missing job of graphic node {}!", name);
+                    }
+                }
+                NodePipelineState::Compute { .. } => unimplemented!(),
+                NodePipelineState::Lambda { mut job_functor } => {
+                    {
+                        profiling::scope!("rendergraph::barriers");
+                        let output_iter = node.outputs.iter()
+                            .map(|a| (a.id, a.access));
+
+                        Self::transition_resources(
+                            device, cmd, &self.resources,
+                            node.inputs.iter()
+                                .map(|a| (a.id, a.access))
+                                .chain(output_iter),
+                        );
+                    }
+
+                    let name = node.name;
+                    if let Some(record) = job_functor.take() {
+                        profiling::scope!("rendergraph::node_recording", &name);
+
+                        let mut ctx = LambdaNodeExecutionContext { device, resources: &self.resources };
+                        record(&mut ctx, cmd);
+                    } else {
+                        log::warn!("Missing job of lambda node {}!", name);
+                    }
+                }
+            }
+        }
+
+        // Transition swapchain image to present
+        let present_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+            .dst_access_mask(vk::AccessFlags2::NONE)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .image(swapchain.swapchain_texture(image_index as _).handle())
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let dependency_info = vk::DependencyInfo::default()
+            .image_memory_barriers(std::slice::from_ref(&present_barrier));
+
+        unsafe {
+            device.handle().cmd_pipeline_barrier2(cmd, &dependency_info);
+            device.handle().end_command_buffer(cmd)?;
+        }
+
+        let frame_sync = swapchain.current_frame_sync();
+
+        device.submit_commands(
+            cmd,
+            device.graphics_queue(),
+            &[frame_sync.image_available],
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            &[frame_sync.render_finished],
+            vk::PipelineStageFlags2::NONE,
+            frame_sync.in_flight_fence,
+        );
+
+        swapchain.present(device.present_queue(), image_index)?;
+
+        Ok(RetiredRenderGraph {
+            resources: self.resources,
+        })
     }
 
     fn transition_resources(
-        encoder: &mut wgpu::CommandEncoder,
+        device: &RenderDevice,
+        cmd: vk::CommandBuffer,
         resources: &Vec<ResourceStorage>,
-        resources_to_transition: impl Iterator<Item = (GraphResourceId, GraphResourceAccess)>,
+        resources_to_transition: impl Iterator<Item = (GraphResourceId, ResourceState)>,
     ) {
-        let mut buffer_transitions: SmallVec<[wgpu::BufferTransition<&Buffer>; 8]> = SmallVec::new();
-        let mut texture_transitions: SmallVec<[wgpu::TextureTransition<&Texture>; 8]> = SmallVec::new();
+        let mut image_barriers: SmallVec<[vk::ImageMemoryBarrier2; 8]> = SmallVec::new();
+        let mut buffer_barriers: SmallVec<[vk::BufferMemoryBarrier2; 8]> = SmallVec::new();
 
-        let mut add_buffer_transition = |next_state, buffer, state_tracker: &ResourceStateTracker<BufferState>| {
-            if state_tracker.should_transition_to(next_state, true) {
-                buffer_transitions.push(wgpu::BufferTransition {
-                    buffer,
-                    state: next_state,
-                });
-                state_tracker.transition_to(next_state);
+        let mut add_buffer_barrier_if_needed = |resource, access: ResourceState, state_tracker: &BufferStateTracker, name: &String| {
+            let ResourceState::Buffer(next_state) = access else {
+                log::warn!("Try to transition buffer [{}] into {:?}.", name, access);
+                return;
+            };
+
+            let prev_state = state_tracker.current();
+            if prev_state == next_state {
+                return;
             }
+
+            buffer_barriers.push(buffer_barrier(
+                resource,
+                vk::PipelineStageFlags2::NONE,
+                prev_state,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                next_state,
+                device.graphics_queue_family(),
+                device.graphics_queue_family(),
+                false,
+            ));
+            state_tracker.transition_to(next_state);
         };
+        let mut add_texture_barrier_if_needed = |resource, access: ResourceState, state_tracker: &TextureStateTracker, name: &String| {
+            let ResourceState::Texture(next_state) = access else {
+                log::warn!("Try to transition texture [{}] into {:?}.", name, access);
+                return;
+            };
 
-        let mut add_texture_transition = |next_state, texture, state_tracker: &ResourceStateTracker<TextureState>| {
-            if state_tracker.should_transition_to(next_state, true) {
-                texture_transitions.push(wgpu::TextureTransition {
-                    texture,
-                    selector: None,
-                    state: next_state,
-                });
-                state_tracker.transition_to(next_state);
+            let prev_state = state_tracker.current();
+            if prev_state == next_state {
+                return;
             }
+
+            image_barriers.push(texture_barrier(
+                resource,
+                vk::PipelineStageFlags2::NONE,
+                prev_state,
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                next_state,
+                device.graphics_queue_family(),
+                device.graphics_queue_family(),
+                false,
+                false,
+            ));
+            state_tracker.transition_to(next_state);
         };
 
         for (id, access) in resources_to_transition {
             let storage = utility::resource_storage_ref(resources, id);
 
-            match access {
-                GraphResourceAccess::Buffer(next_state) => {
-                    match storage {
-                        ResourceStorage::ManagedBuffer { resource, state_tracker, .. } => {
-                            add_buffer_transition(next_state, &*resource, state_tracker);
-                        }
-                        ResourceStorage::ImportedBuffer { resource, state_tracker, .. } => {
-                            add_buffer_transition(next_state, &*resource, state_tracker);
-                        }
-                        _ =>  {
-                            unreachable!("Resource[{}] is a texture, but a non-texture state[{:?}] is provided when read/write!", storage.name(), next_state)
-                        }
-                    }
+            match storage {
+                ResourceStorage::ManagedBuffer { resource, state_tracker, name } => {
+                    add_buffer_barrier_if_needed(resource, access, state_tracker, name);
                 }
-                GraphResourceAccess::Texture(next_state) => {
-                    match storage {
-                        ResourceStorage::ManagedTexture { resource, state_tracker, .. } => {
-                            add_texture_transition(next_state, &*resource, state_tracker);
-                        }
-                        ResourceStorage::ImportedTexture { resource, state_tracker, .. } => {
-                            add_texture_transition(next_state, &*resource, state_tracker);
-                        }
-                        _ => {
-                            unreachable!("Resource[{}] is a buffer, but a non-buffer state[{:?}] is provided when read/write!", storage.name(), next_state)
-                        }
-                    }
+                ResourceStorage::ImportedBuffer { resource, state_tracker, name } => {
+                    add_buffer_barrier_if_needed(resource, access, state_tracker, name);
+                }
+                ResourceStorage::ManagedTexture { resource, state_tracker, name } => {
+                    add_texture_barrier_if_needed(resource, access, state_tracker, name);
+                }
+                ResourceStorage::ImportedTexture { resource, state_tracker, name } => {
+                    add_texture_barrier_if_needed(resource, access, state_tracker, name);
                 }
             }
         }
 
-        encoder.transition_resources(
-            buffer_transitions.into_iter(),
-            texture_transitions.into_iter()
-        );
+        if !image_barriers.is_empty() || !buffer_barriers.is_empty() {
+            let dependency_info = vk::DependencyInfo::default()
+                .image_memory_barriers(&image_barriers)
+                .buffer_memory_barriers(&buffer_barriers);
+
+            unsafe { device.handle().cmd_pipeline_barrier2(cmd, &dependency_info); }
+        }
     }
 }
 
 pub struct GraphicNodeExecutionContext<'node> {
     name: &'node str,
     pipeline_desc: &'node GraphicPipelineDescriptor,
-    device: &'node wgpu::Device,
-    queue: &'node wgpu::Queue,
+    device: &'node RenderDevice,
     resources: &'node Vec<ResourceStorage>,
-    pipeline: wgpu::RenderPipeline,
+    pipeline: Option<&'node GraphicPipeline>,
 }
 
 impl<'node> GraphicNodeExecutionContext<'node> {
     #[inline]
-    pub fn get_buffer<V: GraphResourceView>(&mut self, resource: &RenderGraphResourceAccess<Buffer, V>) -> Buffer {
-        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_buffer().clone()
+    pub fn get_buffer<V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<Buffer, V>) -> &Buffer {
+        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_buffer()
     }
 
     #[inline]
-    pub fn get_texture<V: GraphResourceView>(&mut self, resource: &RenderGraphResourceAccess<Texture, V>) -> Texture {
-        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_texture().clone()
+    pub fn get_texture<V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<Texture, V>) -> &Texture {
+        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_texture()
     }
 
-    #[inline]
-    pub fn write_buffer<V: GraphResourceView, T: NoUninit>(&mut self, resource: &RenderGraphResourceAccess<Buffer, V>, offset: wgpu::BufferAddress, data: T) {
-        let buffer = self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_buffer();
-        debug_assert_eq!(buffer.size() as usize - offset as usize, size_of::<T>());
-        self.queue.write_buffer(buffer, offset, bytemuck::cast_slice(&[data]));
-    }
-
-    #[inline]
-    pub fn bind_pipeline<'ctx, 'rp>(&'ctx mut self, render_pass: &'ctx mut wgpu::RenderPass<'rp>) -> PipelineBinder<'ctx, 'rp> {
-        render_pass.set_pipeline(&self.pipeline);
-        PipelineBinder {
-            device: &self.device,
-            render_pass,
-            pipeline: &self.pipeline,
-            pipeline_desc: &self.pipeline_desc,
-            bind_group_entries: vec![],
+    pub fn bind_pipeline(&self, cmd: vk::CommandBuffer) {
+        if let Some(pipeline) = self.pipeline {
+            unsafe {
+                self.device.handle().cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.pipeline(),
+                );
+            }
         }
     }
 
-    pub fn begin_render_pass<'encoder>(
-        &mut self,
-        encoder: &'encoder mut wgpu::CommandEncoder
-    ) -> wgpu::RenderPass<'encoder> {
-        let create_texture_view = |id| {
-            let storage = utility::resource_storage_ref(self.resources, id);
+    #[inline]
+    pub fn device(&self) -> &RenderDevice { self.device }
 
-            match storage {
-                ResourceStorage::ManagedTexture { resource, .. } => {
-                    resource.create_view(&wgpu::TextureViewDescriptor::default())
-                }
-                ResourceStorage::ImportedTexture { resource, .. } => {
-                    resource.create_view(&wgpu::TextureViewDescriptor::default())
-                }
-                _ => unreachable!()
-            }
-        };
-
-        // TODO: use iterator-valid container
-        let color_views = self.pipeline_desc.color_attachments
-            .iter()
-            .map(|(res, _)| res.id)
-            .map(create_texture_view)
-            .collect::<SmallVec<[wgpu::TextureView; 8]>>();
-        let depth_view = self.pipeline_desc.depth_stencil_attachment
-            .as_ref()
-            .map(|(res, _)| res.id)
-            .map(create_texture_view);
-
-        let (color_attachments, depth_stencil_attachment) = (
-            self.pipeline_desc.color_attachments
-                .iter()
-                .zip(color_views.iter())
-                .map(|((_, info), view)| {
-                    Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: info.load_op,
-                            store: info.store_op,
-                        }
-                    })
-                })
-                .collect::<SmallVec<[Option<wgpu::RenderPassColorAttachment>; 8]>>(),
-            depth_view.as_ref().zip(self.pipeline_desc.depth_stencil_attachment.as_ref()).map(|(view, (_, depth_info))| {
-                wgpu::RenderPassDepthStencilAttachment {
-                    view: &view,
-                    depth_ops: if depth_info.depth_write {
-                        Some(wgpu::Operations {
-                            load: depth_info.depth_load_op,
-                            store: depth_info.depth_store_op,
-                        })
-                    } else {
-                        None
-                    },
-                    stencil_ops: Some(wgpu::Operations {
-                        load: depth_info.stencil_load_op,
-                        store: depth_info.stencil_store_op,
-                    })
-                }
+    pub fn begin_rendering(&self, cmd: vk::CommandBuffer, extent: vk::Extent2D) {
+        let color_attachments: SmallVec<[vk::RenderingAttachmentInfo; 8]> = self.pipeline_desc.color_attachments.iter()
+            .map(|(resource, color_info)| {
+                let texture = utility::resource_storage_ref(self.resources, resource.id).as_texture();
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(texture.view().expect("Texture view not created"))
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(color_info.load_op)
+                    .store_op(color_info.store_op)
+                    .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: color_info.clear_value } })
             })
-        );
+            .collect();
 
-        encoder.begin_render_pass(
-            &wgpu::RenderPassDescriptor {
-                label: Some(self.name),
-                color_attachments: &color_attachments,
-                depth_stencil_attachment,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            }
-        )
-    }
-}
-
-pub struct PipelineBinder<'ctx, 'rp> {
-    device: &'ctx wgpu::Device,
-    render_pass: &'ctx mut wgpu::RenderPass<'rp>,
-    pipeline_desc: &'ctx GraphicPipelineDescriptor,
-    pipeline: &'ctx wgpu::RenderPipeline,
-    bind_group_entries: Vec<Vec<wgpu::BindGroupEntry<'ctx>>>,
-}
-
-impl<'ctx, 'rp> PipelineBinder<'ctx, 'rp> {
-    pub fn with_binding(mut self, group: u32, binding: u32, resource: wgpu::BindingResource<'ctx>) -> Self {
-        let shader = self.pipeline_desc.shader.as_ref().unwrap();
-        debug_assert!(group < shader.num_bind_groups() as u32, "Invalid group index: {}, shader[{}] only have {} bind group(s)", group, shader.name(), shader.num_bind_groups());
-        debug_assert!(binding < shader.num_bindings(group).unwrap() as u32, "Invalid binding index: {}, shader[{}] only have {} bind entry(s)", group, shader.name(), shader.num_bindings(group).unwrap());
-
-        let non_allocated_groups = group as i32 - self.bind_group_entries.len() as i32 + 1;
-        for _ in 0..non_allocated_groups {
-            self.bind_group_entries.push(vec![]);
-        }
-
-        let bindings = self.bind_group_entries.get_mut(group as usize).unwrap();
-        bindings.push(wgpu::BindGroupEntry {
-            binding,
-            resource,
+        let depth_attachment = self.pipeline_desc.depth_stencil_attachment.as_ref().map(|(resource, depth_info)| {
+            let texture = utility::resource_storage_ref(self.resources, resource.id).as_texture();
+            vk::RenderingAttachmentInfo::default()
+                .image_view(texture.view().expect("Texture view not created"))
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(depth_info.depth_load_op)
+                .store_op(depth_info.depth_store_op)
+                .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: depth_info.depth_clear_value, stencil: depth_info.stencil_clear_value } })
         });
 
-        self
+        let mut rendering_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent })
+            .layer_count(1)
+            .color_attachments(&color_attachments);
+
+        if let Some(ref depth) = depth_attachment {
+            rendering_info = rendering_info.depth_attachment(depth);
+        }
+
+        unsafe { self.device.handle().cmd_begin_rendering(cmd, &rendering_info); }
     }
 
-    pub fn bind(self) {
-        let shader = self.pipeline_desc.shader.as_ref().unwrap();
+    pub fn end_rendering(&self, cmd: vk::CommandBuffer) {
+        unsafe { self.device.handle().cmd_end_rendering(cmd); }
+    }
 
-        let bind_groups = self.bind_group_entries
-            .into_iter()
-            .enumerate()
-            .map(|(group, group_entries)| {
-                Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&format!("{} BindGroup{}", shader.name(), group)),
-                    layout: &shader.create_bind_group_layout(self.device, group as u32).unwrap(),
-                    entries: &group_entries,
-                }))
-            })
-            .collect::<SmallVec<[Option<wgpu::BindGroup>; 4]>>();
+    /// Create a shader resource binder for this node's pipeline.
+    /// Returns None if the pipeline has no descriptor bindings.
+    pub fn create_resource_binder(&self) -> Option<ShaderResourceBinder<'_>> {
+        let reflection = self.pipeline_desc.merged_reflection.as_ref()?;
+        let layouts = &self.pipeline_desc.descriptor_set_layouts;
 
-        self.render_pass.set_pipeline(self.pipeline);
-        for (group, bind_group) in bind_groups.into_iter().enumerate() {
-            self.render_pass.set_bind_group(group as u32, &bind_group, &[]);
+        if layouts.is_empty() {
+            return None;
         }
+
+        ShaderResourceBinder::new(
+            self.device.handle(),
+            reflection,
+            layouts,
+            self.device.descriptor_pool(),
+        ).ok()
+    }
+
+    /// Bind descriptor sets to the pipeline.
+    pub fn bind_descriptor_sets(&self, cmd: vk::CommandBuffer, sets: &[vk::DescriptorSet]) {
+        if let Some(pipeline) = self.pipeline {
+            if !sets.is_empty() {
+                unsafe {
+                    self.device.handle().cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline.layout(),
+                        0,
+                        sets,
+                        &[],
+                    );
+                }
+            }
+        }
+    }
+
+    /// Get the pipeline layout for push constants.
+    pub fn pipeline_layout(&self) -> Option<vk::PipelineLayout> {
+        self.pipeline.map(|p| p.layout())
     }
 }
 
 pub struct LambdaNodeExecutionContext<'node> {
-    queue: &'node wgpu::Queue,
+    device: &'node RenderDevice,
     resources: &'node Vec<ResourceStorage>,
 }
 
 impl<'node> LambdaNodeExecutionContext<'node> {
     #[inline]
     #[allow(dead_code)]
-    pub fn get_buffer<V: GraphResourceView>(&mut self, resource: &RenderGraphResourceAccess<Buffer, V>) -> Buffer {
-        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_buffer().clone()
+    pub fn get_buffer<V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<Buffer, V>) -> &Buffer {
+        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_buffer()
     }
 
     #[inline]
     #[allow(dead_code)]
-    pub fn get_texture<V: GraphResourceView>(&mut self, resource: &RenderGraphResourceAccess<Texture, V>) -> Texture {
-        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_texture().clone()
+    pub fn get_texture<V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<Texture, V>) -> &Texture {
+        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_texture()
     }
 
     #[inline]
-    #[allow(dead_code)]
-    pub fn write_buffer<V: GraphResourceView>(&mut self, resource: &RenderGraphResourceAccess<Buffer, V>, offset: wgpu::BufferAddress, data: &[u8]) {
-        let buffer = self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_buffer();
-        self.queue.write_buffer(buffer, offset, data);
-    }
+    pub fn device(&self) -> &RenderDevice { self.device }
 }
 
-pub struct PresentableRenderGraph {}
+pub struct RetiredRenderGraph {
+    resources: Vec<ResourceStorage>,
+}
 
-impl PresentableRenderGraph {
-    #[profiling::function]
-    pub fn present(self, present_surface: wgpu::SurfaceTexture) -> Result<(), Box<anyhow::Error>> {
-        present_surface.present();
-
-        Ok(())
+impl RetiredRenderGraph {
+    pub fn release_frame_resources(self, device: &mut RenderDevice) {
+        for resource in self.resources.into_iter() {
+            match resource {
+                ResourceStorage::ManagedBuffer { resource, .. } => {
+                    device.defer_release_buffer(resource);
+                }
+                ResourceStorage::ManagedTexture { resource, .. } => {
+                    device.defer_release_texture(resource);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
 pub(crate) mod utility {
-    use crate::graph::ResourceStorage;
+    use super::ResourceStorage;
     use crate::resource::GraphResourceId;
 
     #[inline]

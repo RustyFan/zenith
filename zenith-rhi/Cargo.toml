@@ -1,0 +1,20 @@
+[package]
+name = "zenith-rhi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = { version = "0.38", features = ["std", "debug", "loaded"] }
+ash-window = "0.13"
+raw-window-handle = "0.6"
+hassle-rs = "0.12"
+rspirv-reflect = "0.5"
+winit.workspace = true
+anyhow.workspace = true
+profiling.workspace = true
+
+zenith-core = { path = "../zenith-core" }
+
+[features]
+default = ["validation"]
+validation = []

@@ -1,33 +1,56 @@
-﻿use crate::RenderableApp;
+use crate::RenderableApp;
 use std::sync::Arc;
 use winit::window::Window;
-use zenith_render::{PipelineCache, RenderDevice};
-use zenith_rendergraph::{RenderGraphBuilder, RenderResource, TextureState};
+use zenith_rendergraph::RenderGraphBuilder;
+use zenith_rhi::core::{select_physical_device, PhysicalDevice};
+use zenith_rhi::swapchain::SwapchainWindow;
+use zenith_rhi::{vk, PipelineCache, RenderDevice, RhiCore, Swapchain, SwapchainConfig};
+use crate::app::RenderContext;
 
 pub struct Engine {
     pub main_window: Arc<Window>,
-    pub render_device: RenderDevice,
-    
-    pipeline_cache: PipelineCache,
-    _puffin_server: puffin_http::Server,
 
-    pub(crate) should_exit: bool,
+    pipeline_cache: PipelineCache,
+    swapchain: Swapchain,
+    pub render_device: RenderDevice,
+    physical_device: PhysicalDevice,
+    rhi_core: RhiCore,
+
+    // _puffin_server: puffin_http::Server,
+
+    should_exit: bool,
 }
 
 impl Engine {
     pub fn new(main_window: Arc<Window>) -> Result<Self, anyhow::Error> {
-        let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
-        let _puffin_server = puffin_http::Server::new(&server_addr)?;
+        // let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
+        // let _puffin_server = puffin_http::Server::new(&server_addr)?;
 
-        let render_device = RenderDevice::new(main_window.clone())?;
-        let pipeline_cache = PipelineCache::new();
+        let core = RhiCore::new(&main_window)?;
+        let swapchain_window = SwapchainWindow::new(&main_window, &core)?;
+        let physical_device = select_physical_device(core.instance(), &swapchain_window)?;
+        let device = core.create_render_device(&physical_device)?;
+
+        let swapchain_config = SwapchainConfig::default();
+        let swapchain = Swapchain::new(
+            &core,
+            &device,
+            swapchain_window,
+            swapchain_config,
+        )?;
+
+        let pipeline_cache = PipelineCache::new(device.handle())?;
 
         Ok(Self {
             main_window,
-            render_device,
+            rhi_core: core,
+            physical_device,
+            render_device: device,
 
+            swapchain,
             pipeline_cache,
-            _puffin_server,
+
+            // _puffin_server,
 
             should_exit: false,
         })
@@ -39,69 +62,55 @@ impl Engine {
 
     #[profiling::function]
     pub fn render<A: RenderableApp>(&mut self, app: &mut A) {
-        let device = self.render_device.device();
-        let queue = self.render_device.queue();
+        self.render_device.begin_frame();
 
         let mut builder = RenderGraphBuilder::new();
+        let render_context = RenderContext::new(
+            &mut builder,
+            &self.swapchain,
+            self.render_device.frame_index(),
+        );
+        app.render(render_context);
 
-        let app_output_tex = app.render(&mut builder);
+        let graph = builder.build(&self.render_device);
+        let mut graph = graph.compile(&self.render_device, &mut self.pipeline_cache);
 
-        if app_output_tex.is_some() {
-            let surface_tex = self.render_device.acquire_next_frame();
-            let swapchain_tex = RenderResource::new(surface_tex.texture.clone());
-            let app_output_tex = app_output_tex.unwrap();
+        graph.execute(&self.render_device);
 
-            {
-                let mut swapchain_tex = builder.import("swapchain.output", swapchain_tex.clone(), wgpu::TextureUses::PRESENT);
+        let graph = graph.present(&mut self.swapchain, &mut self.render_device)
+            .expect("Failed to present swapchain!");
 
-                let mut node = builder.add_lambda_node("copy_output_to_swapchain");
+        graph.release_frame_resources(&mut self.render_device);
+        self.render_device.end_frame();
+    }
 
-                let app_output_tex = node.read(&app_output_tex, TextureState::COPY_SRC);
-                let swapchain_tex = node.write(&mut swapchain_tex, TextureState::COPY_DST);
-
-                node.execute(move |ctx, encoder| {
-                    let src = ctx.get_texture(&app_output_tex);
-                    let dst = ctx.get_texture(&swapchain_tex);
-
-                    let width = dst.width();
-                    let height = dst.height();
-
-                    encoder.copy_texture_to_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &src,
-                            mip_level: 0,
-                            origin: Default::default(),
-                            aspect: Default::default(),
-                        },
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &dst,
-                            mip_level: 0,
-                            origin: Default::default(),
-                            aspect: Default::default(),
-                        },
-                        wgpu::Extent3d {
-                            width,
-                            height,
-                            depth_or_array_layers: 1,
-                        }
-                    );
-                });
-            }
-
-            let graph = builder.build(device);
-            let graph = graph.compile(device, &mut self.pipeline_cache);
-            let graph = graph.execute(device, queue);
-
-            self.main_window.pre_present_notify();
-            graph.present(surface_tex).unwrap();
+    fn recreate_swapchain(&mut self) {
+        let inner_size = self.main_window.inner_size();
+        if inner_size.width == 0 || inner_size.height == 0 {
+            return;
         }
+
+        let window_extent = vk::Extent2D {
+            width: inner_size.width,
+            height: inner_size.height,
+        };
+
+        self.swapchain.resize(window_extent).unwrap();
     }
 
     #[profiling::function]
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.render_device.resize(width, height);
+        if width > 0 && height > 0 {
+            self.recreate_swapchain();
+        }
     }
 
     #[inline]
+    pub fn request_exit(&mut self) { self.should_exit = true; }
+
+    #[inline]
     pub fn should_exit(&self) -> bool { self.should_exit }
+
+    #[inline]
+    pub fn pipeline_cache_size(&self) -> usize { self.pipeline_cache.len() }
 }

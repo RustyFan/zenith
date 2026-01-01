@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wgpu.workspace = true
-bytemuck.workspace = true
 anyhow.workspace = true
 derive_more.workspace = true
 log.workspace = true
@@ -13,4 +11,4 @@ derive_builder.workspace = true
 profiling.workspace = true
 
 zenith-core = { path = "../zenith-core" }
-zenith-render = { path = "../zenith-render" }
+zenith-rhi = { path = "../zenith-rhi" }

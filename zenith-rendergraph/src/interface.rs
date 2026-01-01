@@ -1,15 +1,17 @@
-﻿use derive_more::{From, TryInto, Deref, DerefMut};
+use derive_more::{From, TryInto, Deref, DerefMut};
 use std::marker::PhantomData;
+use std::sync::Arc;
 use crate::builder::{RenderGraphBuilder};
 use crate::resource::{ExportedRenderGraphResource, GraphImportExportResource, GraphResource, GraphResourceDescriptor, RenderGraphResource, GraphResourceState};
+use zenith_rhi::vk;
 
 #[macro_export]
 macro_rules! render_graph_resource_interface {
 	($($res:ident => $res_ty:ty, $res_desc:ident => $res_desc_ty:ty, $res_state:ident => $res_state_ty:ty),+) => {
         $(
-            pub type $res = $res_ty;
-            pub type $res_desc = $res_desc_ty;
-            pub type $res_state = $res_state_ty;
+            // pub type $res = $res_ty;
+            // pub type $res_desc = $res_desc_ty;
+            // pub type $res_state = $res_state_ty;
 
             impl GraphResource for $res_ty {
                 type Descriptor = $res_desc;
@@ -57,16 +59,105 @@ macro_rules! render_graph_resource_interface {
 	};
 }
 
-render_graph_resource_interface!(
-    Buffer => wgpu::Buffer, BufferDesc => wgpu::BufferDescriptor<'static>, BufferState => wgpu::BufferUses,
-    Texture => wgpu::Texture, TextureDesc => wgpu::TextureDescriptor<'static>, TextureState => wgpu::TextureUses
-);
+pub(crate) type Buffer = zenith_rhi::Buffer;
+pub(crate) type BufferDesc = zenith_rhi::BufferDesc;
+pub(crate) type BufferState = zenith_rhi::BufferState;
 
-#[derive(Deref, DerefMut, From, Clone, Debug)]
-pub struct RenderResource<T: GraphResource>(T);
+pub(crate) type Texture = zenith_rhi::Texture;
+pub(crate) type TextureDesc = zenith_rhi::TextureDesc;
+pub(crate) type TextureState = zenith_rhi::TextureState;
 
-impl<T: GraphResource> RenderResource<T> {
-    pub fn new(resource: T) -> Self {
-        Self(resource)
+impl GraphResource for Buffer {
+    type Descriptor = BufferDesc;
+}
+
+impl GraphResourceDescriptor for BufferDesc {
+    type Resource = Buffer;
+}
+
+impl GraphResourceState for BufferState {
+    type Resource = Buffer;
+}
+
+impl GraphImportExportResource for Buffer {
+    fn import(
+        shared_resource: impl Into<Arc<Buffer>>,
+        name: &str,
+        builder: &mut RenderGraphBuilder,
+        access: impl Into<ResourceState>
+    ) -> RenderGraphResource<Self> {
+        let id = builder.initial_resources.len() as u32;
+        let uses = access.into().try_into().expect("Inconsistent import resource access!");
+        builder.initial_resources.push((name.to_owned(), shared_resource.into(), uses).into());
+
+        RenderGraphResource {
+            id,
+            _marker: PhantomData,
+        }
+    }
+
+    fn export(_resource: RenderGraphResource<Self>, _builder: &mut RenderGraphBuilder, _access: impl Into<ResourceState>) -> ExportedRenderGraphResource<Self> {
+        unimplemented!()
     }
 }
+
+impl GraphResource for Texture {
+    type Descriptor = TextureDesc;
+}
+
+impl GraphResourceDescriptor for TextureDesc {
+    type Resource = Texture;
+}
+
+impl GraphResourceState for TextureState {
+    type Resource = Texture;
+}
+
+impl GraphImportExportResource for Texture {
+    fn import(
+        shared_resource: impl Into<Arc<Self>>,
+        name: &str,
+        builder: &mut RenderGraphBuilder,
+        access: impl Into<ResourceState>
+    ) -> RenderGraphResource<Self> {
+        let id = builder.initial_resources.len() as u32;
+        let uses = access.into().try_into().expect("Inconsistent import resource access!");
+        builder.initial_resources.push((name.to_owned(), shared_resource.into(), uses).into());
+
+        RenderGraphResource {
+            id,
+            _marker: PhantomData,
+        }
+    }
+
+    fn export(_resource: RenderGraphResource<Self>, _builder: &mut RenderGraphBuilder, _access: impl Into<ResourceState>) -> ExportedRenderGraphResource<Self> {
+        unimplemented!()
+    }
+}
+
+#[derive(From)]
+pub enum ResourceDescriptor {
+    Buffer(BufferDesc),
+    Texture(TextureDesc),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, From, TryInto)]
+pub enum ResourceState {
+    Buffer(BufferState),
+    Texture(TextureState),
+}
+
+
+// render_graph_resource_interface!(
+//     Buffer => Arc<zenith_rhi::Buffer>, BufferDesc => zenith_rhi::BufferDesc, BufferState => zenith_rhi::BufferState,
+//     Texture => Arc<zenith_rhi::Texture>, TextureDesc => zenith_rhi::TextureDesc, TextureState => zenith_rhi::TextureState
+// );
+
+// #[derive(Deref, DerefMut, From, Clone, Debug)]
+// pub struct RenderResource<T: GraphResource>(T);
+//
+// impl<T: GraphResource> RenderResource<T> {
+//     pub fn new(resource: T) -> Self {
+//         Self(resource)
+//     }
+// }

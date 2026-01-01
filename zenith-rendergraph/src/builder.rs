@@ -1,23 +1,20 @@
-use std::cell::Cell;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use log::warn;
-use crate::node::{NodePipelineState, RenderGraphNode};
-use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph, ResourceStorage};
-use crate::node::{DepthStencilInfo};
-use crate::interface::{GraphResourceAccess, ResourceDescriptor, RenderResource, Texture};
+use crate::node::{NodePipelineState, RenderGraphNode, ColorInfo, DepthStencilInfo, GraphicPipelineDescriptor, VertexBindingDesc, VertexAttributeDesc};
+use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph, ResourceStorage, BufferStateTracker, TextureStateTracker};
+use crate::interface::{ResourceState, ResourceDescriptor};
 use crate::resource::{
     ExportResourceStorage, ExportedRenderGraphResource, GraphImportExportResource,
     GraphResource, GraphResourceDescriptor, GraphResourceView,
     GraphResourceId, InitialResourceStorage,
     RenderGraphResource, RenderGraphResourceAccess, Rt, Srv, Uav};
-use zenith_render::GraphicShader;
-use crate::{ColorInfo, GraphicPipelineDescriptor};
+use zenith_rhi::{vk, Buffer, Texture, Shader, RenderDevice, TextureState, BufferState, ShaderReflection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResourceAccessStorage {
     pub(crate) id: GraphResourceId,
-    pub(crate) access: GraphResourceAccess,
+    pub(crate) access: ResourceState,
 }
 
 #[derive(Default)]
@@ -30,9 +27,7 @@ pub struct RenderGraphBuilder {
 
 impl RenderGraphBuilder {
     pub fn new() -> Self {
-        Self {
-            ..Default::default()
-        }
+        Self::default()
     }
 
     #[must_use]
@@ -63,8 +58,8 @@ impl RenderGraphBuilder {
     pub fn import<R: GraphImportExportResource>(
         &mut self,
         name: &str,
-        import_resource: impl Into<RenderResource<R>>,
-        access: impl Into<GraphResourceAccess>,
+        import_resource: impl Into<Arc<R>>,
+        access: impl Into<ResourceState>,
     ) -> RenderGraphResource<R> {
         GraphImportExportResource::import(import_resource, name, self, access)
     }
@@ -73,7 +68,7 @@ impl RenderGraphBuilder {
     pub fn export<R: GraphImportExportResource>(
         &mut self,
         resource: RenderGraphResource<R>,
-        access: impl Into<GraphResourceAccess>,
+        access: impl Into<ResourceState>,
     ) -> ExportedRenderGraphResource<R> {
         GraphImportExportResource::export(resource, self, access)
     }
@@ -96,7 +91,7 @@ impl RenderGraphBuilder {
             common: CommonNodeBuilder {
                 node: &mut self.nodes[index],
                 resources: &self.initial_resources,
-            }
+            },
         }
     }
 
@@ -135,36 +130,46 @@ impl RenderGraphBuilder {
     // }
 
     #[profiling::function]
-    pub fn build(self, device: &wgpu::Device) -> RenderGraph {
+    pub fn build(self, device: &RenderDevice) -> RenderGraph {
         let resources = self.initial_resources
             .into_iter()
             .map(|res| {
+                // TODO: postpone the resource creation to compile()
                 match res {
                     InitialResourceStorage::ManagedBuffer(name, desc) => {
-                        let buffer = device.create_buffer(&desc);
+                        let resource = Buffer::from_desc(
+                            device.handle(),
+                            device.memory_properties(),
+                            &desc
+                        ).expect("Failed to create buffer");
                         ResourceStorage::ManagedBuffer {
                             name,
-                            resource: buffer,
-                            state_tracker: Cell::new(wgpu::BufferUses::empty()).into()
+                            resource,
+                            state_tracker: BufferStateTracker::new(BufferState::Undefined),
                         }
                     }
                     InitialResourceStorage::ManagedTexture(name, desc) => {
-                        let tex = device.create_texture(&desc);
+                        let mut resource = Texture::from_desc(
+                            device.handle(),
+                            device.memory_properties(),
+                            &desc
+                        ).expect("Failed to create texture");
+                        resource.create_view().expect("Failed to create texture view");
                         ResourceStorage::ManagedTexture {
                             name,
-                            resource: tex,
-                            state_tracker: Cell::new(wgpu::TextureUses::UNINITIALIZED).into()
+                            resource,
+                            state_tracker: TextureStateTracker::new(TextureState::Undefined),
                         }
                     }
-                    InitialResourceStorage::ImportedBuffer(name, buffer, init_access) => ResourceStorage::ImportedBuffer {
+                    InitialResourceStorage::ImportedBuffer(name, buffer, initial_state) => ResourceStorage::ImportedBuffer {
                         name,
-                        resource: buffer.into(),
-                        state_tracker: Cell::new(init_access).into(),
+                        resource: buffer.clone(),
+                        state_tracker: BufferStateTracker::new(initial_state),
                     },
-                    InitialResourceStorage::ImportedTexture(name, tex, init_access) => ResourceStorage::ImportedTexture {
+                    InitialResourceStorage::ImportedTexture(name, tex, initial_state) => ResourceStorage::ImportedTexture {
                         name,
-                        resource: tex.into(),
-                        state_tracker: Cell::new(init_access).into(),
+                        resource: tex.clone(),
+                        state_tracker: TextureStateTracker::new(initial_state),
                     },
                 }
             })
@@ -187,7 +192,7 @@ impl CommonNodeBuilder<'_, '_> {
     fn read<R: GraphResource, V: GraphResourceView>(
         &mut self,
         resource: &RenderGraphResource<R>,
-        access: impl Into<GraphResourceAccess>,
+        access: impl Into<ResourceState>,
     ) -> RenderGraphResourceAccess<R, V> {
         let access = RenderGraphResourceAccess {
             id: resource.id,
@@ -196,7 +201,7 @@ impl CommonNodeBuilder<'_, '_> {
         };
 
         if let None = self.node.inputs.iter().find(|h| h.id == resource.id) {
-            self.node.inputs.push(access.clone().into_untyped());
+            self.node.inputs.push(access.as_untyped());
         } else {
             let name = self.resources
                 .get(resource.id as usize)
@@ -213,7 +218,7 @@ impl CommonNodeBuilder<'_, '_> {
     fn write<R: GraphResource, V: GraphResourceView>(
         &mut self,
         resource: &mut RenderGraphResource<R>,
-        access: impl Into<GraphResourceAccess>,
+        access: impl Into<ResourceState>,
     ) -> RenderGraphResourceAccess<R, V>  {
         let access = RenderGraphResourceAccess {
             id: resource.id,
@@ -222,7 +227,7 @@ impl CommonNodeBuilder<'_, '_> {
         };
 
         if let None = self.node.outputs.iter().find(|h| h.id == resource.id) {
-            self.node.outputs.push(access.clone().into_untyped());
+            self.node.outputs.push(access.as_untyped());
         } else {
             let name = self.resources
                 .get(resource.id as usize)
@@ -243,7 +248,7 @@ macro_rules! inject_common_node_builder_methods {
         pub fn read<R: GraphResource>(
             &mut self,
             resource: &RenderGraphResource<R>,
-            access: impl Into<GraphResourceAccess>
+            access: impl Into<ResourceState>
         ) -> RenderGraphResourceAccess<R, $read_view> {
             self.common.read(resource, access)
         }
@@ -253,7 +258,7 @@ macro_rules! inject_common_node_builder_methods {
         pub fn write<R: GraphResource>(
             &mut self,
             resource: &mut RenderGraphResource<R>,
-            access: impl Into<GraphResourceAccess>,
+            access: impl Into<ResourceState>,
         ) -> RenderGraphResourceAccess<R, $write_view>  {
             self.common.write(resource, access)
         }
@@ -264,19 +269,13 @@ pub struct GraphicNodeBuilder<'node, 'res> {
     common: CommonNodeBuilder<'node, 'res>,
 }
 
-impl<'node, 'res> Drop for GraphicNodeBuilder<'node, 'res> {
-    fn drop(&mut self) {
-        debug_assert!(self.common.node.pipeline_state.valid());
-    }
-}
-
 impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
     inject_common_node_builder_methods!(Srv, Rt);
 
     #[inline]
     pub fn execute<F>(&mut self, node_job: F)
     where
-        F: FnOnce(&mut GraphicNodeExecutionContext, &mut wgpu::CommandEncoder) + 'static
+        F: FnOnce(&mut GraphicNodeExecutionContext, vk::CommandBuffer) + 'static
     {
         if let NodePipelineState::Graphic { job_functor, .. } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));
@@ -310,7 +309,7 @@ impl<'node, 'res> LambdaNodeBuilder<'node, 'res> {
     #[inline]
     pub fn execute<F>(&mut self, node_job: F)
     where
-        F: FnOnce(&mut LambdaNodeExecutionContext, &mut wgpu::CommandEncoder) + 'static
+        F: FnOnce(&mut LambdaNodeExecutionContext, vk::CommandBuffer) + 'static
     {
         if let NodePipelineState::Lambda { job_functor } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));
@@ -325,9 +324,44 @@ pub struct GraphicPipelineBuilder<'a> {
 }
 
 impl<'a> GraphicPipelineBuilder<'a> {
+    fn update_reflection(&mut self) {
+        let mut reflections: Vec<&ShaderReflection> = Vec::new();
+        if let Some(vs) = &self.pipeline_desc.vertex_shader {
+            reflections.push(vs.reflection());
+        }
+        if let Some(fs) = &self.pipeline_desc.fragment_shader {
+            reflections.push(fs.reflection());
+        }
+
+        if !reflections.is_empty() {
+            let merged = ShaderReflection::merge(&reflections);
+
+            // Use cached layouts from shaders instead of creating new ones
+            // Prefer fragment shader layouts as they typically have more bindings
+            let layouts = if let Some(fs) = &self.pipeline_desc.fragment_shader {
+                fs.descriptor_set_layouts().to_vec()
+            } else if let Some(vs) = &self.pipeline_desc.vertex_shader {
+                vs.descriptor_set_layouts().to_vec()
+            } else {
+                Vec::new()
+            };
+
+            self.pipeline_desc.descriptor_set_layouts = layouts;
+            self.pipeline_desc.merged_reflection = Some(merged);
+        }
+    }
+
     #[inline]
-    pub fn with_shader(self, shader: Arc<GraphicShader>) -> Self {
-        self.pipeline_desc.shader = Some(shader);
+    pub fn with_vertex_shader(mut self, shader: Arc<Shader>) -> Self {
+        self.pipeline_desc.vertex_shader = Some(shader);
+        self.update_reflection();
+        self
+    }
+
+    #[inline]
+    pub fn with_fragment_shader(mut self, shader: Arc<Shader>) -> Self {
+        self.pipeline_desc.fragment_shader = Some(shader);
+        self.update_reflection();
         self
     }
 
@@ -343,9 +377,24 @@ impl<'a> GraphicPipelineBuilder<'a> {
         self
     }
 
-    // #[inline]
-    // pub fn with_binding<R: GraphResource, V: GraphResourceView>(self, binding: u32, color: &RenderGraphResourceAccess<R, V>) -> Self {
-    //     self.pipeline_desc.bindings.push((binding, color.id));
-    //     self
-    // }
+    #[inline]
+    pub fn with_vertex_binding(self, binding: u32, stride: u32, input_rate: vk::VertexInputRate) -> Self {
+        self.pipeline_desc.vertex_bindings.push(VertexBindingDesc {
+            binding,
+            stride,
+            input_rate,
+        });
+        self
+    }
+
+    #[inline]
+    pub fn with_vertex_attribute(self, location: u32, binding: u32, format: vk::Format, offset: u32) -> Self {
+        self.pipeline_desc.vertex_attributes.push(VertexAttributeDesc {
+            location,
+            binding,
+            format,
+            offset,
+        });
+        self
+    }
 }

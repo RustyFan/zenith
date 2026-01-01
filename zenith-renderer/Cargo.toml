@@ -4,15 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wgpu.workspace = true
 bytemuck.workspace  = true
-glam.workspace = true
 log.workspace = true
-gltf.workspace = true
-profiling.workspace = true
 
-zenith-core = { path = "../zenith-core" }
-zenith-asset = { path = "../zenith-asset" }
-zenith-build = { path = "../zenith-build" }
-zenith-render = { path = "../zenith-render" }
+zenith-rhi = { path = "../zenith-rhi" }
 zenith-rendergraph = { path = "../zenith-rendergraph" }
