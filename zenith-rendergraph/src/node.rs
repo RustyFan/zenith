@@ -143,24 +143,20 @@ impl ComputePipelineDescriptor {
     pub fn name(&self) -> &str {
         "Unknown"
     }
-
-    pub fn valid(&self) -> bool {
-        false
-    }
 }
 
 pub(crate) enum NodePipelineState {
     Graphic {
         pipeline_desc: GraphicPipelineDescriptor,
-        job_functor: Option<Box<dyn FnOnce(&mut GraphicNodeExecutionContext, vk::CommandBuffer)>>,
+        job_functor: Option<Box<dyn FnOnce(&mut GraphicNodeExecutionContext)>>,
     },
     #[allow(dead_code)]
     Compute {
         pipeline_desc: ComputePipelineDescriptor,
-        job_functor: Option<Box<dyn FnOnce(&mut GraphicNodeExecutionContext, vk::CommandBuffer)>>,
+        job_functor: Option<Box<dyn FnOnce(&mut GraphicNodeExecutionContext)>>,
     },
     Lambda {
-        job_functor: Option<Box<dyn FnOnce(&mut LambdaNodeExecutionContext, vk::CommandBuffer)>>,
+        job_functor: Option<Box<dyn FnOnce(&mut LambdaNodeExecutionContext)>>,
     }
 }
 
@@ -170,8 +166,8 @@ impl NodePipelineState {
             NodePipelineState::Graphic { pipeline_desc, job_functor } => {
                 pipeline_desc.valid() && job_functor.is_some()
             }
-            NodePipelineState::Compute { pipeline_desc, job_functor } => {
-                pipeline_desc.valid() && job_functor.is_some()
+            NodePipelineState::Compute { .. } => {
+                false
             }
             NodePipelineState::Lambda { job_functor } => {
                 job_functor.is_some()

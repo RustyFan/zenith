@@ -1,6 +1,5 @@
 //! Vulkan Swapchain - surface, swapchain, and frame synchronization management.
 
-use std::mem::ManuallyDrop;
 use std::sync::{Arc, Weak};
 use ash::{vk, Device};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -86,6 +85,7 @@ pub struct FrameSync {
 /// Vulkan swapchain management.
 pub struct Swapchain {
     device: Device,
+    physical_device: vk::PhysicalDevice,
     window: SwapchainWindow,
 
     swapchain_loader: ash::khr::swapchain::Device,
@@ -98,7 +98,6 @@ pub struct Swapchain {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
 
-    capabilities: vk::SurfaceCapabilitiesKHR,
     format: vk::SurfaceFormatKHR,
     present_mode: vk::PresentModeKHR,
 
@@ -165,13 +164,12 @@ impl Swapchain {
         let mut textures = Vec::with_capacity(images.len());
 
         for image in images.iter() {
-            let mut texture = Texture::from_swapchain_image(
+            let texture = Texture::from_swapchain_image(
                 device.handle(),
                 image.clone(),
                 format.format,
                 extent.clone(),
             );
-            texture.create_view()?;
             textures.push(Arc::new(texture));
         }
 
@@ -180,6 +178,7 @@ impl Swapchain {
 
         Ok(Swapchain {
             device: device.handle().clone(),
+            physical_device: physical_device.handle(),
             window,
             swapchain_loader,
             swapchain,
@@ -190,7 +189,6 @@ impl Swapchain {
             render_finished_semaphores,
             in_flight_fences,
             current_frame: 0,
-            capabilities,
             present_mode,
         })
     }
@@ -264,11 +262,17 @@ impl Swapchain {
     pub fn resize(&mut self, extent: vk::Extent2D) -> Result<()> {
         unsafe { self.device.device_wait_idle()?; }
 
+        // re-query surface capabilities as they may have changed
+        let capabilities = unsafe {
+            self.window.surface_loader.get_physical_device_surface_capabilities(self.physical_device, self.window.surface)?
+        };
+        let extent = get_swapchain_extent(&capabilities, extent);
+
         let config = SwapchainConfig::default();
         let swapchain = Swapchain::create_or_recreate(
             &self.swapchain_loader,
             self.window.surface,
-            self.capabilities,
+            capabilities,
             self.format,
             self.present_mode,
             config.num_back_buffers,
@@ -282,13 +286,12 @@ impl Swapchain {
         let mut textures = Vec::with_capacity(images.len());
 
         for image in images.iter() {
-            let mut texture = Texture::from_swapchain_image(
+            let texture = Texture::from_swapchain_image(
                 &self.device,
                 image.clone(),
                 self.format.format,
                 extent.clone(),
             );
-            texture.create_view()?;
             textures.push(Arc::new(texture));
         }
 
@@ -440,37 +443,6 @@ fn get_swapchain_extent(
             ),
         }
     }
-}
-
-fn create_image_views(
-    device: &Device,
-    images: &[vk::Image],
-    format: vk::Format,
-) -> Result<Vec<vk::ImageView>, vk::Result> {
-    images
-        .iter()
-        .map(|&image| {
-            let create_info = vk::ImageViewCreateInfo::default()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(format)
-                .components(vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::IDENTITY,
-                    g: vk::ComponentSwizzle::IDENTITY,
-                    b: vk::ComponentSwizzle::IDENTITY,
-                    a: vk::ComponentSwizzle::IDENTITY,
-                })
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-
-            unsafe { device.create_image_view(&create_info, None) }
-        })
-        .collect()
 }
 
 fn create_sync_objects(

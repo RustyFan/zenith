@@ -68,7 +68,7 @@ impl TriangleRenderer {
             device.handle(),
             device.memory_properties(),
             &BufferDesc {
-                size: std::mem::size_of::<f32>() as u64,
+                size: size_of::<f32>() as u64,
                 usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                 memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 sharing_mode: vk::SharingMode::EXCLUSIVE,
@@ -164,15 +164,15 @@ impl TriangleRenderer {
             .with_vertex_shader(self.vertex_shader.clone())
             .with_fragment_shader(self.fragment_shader.clone())
             .with_color(output_rt, color_info)
-            .with_vertex_binding(0, std::mem::size_of::<Vertex>() as u32, vk::VertexInputRate::VERTEX)
+            .with_vertex_binding(0, size_of::<Vertex>() as u32, vk::VertexInputRate::VERTEX)
             .with_vertex_attribute(0, 0, vk::Format::R32G32B32_SFLOAT, 0)
             .with_vertex_attribute(1, 0, vk::Format::R32G32B32_SFLOAT, 12);
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
 
-        node.execute(move |ctx, cmd| {
-            let device = ctx.device();
+        node.execute(move |ctx| {
             let extent = vk::Extent2D { width, height };
+            let encoder = ctx.encoder();
 
             // Update time buffer
             let time_buffer = ctx.get_buffer(&tb);
@@ -183,7 +183,7 @@ impl TriangleRenderer {
                 match binder.bind_buffer("TimeData", time_buffer.handle(), 0, 4) {
                     Ok(_) => {
                         let sets = binder.finish();
-                        ctx.bind_descriptor_sets(cmd, &sets);
+                        ctx.bind_descriptor_sets(&sets);
                     }
                     Err(e) => {
                         log::warn!("Failed to bind time buffer: {:?}", e);
@@ -193,33 +193,31 @@ impl TriangleRenderer {
                 log::warn!("No resource binder available");
             }
 
-            ctx.begin_rendering(cmd, extent);
-            ctx.bind_pipeline(cmd);
+            ctx.begin_rendering(extent);
+            ctx.bind_pipeline();
 
-            unsafe {
-                let viewport = vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: width as f32,
-                    height: height as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                };
-                device.handle().cmd_set_viewport(cmd, 0, &[viewport]);
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: width as f32,
+                height: height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            encoder.set_viewport(0, &[viewport]);
 
-                let scissor = vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent,
-                };
-                device.handle().cmd_set_scissor(cmd, 0, &[scissor]);
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            };
+            encoder.set_scissor(0, &[scissor]);
 
-                device.handle().cmd_bind_vertex_buffers(cmd, 0, &[ctx.get_buffer(&vb).handle()], &[0]);
-                device.handle().cmd_bind_index_buffer(cmd, ctx.get_buffer(&ib).handle(), 0, vk::IndexType::UINT16);
+            encoder.bind_vertex_buffers(0, &[ctx.get_buffer(&vb).handle()], &[0]);
+            encoder.bind_index_buffer(ctx.get_buffer(&ib).handle(), 0, vk::IndexType::UINT16);
 
-                device.handle().cmd_draw_indexed(cmd, 3, 1, 0, 0, 0);
-            }
+            encoder.draw_indexed(3, 1, 0, 0, 0);
 
-            ctx.end_rendering(cmd);
+            ctx.end_rendering();
         });
     }
 }

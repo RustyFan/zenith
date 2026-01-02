@@ -1,12 +1,5 @@
-#[cfg(feature = "dhat-heap")]
-#[global_allocator]
-static ALLOC: dhat::Alloc = dhat::Alloc;
-
 use zenith::rhi::{vk, TextureState};
 use zenith::{launch, App, Args, RenderContext, RenderableApp};
-use zenith::rendergraph::ColorInfo;
-
-static mut FIRST_FRAME_COUNTER: u8 = 3;
 
 pub struct SimpleApp;
 
@@ -28,33 +21,34 @@ impl RenderableApp for SimpleApp {
         let output = context.swapchain_texture();
 
         let builder = context.builder();
-        let mut output = builder.import("back_buffer", output, if unsafe { FIRST_FRAME_COUNTER > 0 } { TextureState::Undefined } else { TextureState::Present });
+        let mut output = builder.import("back_buffer", output, TextureState::Undefined);
 
-        let mut node = builder.add_graphic_node("clear");
-        let output_access = node.write(&mut output, TextureState::Color);
+        let mut node = builder.add_lambda_node("clear");
 
-        let mut output_color_info = ColorInfo::default();
-        output_color_info.load_op = vk::AttachmentLoadOp::CLEAR;
-        output_color_info.store_op = vk::AttachmentStoreOp::STORE;
-        output_color_info.clear_value = [0.2, 0.3, 0.8, 1.0]; // Blue-ish color
+        let output_access = node.write_hint(&mut output, TextureState::General, vk::PipelineStageFlags2::TRANSFER);
+        node.execute(move |ctx| {
+            let rt = ctx.get_texture(&output_access);
+            let encoder = ctx.command_encoder();
 
-        node.setup_pipeline()
-            .with_color(output_access, output_color_info);
-
-        node.execute(move |ctx, cmd| {
-            let extent = vk::Extent2D { width, height };
-
-            ctx.begin_rendering(cmd, extent);
-            ctx.end_rendering(cmd);
+            encoder.custom(|cmd| {
+                unsafe {
+                    ctx.device().handle().cmd_clear_color_image(
+                        cmd,
+                        rt.handle(),
+                        vk::ImageLayout::GENERAL,
+                        &vk::ClearColorValue { float32: [0.2, 0.3, 0.8, 1.0] },
+                        &[
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(1)
+                                .layer_count(1)
+                        ]);
+                }
+            });
         });
-
-        unsafe { if FIRST_FRAME_COUNTER > 0 { FIRST_FRAME_COUNTER -= 1 }; }
     }
 }
 
 fn main() {
-    #[cfg(feature = "dhat-heap")]
-    let _profiler = dhat::Profiler::new_heap();
-
     launch::<SimpleApp>().expect("Failed to launch zenith engine loop!");
 }

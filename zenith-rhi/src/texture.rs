@@ -1,7 +1,7 @@
 //! Vulkan Texture - GPU texture resource management.
 
 use ash::{vk, Device};
-use zenith_core::log;
+use std::cell::RefCell;
 use crate::buffer::find_memory_type;
 
 /// Texture descriptor for creating GPU textures.
@@ -266,7 +266,7 @@ pub struct Texture {
     image: vk::Image,
     /// If memory is null, it is a swapchain texture
     memory: vk::DeviceMemory,
-    view: Option<vk::ImageView>,
+    view: RefCell<Option<vk::ImageView>>,
     format: vk::Format,
     extent: vk::Extent3D,
     usage: vk::ImageUsageFlags,
@@ -319,7 +319,7 @@ impl Texture {
             device: device.clone(),
             image,
             memory,
-            view: None,
+            view: RefCell::new(None),
             format: desc.format,
             extent: desc.extent,
             usage: desc.usage,
@@ -330,7 +330,7 @@ impl Texture {
         Ok(texture)
     }
 
-    /// Create a new texture with the specified parameters (view is NOT created, call create_view() to create it).
+    /// Create a new texture with the specified parameters (view is lazily created on first view() call).
     pub fn new(
         device: &Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
@@ -378,7 +378,7 @@ impl Texture {
             device: device.clone(),
             image,
             memory,
-            view: None,
+            view: RefCell::new(None),
             format,
             extent,
             usage,
@@ -389,7 +389,7 @@ impl Texture {
         Ok(texture)
     }
 
-    /// Create a 2D texture (convenience constructor, view is NOT created, call create_view() to create it).
+    /// Create a 2D texture (convenience constructor, view is lazily created on first view() call).
     pub fn new_2d(
         device: &Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
@@ -426,7 +426,7 @@ impl Texture {
             device: device.clone(),
             image,
             memory: vk::DeviceMemory::null(),
-            view: None,
+            view: RefCell::new(None),
             format,
             extent: vk::Extent3D {
                 width: extent.width,
@@ -441,9 +441,9 @@ impl Texture {
         texture
     }
 
-    /// Create the image view. Returns the view handle, or the existing view if already created.
-    pub fn create_view(&mut self) -> Result<vk::ImageView, vk::Result> {
-        if let Some(view) = self.view {
+    /// Get or create the texture view (lazily creates the view on first call).
+    pub fn view(&self) -> Result<vk::ImageView, vk::Result> {
+        if let Some(view) = *self.view.borrow() {
             return Ok(view);
         }
 
@@ -468,18 +468,13 @@ impl Texture {
             });
 
         let view = unsafe { self.device.create_image_view(&view_info, None)? };
-        self.view = Some(view);
+        *self.view.borrow_mut() = Some(view);
         Ok(view)
     }
 
     /// Get the raw Vulkan image handle.
     pub fn handle(&self) -> vk::Image {
         self.image
-    }
-
-    /// Get the texture view (returns None if create_view() hasn't been called).
-    pub fn view(&self) -> Option<vk::ImageView> {
-        self.view
     }
 
     /// Get the texture format.
@@ -520,13 +515,13 @@ impl Texture {
 impl Drop for Texture {
     fn drop(&mut self) {
         unsafe {
-            if let Some(view) = self.view {
+            if let Some(view) = *self.view.borrow() {
                 self.device.destroy_image_view(view, None);
             }
 
             if self.memory != vk::DeviceMemory::null() {
                 self.device.destroy_image(self.image, None);
-                self.device.free_memory(self.memory, None);    
+                self.device.free_memory(self.memory, None);
             }
         }
     }

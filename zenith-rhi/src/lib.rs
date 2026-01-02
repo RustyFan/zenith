@@ -19,7 +19,7 @@ mod synchronization;
 
 pub use ash::{vk, Device};
 pub use buffer::{find_memory_type, Buffer, BufferDesc};
-pub use command::{CommandPool, CommandRecorder};
+pub use command::{CommandPool, CommandEncoder};
 pub use core::RhiCore;
 pub use descriptor::{
     BindingError, DescriptorPool, DescriptorSetLayout, LayoutBinding, ResourceBinder,

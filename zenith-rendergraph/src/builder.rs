@@ -1,20 +1,21 @@
-use std::marker::PhantomData;
-use std::sync::Arc;
-use log::warn;
-use crate::node::{NodePipelineState, RenderGraphNode, ColorInfo, DepthStencilInfo, GraphicPipelineDescriptor, VertexBindingDesc, VertexAttributeDesc};
-use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph, ResourceStorage, BufferStateTracker, TextureStateTracker};
-use crate::interface::{ResourceState, ResourceDescriptor};
+use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph};
+use crate::interface::{ResourceDescriptor, ResourceState};
+use crate::node::{ColorInfo, DepthStencilInfo, GraphicPipelineDescriptor, NodePipelineState, RenderGraphNode, VertexAttributeDesc, VertexBindingDesc};
 use crate::resource::{
     ExportResourceStorage, ExportedRenderGraphResource, GraphImportExportResource,
-    GraphResource, GraphResourceDescriptor, GraphResourceView,
-    GraphResourceId, InitialResourceStorage,
+    GraphResource, GraphResourceDescriptor, GraphResourceId,
+    GraphResourceView, InitialResourceStorage,
     RenderGraphResource, RenderGraphResourceAccess, Rt, Srv, Uav};
-use zenith_rhi::{vk, Buffer, Texture, Shader, RenderDevice, TextureState, BufferState, ShaderReflection};
+use log::warn;
+use std::marker::PhantomData;
+use std::sync::Arc;
+use zenith_rhi::{vk, Shader, ShaderReflection, Texture};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResourceAccessStorage {
     pub(crate) id: GraphResourceId,
     pub(crate) access: ResourceState,
+    pub(crate) stage_hint: Option<vk::PipelineStageFlags2>,
 }
 
 #[derive(Default)]
@@ -130,54 +131,10 @@ impl RenderGraphBuilder {
     // }
 
     #[profiling::function]
-    pub fn build(self, device: &RenderDevice) -> RenderGraph {
-        let resources = self.initial_resources
-            .into_iter()
-            .map(|res| {
-                // TODO: postpone the resource creation to compile()
-                match res {
-                    InitialResourceStorage::ManagedBuffer(name, desc) => {
-                        let resource = Buffer::from_desc(
-                            device.handle(),
-                            device.memory_properties(),
-                            &desc
-                        ).expect("Failed to create buffer");
-                        ResourceStorage::ManagedBuffer {
-                            name,
-                            resource,
-                            state_tracker: BufferStateTracker::new(BufferState::Undefined),
-                        }
-                    }
-                    InitialResourceStorage::ManagedTexture(name, desc) => {
-                        let mut resource = Texture::from_desc(
-                            device.handle(),
-                            device.memory_properties(),
-                            &desc
-                        ).expect("Failed to create texture");
-                        resource.create_view().expect("Failed to create texture view");
-                        ResourceStorage::ManagedTexture {
-                            name,
-                            resource,
-                            state_tracker: TextureStateTracker::new(TextureState::Undefined),
-                        }
-                    }
-                    InitialResourceStorage::ImportedBuffer(name, buffer, initial_state) => ResourceStorage::ImportedBuffer {
-                        name,
-                        resource: buffer.clone(),
-                        state_tracker: BufferStateTracker::new(initial_state),
-                    },
-                    InitialResourceStorage::ImportedTexture(name, tex, initial_state) => ResourceStorage::ImportedTexture {
-                        name,
-                        resource: tex.clone(),
-                        state_tracker: TextureStateTracker::new(initial_state),
-                    },
-                }
-            })
-            .collect();
-
+    pub fn build(self) -> RenderGraph {
         RenderGraph {
             nodes: self.nodes,
-            resources
+            initial_resources: self.initial_resources,
         }
     }
 }
@@ -215,6 +172,33 @@ impl CommonNodeBuilder<'_, '_> {
     }
 
     #[must_use]
+    fn read_hint<R: GraphResource, V: GraphResourceView>(
+        &mut self,
+        resource: &RenderGraphResource<R>,
+        access: impl Into<ResourceState>,
+        stage_hint: vk::PipelineStageFlags2,
+    ) -> RenderGraphResourceAccess<R, V> {
+        let access = RenderGraphResourceAccess {
+            id: resource.id,
+            access: access.into(),
+            _marker: PhantomData,
+        };
+
+        if let None = self.node.inputs.iter().find(|h| h.id == resource.id) {
+            self.node.inputs.push(access.as_untyped_with_hint(stage_hint));
+        } else {
+            let name = self.resources
+                .get(resource.id as usize)
+                .expect("Graph resource id out of bound!")
+                .name();
+
+            warn!("Try to read resource[{name}] multiple time!")
+        }
+
+        access
+    }
+
+    #[must_use]
     fn write<R: GraphResource, V: GraphResourceView>(
         &mut self,
         resource: &mut RenderGraphResource<R>,
@@ -228,6 +212,33 @@ impl CommonNodeBuilder<'_, '_> {
 
         if let None = self.node.outputs.iter().find(|h| h.id == resource.id) {
             self.node.outputs.push(access.as_untyped());
+        } else {
+            let name = self.resources
+                .get(resource.id as usize)
+                .expect("Graph resource id out of bound!")
+                .name();
+
+            warn!("Try to write to resource[{name}] multiple time!")
+        }
+
+        access
+    }
+
+    #[must_use]
+    fn write_hint<R: GraphResource, V: GraphResourceView>(
+        &mut self,
+        resource: &mut RenderGraphResource<R>,
+        access: impl Into<ResourceState>,
+        stage_hint: vk::PipelineStageFlags2,
+    ) -> RenderGraphResourceAccess<R, V>  {
+        let access = RenderGraphResourceAccess {
+            id: resource.id,
+            access: access.into(),
+            _marker: PhantomData,
+        };
+
+        if let None = self.node.outputs.iter().find(|h| h.id == resource.id) {
+            self.node.outputs.push(access.as_untyped_with_hint(stage_hint));
         } else {
             let name = self.resources
                 .get(resource.id as usize)
@@ -255,12 +266,34 @@ macro_rules! inject_common_node_builder_methods {
 
         #[must_use]
         #[inline]
+        pub fn read_hint<R: GraphResource>(
+            &mut self,
+            resource: &RenderGraphResource<R>,
+            access: impl Into<ResourceState>,
+            stage_hint: vk::PipelineStageFlags2,
+        ) -> RenderGraphResourceAccess<R, $read_view> {
+            self.common.read_hint(resource, access, stage_hint)
+        }
+
+        #[must_use]
+        #[inline]
         pub fn write<R: GraphResource>(
             &mut self,
             resource: &mut RenderGraphResource<R>,
             access: impl Into<ResourceState>,
         ) -> RenderGraphResourceAccess<R, $write_view>  {
             self.common.write(resource, access)
+        }
+
+        #[must_use]
+        #[inline]
+        pub fn write_hint<R: GraphResource>(
+            &mut self,
+            resource: &mut RenderGraphResource<R>,
+            access: impl Into<ResourceState>,
+            stage_hint: vk::PipelineStageFlags2,
+        ) -> RenderGraphResourceAccess<R, $write_view>  {
+            self.common.write_hint(resource, access, stage_hint)
         }
     };
 }
@@ -275,7 +308,7 @@ impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
     #[inline]
     pub fn execute<F>(&mut self, node_job: F)
     where
-        F: FnOnce(&mut GraphicNodeExecutionContext, vk::CommandBuffer) + 'static
+        F: FnOnce(&mut GraphicNodeExecutionContext) + 'static
     {
         if let NodePipelineState::Graphic { job_functor, .. } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));
@@ -309,7 +342,7 @@ impl<'node, 'res> LambdaNodeBuilder<'node, 'res> {
     #[inline]
     pub fn execute<F>(&mut self, node_job: F)
     where
-        F: FnOnce(&mut LambdaNodeExecutionContext, vk::CommandBuffer) + 'static
+        F: FnOnce(&mut LambdaNodeExecutionContext) + 'static
     {
         if let NodePipelineState::Lambda { job_functor } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));

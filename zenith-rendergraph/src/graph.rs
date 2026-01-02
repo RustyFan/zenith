@@ -6,12 +6,10 @@ use crate::resource::{
     GraphResourceId, GraphResourceView, RenderGraphResourceAccess,
 };
 use crate::GraphicPipelineDescriptor;
-use anyhow::anyhow;
 use std::cell::Cell;
 use std::sync::Arc;
 use zenith_core::collections::SmallVec;
-use zenith_rhi::swapchain::SwapchainWindow;
-use zenith_rhi::{CommandPool, Semaphore};
+use zenith_rhi::{CommandEncoder};
 use zenith_rhi::{buffer_barrier, texture_barrier, vk, ColorBlendAttachment, GraphicPipeline, GraphicPipelineKey, PipelineCache, RenderDevice, ShaderResourceBinder, Swapchain, VertexAttribute, VertexBinding};
 
 pub(crate) enum ResourceStorage {
@@ -38,30 +36,6 @@ pub(crate) enum ResourceStorage {
 }
 
 impl ResourceStorage {
-    pub(crate) fn name(&self) -> &str {
-        match self {
-            ResourceStorage::ManagedBuffer { name, .. } => name,
-            ResourceStorage::ManagedTexture { name, .. } => name,
-            ResourceStorage::ImportedBuffer { name, .. } => name,
-            ResourceStorage::ImportedTexture { name, .. } => name,
-        }
-    }
-
-    pub(crate) fn is_buffer(&self) -> bool {
-        match self {
-            ResourceStorage::ManagedBuffer { .. } | ResourceStorage::ImportedBuffer { .. } => true,
-            _ => false,
-        }
-    }
-
-    pub(crate) fn is_texture(&self) -> bool {
-        match self {
-            ResourceStorage::ManagedTexture { .. } | ResourceStorage::ImportedTexture { .. } => true,
-            _ => false,
-        }
-    }
-
-
     pub(crate) fn as_buffer(&self) -> &Buffer {
         match self {
             ResourceStorage::ManagedBuffer { resource, .. } => resource,
@@ -81,63 +55,127 @@ impl ResourceStorage {
 
 pub(crate) struct BufferStateTracker {
     current_access: Cell<BufferState>,
+    current_stage: Cell<vk::PipelineStageFlags2>,
 }
 
 impl BufferStateTracker {
     pub(crate) fn new(access: BufferState) -> Self {
-        Self { current_access: Cell::new(access) }
+        Self {
+            current_access: Cell::new(access),
+            current_stage: Cell::new(vk::PipelineStageFlags2::NONE),
+        }
     }
 
-    pub(crate) fn current(&self) -> BufferState {
+    pub(crate) fn current_access(&self) -> BufferState {
         self.current_access.get()
     }
 
-    pub(crate) fn transition_to(&self, next_access: BufferState) {
+    pub(crate) fn current_stage(&self) -> vk::PipelineStageFlags2 {
+        self.current_stage.get()
+    }
+
+    pub(crate) fn transition_to(&self, next_access: BufferState, next_stage: vk::PipelineStageFlags2) {
         self.current_access.set(next_access);
+        self.current_stage.set(next_stage);
     }
 }
 
 pub(crate) struct TextureStateTracker {
     current_access: Cell<TextureState>,
+    current_stage: Cell<vk::PipelineStageFlags2>,
 }
 
 impl TextureStateTracker {
     pub(crate) fn new(state: TextureState) -> Self {
-        Self { current_access: Cell::new(state) }
+        Self {
+            current_access: Cell::new(state),
+            current_stage: Cell::new(vk::PipelineStageFlags2::NONE),
+        }
     }
 
-    pub(crate) fn current(&self) -> TextureState {
+    pub(crate) fn current_access(&self) -> TextureState {
         self.current_access.get()
     }
 
-    pub(crate) fn transition_to(&self, next_state: TextureState) {
+    pub(crate) fn current_stage(&self) -> vk::PipelineStageFlags2 {
+        self.current_stage.get()
+    }
+
+    pub(crate) fn transition_to(&self, next_state: TextureState, next_stage: vk::PipelineStageFlags2) {
         self.current_access.set(next_state);
+        self.current_stage.set(next_stage);
     }
 }
+
+use crate::resource::InitialResourceStorage;
 
 pub struct RenderGraph {
     pub(crate) nodes: Vec<RenderGraphNode>,
-    pub(crate) resources: Vec<ResourceStorage>,
+    pub(crate) initial_resources: Vec<InitialResourceStorage>,
 }
 
 impl RenderGraph {
-    pub fn validate(&self) {
-        // TODO: Validate graph structure
-    }
-
     #[profiling::function]
     pub fn compile(
         mut self,
         device: &RenderDevice,
         pipeline_cache: &mut PipelineCache,
     ) -> CompiledRenderGraph {
+        // Create resources from initial resource descriptors
+        let resources: Vec<ResourceStorage> = self.initial_resources
+            .into_iter()
+            .map(|res| {
+                match res {
+                    InitialResourceStorage::ManagedBuffer(name, desc) => {
+                        let resource = Buffer::from_desc(
+                            device.handle(),
+                            device.memory_properties(),
+                            &desc
+                        ).expect("Failed to create buffer");
+                        ResourceStorage::ManagedBuffer {
+                            name,
+                            resource,
+                            state_tracker: BufferStateTracker::new(BufferState::Undefined),
+                        }
+                    }
+                    InitialResourceStorage::ManagedTexture(name, desc) => {
+                        let resource = Texture::from_desc(
+                            device.handle(),
+                            device.memory_properties(),
+                            &desc
+                        ).expect("Failed to create texture");
+                        ResourceStorage::ManagedTexture {
+                            name,
+                            resource,
+                            state_tracker: TextureStateTracker::new(TextureState::Undefined),
+                        }
+                    }
+                    InitialResourceStorage::ImportedBuffer(name, buffer, initial_state) => ResourceStorage::ImportedBuffer {
+                        name,
+                        resource: buffer.clone(),
+                        state_tracker: BufferStateTracker::new(initial_state),
+                    },
+                    InitialResourceStorage::ImportedTexture(name, tex, initial_state) => ResourceStorage::ImportedTexture {
+                        name,
+                        resource: tex.clone(),
+                        state_tracker: TextureStateTracker::new(initial_state),
+                    },
+                }
+            })
+            .collect();
+
         let mut graphic_pipelines = vec![];
 
         for node in &self.nodes {
+            if !node.pipeline_state.valid() {
+                log::warn!("Incomplete information for render graph node [{}]. Skipped.", node.name);
+                continue;
+            }
+
             match &node.pipeline_state {
                 NodePipelineState::Graphic { pipeline_desc, .. } => {
                     if pipeline_desc.valid() {
-                        let pipeline = self.create_graphic_pipeline(pipeline_cache, pipeline_desc);
+                        let pipeline = Self::create_graphic_pipeline(&resources, pipeline_cache, pipeline_desc);
                         graphic_pipelines.push(Some(pipeline));
                     } else {
                         graphic_pipelines.push(None);
@@ -148,23 +186,24 @@ impl RenderGraph {
             }
         }
 
+        let mut swapchain_tex_id = GraphResourceId::MAX;
         // find the first present node (i.e. first node which outputs to swapchain texture)
         let first_present_node_index = self.nodes.iter()
             .position(|node| {
                 node.outputs.iter()
                     .filter_map(|output| {
-                        let res = utility::resource_storage_ref(&self.resources, output.id);
+                        let res = utility::resource_storage_ref(&resources, output.id);
                         match res {
-                            ResourceStorage::ManagedTexture { resource, .. }  => {
-                                Some(resource)
-                            }
                             ResourceStorage::ImportedTexture { resource, .. } => {
-                                Some(resource.as_ref())
+                                Some((resource.as_ref(), output.id))
                             }
                             _ => None,
                         }
                     })
-                    .any(|tex| tex.is_swapchain_texture())
+                    .any(|(tex, id)| {
+                        swapchain_tex_id = id;
+                        tex.is_swapchain_texture()
+                    })
             });
 
         let (serial_nodes, present_nodes) = if let Some(present_node_index) = first_present_node_index {
@@ -176,15 +215,16 @@ impl RenderGraph {
         CompiledRenderGraph {
             serial_nodes,
             present_nodes,
-            resources: self.resources,
+            resources,
             graphic_pipe_index: 0,
             graphic_pipelines,
+            swapchain_tex_id,
         }
     }
 
     #[profiling::function]
     fn create_graphic_pipeline(
-        &self,
+        resources: &Vec<ResourceStorage>,
         pipeline_cache: &mut PipelineCache,
         desc: &GraphicPipelineDescriptor,
     ) -> Arc<GraphicPipeline> {
@@ -209,12 +249,12 @@ impl RenderGraph {
             .color_attachments
             .iter()
             .map(|(resource, _)| {
-                utility::resource_storage_ref(&self.resources, resource.id).as_texture().format()
+                utility::resource_storage_ref(resources, resource.id).as_texture().format()
             })
             .collect();
 
         let depth_format = desc.depth_stencil_attachment.as_ref().map(|(resource, _)| {
-            utility::resource_storage_ref(&self.resources, resource.id).as_texture().format()
+            utility::resource_storage_ref(resources, resource.id).as_texture().format()
         });
 
         let depth_info = desc.depth_stencil_attachment.as_ref().map(|(_, info)| info);
@@ -287,18 +327,15 @@ pub struct CompiledRenderGraph {
     resources: Vec<ResourceStorage>,
     graphic_pipe_index: u32,
     graphic_pipelines: Vec<Option<Arc<GraphicPipeline>>>,
+    swapchain_tex_id: GraphResourceId,
 }
 
 impl CompiledRenderGraph {
     #[profiling::function]
     pub fn execute(&mut self, device: &RenderDevice) {
         let cmd = device.execute_command_pool().allocate().expect("Failed to allocate command buffer");
-        unsafe {
-            device.handle().begin_command_buffer(
-                cmd,
-                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            ).unwrap();
-        }
+        let encoder = CommandEncoder::new(device.handle(), cmd);
+        encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT).unwrap();
 
         let nodes: Vec<RenderGraphNode> = self.serial_nodes.drain(..).collect();
         for node in nodes {
@@ -308,13 +345,14 @@ impl CompiledRenderGraph {
                         profiling::scope!("rendergraph::barriers");
                         // TODO: facilitate VkSubpassDependency2 for render targets barriers inside renderpass
                         let output_iter = node.outputs.iter()
-                            .map(|a| (a.id, a.access));
+                            .map(|res| (res.id, res.access, res.stage_hint));
 
                         Self::transition_resources(
-                            device, cmd, &self.resources,
+                            device, &encoder, &self.resources,
                             node.inputs.iter()
-                                .map(|a| (a.id, a.access))
+                                .map(|res| (res.id, res.access, res.stage_hint))
                                 .chain(output_iter),
+                            Some(&pipeline_desc),
                         );
                     }
 
@@ -327,13 +365,13 @@ impl CompiledRenderGraph {
                         profiling::scope!("rendergraph::node_recording", &name);
 
                         let mut ctx = GraphicNodeExecutionContext {
-                            name: name.as_str(),
                             pipeline_desc: &pipeline_desc,
                             device,
                             resources: &self.resources,
                             pipeline,
+                            encoder: &encoder,
                         };
-                        record(&mut ctx, cmd);
+                        record(&mut ctx);
                     } else {
                         log::warn!("Missing job of graphic node {}!", name);
                     }
@@ -343,13 +381,14 @@ impl CompiledRenderGraph {
                     {
                         profiling::scope!("rendergraph::barriers");
                         let output_iter = node.outputs.iter()
-                            .map(|a| (a.id, a.access));
+                            .map(|res| (res.id, res.access, res.stage_hint));
 
                         Self::transition_resources(
-                            device, cmd, &self.resources,
+                            device, &encoder, &self.resources,
                             node.inputs.iter()
-                                .map(|a| (a.id, a.access))
+                                .map(|res| (res.id, res.access, res.stage_hint))
                                 .chain(output_iter),
+                            None,
                         );
                     }
 
@@ -357,8 +396,8 @@ impl CompiledRenderGraph {
                     if let Some(record) = job_functor.take() {
                         profiling::scope!("rendergraph::node_recording", &name);
 
-                        let mut ctx = LambdaNodeExecutionContext { device, resources: &self.resources };
-                        record(&mut ctx, cmd);
+                        let mut ctx = LambdaNodeExecutionContext { device, resources: &self.resources, encoder: &encoder };
+                        record(&mut ctx);
                     } else {
                         log::warn!("Missing job of lambda node {}!", name);
                     }
@@ -366,9 +405,7 @@ impl CompiledRenderGraph {
             }
         }
 
-        unsafe {
-            device.handle().end_command_buffer(cmd).unwrap();
-        };
+        encoder.end().unwrap();
 
         device.submit_commands(
             cmd,
@@ -381,21 +418,26 @@ impl CompiledRenderGraph {
         );
     }
 
-    // TODO: swapchain window should reference the swapchain
     pub fn present(mut self, swapchain: &mut Swapchain, device: &mut RenderDevice) -> anyhow::Result<RetiredRenderGraph> {
         let (image_index, _) = swapchain.acquire_next_image(device.handle())?;
         swapchain.reset_current_fence(device.handle())?;
+
+        // update the swapchain texture reference to the acquired image
+        if self.swapchain_tex_id != GraphResourceId::MAX {
+            let swapchain_tex = swapchain.swapchain_texture(image_index as usize);
+            if let Some(ResourceStorage::ImportedTexture { resource, state_tracker, .. }) = self.resources.get_mut(self.swapchain_tex_id as usize) {
+                *resource = swapchain_tex;
+                // Reset state tracker since this is a newly acquired image
+                *state_tracker = TextureStateTracker::new(TextureState::Undefined);
+            }
+        }
 
         device.reset_frame_resources();
         device.present_command_pool().reset()?;
 
         let cmd = device.present_command_pool().allocate().expect("Failed to allocate command buffer");
-        unsafe {
-            device.handle().begin_command_buffer(
-                cmd,
-                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-        }
+        let encoder = CommandEncoder::new(device.handle(), cmd);
+        encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
 
         for node in self.present_nodes {
             match node.pipeline_state {
@@ -404,13 +446,14 @@ impl CompiledRenderGraph {
                         profiling::scope!("rendergraph::barriers");
                         // TODO: facilitate VkSubpassDependency2 for render targets barriers inside renderpass
                         let output_iter = node.outputs.iter()
-                            .map(|a| (a.id, a.access));
+                            .map(|res| (res.id, res.access, res.stage_hint));
 
                         Self::transition_resources(
-                            device, cmd, &self.resources,
+                            device, &encoder, &self.resources,
                             node.inputs.iter()
-                                .map(|a| (a.id, a.access))
+                                .map(|res| (res.id, res.access, res.stage_hint))
                                 .chain(output_iter),
+                            Some(&pipeline_desc),
                         );
                     }
 
@@ -423,13 +466,13 @@ impl CompiledRenderGraph {
                         profiling::scope!("rendergraph::node_recording", &name);
 
                         let mut ctx = GraphicNodeExecutionContext {
-                            name: name.as_str(),
                             pipeline_desc: &pipeline_desc,
                             device,
                             resources: &self.resources,
                             pipeline,
+                            encoder: &encoder,
                         };
-                        record(&mut ctx, cmd);
+                        record(&mut ctx);
                     } else {
                         log::warn!("Missing job of graphic node {}!", name);
                     }
@@ -439,13 +482,14 @@ impl CompiledRenderGraph {
                     {
                         profiling::scope!("rendergraph::barriers");
                         let output_iter = node.outputs.iter()
-                            .map(|a| (a.id, a.access));
+                            .map(|res| (res.id, res.access, res.stage_hint));
 
                         Self::transition_resources(
-                            device, cmd, &self.resources,
+                            device, &encoder, &self.resources,
                             node.inputs.iter()
-                                .map(|a| (a.id, a.access))
+                                .map(|res| (res.id, res.access, res.stage_hint))
                                 .chain(output_iter),
+                            None,
                         );
                     }
 
@@ -453,8 +497,8 @@ impl CompiledRenderGraph {
                     if let Some(record) = job_functor.take() {
                         profiling::scope!("rendergraph::node_recording", &name);
 
-                        let mut ctx = LambdaNodeExecutionContext { device, resources: &self.resources };
-                        record(&mut ctx, cmd);
+                        let mut ctx = LambdaNodeExecutionContext { device, resources: &self.resources, encoder: &encoder };
+                        record(&mut ctx);
                     } else {
                         log::warn!("Missing job of lambda node {}!", name);
                     }
@@ -462,30 +506,14 @@ impl CompiledRenderGraph {
             }
         }
 
-        // Transition swapchain image to present
-        let present_barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
-            .dst_access_mask(vk::AccessFlags2::NONE)
-            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .image(swapchain.swapchain_texture(image_index as _).handle())
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
+        // make sure the swapchain texture has the right image layout for presentation
+        Self::transition_resources(
+            device, &encoder, &self.resources,
+            [(self.swapchain_tex_id, TextureState::Present.into(), Some(vk::PipelineStageFlags2::BOTTOM_OF_PIPE))].into_iter(),
+            None,
+        );
 
-        let dependency_info = vk::DependencyInfo::default()
-            .image_memory_barriers(std::slice::from_ref(&present_barrier));
-
-        unsafe {
-            device.handle().cmd_pipeline_barrier2(cmd, &dependency_info);
-            device.handle().end_command_buffer(cmd)?;
-        }
+        encoder.end()?;
 
         let frame_sync = swapchain.current_frame_sync();
 
@@ -508,76 +536,97 @@ impl CompiledRenderGraph {
 
     fn transition_resources(
         device: &RenderDevice,
-        cmd: vk::CommandBuffer,
-        resources: &Vec<ResourceStorage>,
-        resources_to_transition: impl Iterator<Item = (GraphResourceId, ResourceState)>,
+        encoder: &CommandEncoder,
+        resource_storage: &Vec<ResourceStorage>,
+        resources_to_transition: impl Iterator<Item = (GraphResourceId, ResourceState, Option<vk::PipelineStageFlags2>)>,
+        pipeline_desc: Option<&GraphicPipelineDescriptor>,
     ) {
         let mut image_barriers: SmallVec<[vk::ImageMemoryBarrier2; 8]> = SmallVec::new();
         let mut buffer_barriers: SmallVec<[vk::BufferMemoryBarrier2; 8]> = SmallVec::new();
 
-        let mut add_buffer_barrier_if_needed = |resource, access: ResourceState, state_tracker: &BufferStateTracker, name: &String| {
+        // Get combined shader stages from all bindings in reflection
+        let combined_shader_stage = pipeline_desc
+            .and_then(|desc| desc.merged_reflection.as_ref())
+            .map(|r| r.bindings.iter().fold(vk::ShaderStageFlags::empty(), |acc, b| acc | b.stage_flags))
+            .map(shader_stage_to_pipeline_stage)
+            .unwrap_or(vk::PipelineStageFlags2::ALL_COMMANDS);
+
+        let mut add_buffer_barrier = |resource: &Buffer, access: ResourceState, state_tracker: &BufferStateTracker, stage_hint: Option<vk::PipelineStageFlags2>, name: &String| {
             let ResourceState::Buffer(next_state) = access else {
-                log::warn!("Try to transition buffer [{}] into {:?}.", name, access);
                 return;
             };
 
-            let prev_state = state_tracker.current();
+            let prev_state = state_tracker.current_access();
             if prev_state == next_state {
                 return;
+            }
+
+            let dst_stage = stage_hint.unwrap_or(combined_shader_stage);
+            if dst_stage == vk::PipelineStageFlags2::ALL_COMMANDS {
+                log::warn!("Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.",
+                name)
             }
 
             buffer_barriers.push(buffer_barrier(
                 resource,
-                vk::PipelineStageFlags2::NONE,
+                state_tracker.current_stage(),
                 prev_state,
-                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                dst_stage,
                 next_state,
                 device.graphics_queue_family(),
                 device.graphics_queue_family(),
                 false,
             ));
-            state_tracker.transition_to(next_state);
+            state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage));
         };
-        let mut add_texture_barrier_if_needed = |resource, access: ResourceState, state_tracker: &TextureStateTracker, name: &String| {
+
+        let mut add_texture_barrier = |resource: &Texture, access: ResourceState, state_tracker: &TextureStateTracker, stage_hint: Option<vk::PipelineStageFlags2>, name: &String| {
             let ResourceState::Texture(next_state) = access else {
-                log::warn!("Try to transition texture [{}] into {:?}.", name, access);
                 return;
             };
 
-            let prev_state = state_tracker.current();
+            let prev_state = state_tracker.current_access();
             if prev_state == next_state {
                 return;
             }
 
+            let dst_stage = stage_hint.unwrap_or(combined_shader_stage);
+            if dst_stage == vk::PipelineStageFlags2::ALL_COMMANDS {
+                log::warn!(r#"
+                Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage.
+                Use read_hint() or write_hint() to get better performance."#,
+                name)
+            }
+
             image_barriers.push(texture_barrier(
                 resource,
-                vk::PipelineStageFlags2::NONE,
+                state_tracker.current_stage(),
                 prev_state,
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                dst_stage,
                 next_state,
                 device.graphics_queue_family(),
                 device.graphics_queue_family(),
                 false,
-                false,
+                prev_state == TextureState::Undefined,
             ));
-            state_tracker.transition_to(next_state);
+            state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage));
         };
 
-        for (id, access) in resources_to_transition {
-            let storage = utility::resource_storage_ref(resources, id);
+        for (id, access, stage_hint) in resources_to_transition {
+            let storage = utility::resource_storage_ref(resource_storage, id);
 
             match storage {
                 ResourceStorage::ManagedBuffer { resource, state_tracker, name } => {
-                    add_buffer_barrier_if_needed(resource, access, state_tracker, name);
+                    add_buffer_barrier(resource, access, state_tracker, stage_hint, name);
                 }
                 ResourceStorage::ImportedBuffer { resource, state_tracker, name } => {
-                    add_buffer_barrier_if_needed(resource, access, state_tracker, name);
+                    add_buffer_barrier(resource, access, state_tracker, stage_hint, name);
                 }
                 ResourceStorage::ManagedTexture { resource, state_tracker, name } => {
-                    add_texture_barrier_if_needed(resource, access, state_tracker, name);
+                    add_texture_barrier(resource, access, state_tracker, stage_hint, name);
                 }
                 ResourceStorage::ImportedTexture { resource, state_tracker, name } => {
-                    add_texture_barrier_if_needed(resource, access, state_tracker, name);
+                    add_texture_barrier(resource, access, state_tracker, stage_hint, name);
                 }
             }
         }
@@ -587,17 +636,41 @@ impl CompiledRenderGraph {
                 .image_memory_barriers(&image_barriers)
                 .buffer_memory_barriers(&buffer_barriers);
 
-            unsafe { device.handle().cmd_pipeline_barrier2(cmd, &dependency_info); }
+            encoder.pipeline_barrier(&dependency_info);
         }
     }
 }
 
+/// Convert shader stage flags to pipeline stage flags.
+fn shader_stage_to_pipeline_stage(stage_flags: vk::ShaderStageFlags) -> vk::PipelineStageFlags2 {
+    let mut result = vk::PipelineStageFlags2::NONE;
+    if stage_flags.contains(vk::ShaderStageFlags::VERTEX) {
+        result |= vk::PipelineStageFlags2::VERTEX_SHADER;
+    }
+    if stage_flags.contains(vk::ShaderStageFlags::FRAGMENT) {
+        result |= vk::PipelineStageFlags2::FRAGMENT_SHADER;
+    }
+    if stage_flags.contains(vk::ShaderStageFlags::COMPUTE) {
+        result |= vk::PipelineStageFlags2::COMPUTE_SHADER;
+    }
+    if stage_flags.contains(vk::ShaderStageFlags::GEOMETRY) {
+        result |= vk::PipelineStageFlags2::GEOMETRY_SHADER;
+    }
+    if stage_flags.contains(vk::ShaderStageFlags::TESSELLATION_CONTROL) {
+        result |= vk::PipelineStageFlags2::TESSELLATION_CONTROL_SHADER;
+    }
+    if stage_flags.contains(vk::ShaderStageFlags::TESSELLATION_EVALUATION) {
+        result |= vk::PipelineStageFlags2::TESSELLATION_EVALUATION_SHADER;
+    }
+    result
+}
+
 pub struct GraphicNodeExecutionContext<'node> {
-    name: &'node str,
     pipeline_desc: &'node GraphicPipelineDescriptor,
     device: &'node RenderDevice,
     resources: &'node Vec<ResourceStorage>,
     pipeline: Option<&'node GraphicPipeline>,
+    encoder: &'node CommandEncoder<'node>,
 }
 
 impl<'node> GraphicNodeExecutionContext<'node> {
@@ -611,22 +684,19 @@ impl<'node> GraphicNodeExecutionContext<'node> {
         self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_texture()
     }
 
-    pub fn bind_pipeline(&self, cmd: vk::CommandBuffer) {
+    pub fn bind_pipeline(&self) {
         if let Some(pipeline) = self.pipeline {
-            unsafe {
-                self.device.handle().cmd_bind_pipeline(
-                    cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    pipeline.pipeline(),
-                );
-            }
+            self.encoder.bind_graphics_pipeline(pipeline.pipeline());
         }
     }
 
     #[inline]
     pub fn device(&self) -> &RenderDevice { self.device }
 
-    pub fn begin_rendering(&self, cmd: vk::CommandBuffer, extent: vk::Extent2D) {
+    #[inline]
+    pub fn encoder(&self) -> &CommandEncoder<'node> { self.encoder }
+
+    pub fn begin_rendering(&self, extent: vk::Extent2D) {
         let color_attachments: SmallVec<[vk::RenderingAttachmentInfo; 8]> = self.pipeline_desc.color_attachments.iter()
             .map(|(resource, color_info)| {
                 let texture = utility::resource_storage_ref(self.resources, resource.id).as_texture();
@@ -658,11 +728,11 @@ impl<'node> GraphicNodeExecutionContext<'node> {
             rendering_info = rendering_info.depth_attachment(depth);
         }
 
-        unsafe { self.device.handle().cmd_begin_rendering(cmd, &rendering_info); }
+        self.encoder.begin_rendering(&rendering_info);
     }
 
-    pub fn end_rendering(&self, cmd: vk::CommandBuffer) {
-        unsafe { self.device.handle().cmd_end_rendering(cmd); }
+    pub fn end_rendering(&self) {
+        self.encoder.end_rendering();
     }
 
     /// Create a shader resource binder for this node's pipeline.
@@ -684,32 +754,25 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     }
 
     /// Bind descriptor sets to the pipeline.
-    pub fn bind_descriptor_sets(&self, cmd: vk::CommandBuffer, sets: &[vk::DescriptorSet]) {
+    pub fn bind_descriptor_sets(&self, sets: &[vk::DescriptorSet]) {
         if let Some(pipeline) = self.pipeline {
             if !sets.is_empty() {
-                unsafe {
-                    self.device.handle().cmd_bind_descriptor_sets(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.layout(),
-                        0,
-                        sets,
-                        &[],
-                    );
-                }
+                self.encoder.bind_descriptor_sets(
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.layout(),
+                    0,
+                    sets,
+                    &[],
+                );
             }
         }
-    }
-
-    /// Get the pipeline layout for push constants.
-    pub fn pipeline_layout(&self) -> Option<vk::PipelineLayout> {
-        self.pipeline.map(|p| p.layout())
     }
 }
 
 pub struct LambdaNodeExecutionContext<'node> {
     device: &'node RenderDevice,
     resources: &'node Vec<ResourceStorage>,
+    encoder: &'node CommandEncoder<'node>,
 }
 
 impl<'node> LambdaNodeExecutionContext<'node> {
@@ -727,6 +790,9 @@ impl<'node> LambdaNodeExecutionContext<'node> {
 
     #[inline]
     pub fn device(&self) -> &RenderDevice { self.device }
+
+    #[inline]
+    pub fn command_encoder(&self) -> &CommandEncoder<'node> { self.encoder }
 }
 
 pub struct RetiredRenderGraph {

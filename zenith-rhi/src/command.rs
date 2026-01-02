@@ -65,13 +65,13 @@ impl Drop for CommandPool {
     }
 }
 
-/// Command recorder wrapping a command buffer with common graphics commands.
-pub struct CommandRecorder<'a> {
+/// Command encoder wrapping a command buffer with common graphics commands.
+pub struct CommandEncoder<'a> {
     device: &'a Device,
     cmd: vk::CommandBuffer,
 }
 
-impl<'a> CommandRecorder<'a> {
+impl<'a> CommandEncoder<'a> {
     pub fn new(device: &'a Device, cmd: vk::CommandBuffer) -> Self {
         Self { device, cmd }
     }
@@ -163,7 +163,7 @@ impl<'a> CommandRecorder<'a> {
     }
 
     // Image layout transitions
-    pub fn pipeline_barrier2(&self, dependency_info: &vk::DependencyInfo) {
+    pub fn pipeline_barrier(&self, dependency_info: &vk::DependencyInfo) {
         unsafe { self.device.cmd_pipeline_barrier2(self.cmd, dependency_info) }
     }
 
@@ -183,8 +183,8 @@ impl<'a> CommandRecorder<'a> {
 
     pub fn custom<F>(&self, func: F)
     where
-        F: FnOnce(&Device, vk::CommandBuffer)
+        F: FnOnce(vk::CommandBuffer)
     {
-        func(self.device, self.cmd.clone());
+        func(self.cmd.clone());
     }
 }

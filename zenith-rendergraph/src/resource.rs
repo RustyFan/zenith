@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use derive_more::From;
+use zenith_rhi::vk;
 use crate::builder::ResourceAccessStorage;
 
 use crate::interface::{Buffer, Texture, BufferDesc, TextureDesc, BufferState, TextureState, ResourceDescriptor, ResourceState};
@@ -11,10 +12,6 @@ pub trait GraphResource {
 }
 
 pub trait GraphResourceDescriptor: Clone + Into<ResourceDescriptor> {
-    type Resource: GraphResource;
-}
-
-pub trait GraphResourceState: Copy + Eq {
     type Resource: GraphResource;
 }
 
@@ -45,6 +42,12 @@ pub struct RenderGraphResource<R: GraphResource> {
     pub(crate) _marker: PhantomData<R>,
 }
 
+impl<R: GraphResource> RenderGraphResource<R> {
+    pub fn valid(&self) -> bool {
+        self.id != u32::MAX
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderGraphResourceAccess<R: GraphResource, V: GraphResourceView> {
     pub(crate) id: GraphResourceId,
@@ -53,10 +56,25 @@ pub struct RenderGraphResourceAccess<R: GraphResource, V: GraphResourceView> {
 }
 
 impl<R: GraphResource, V: GraphResourceView> RenderGraphResourceAccess<R, V> {
+    pub fn valid(&self) -> bool {
+        self.id != u32::MAX
+    }
+}
+
+impl<R: GraphResource, V: GraphResourceView> RenderGraphResourceAccess<R, V> {
     pub(crate) fn as_untyped(&self) -> ResourceAccessStorage {
         ResourceAccessStorage {
             id: self.id,
             access: self.access,
+            stage_hint: None,
+        }
+    }
+
+    pub(crate) fn as_untyped_with_hint(&self, stage_hint: vk::PipelineStageFlags2) -> ResourceAccessStorage {
+        ResourceAccessStorage {
+            id: self.id,
+            access: self.access,
+            stage_hint: Some(stage_hint),
         }
     }
 }

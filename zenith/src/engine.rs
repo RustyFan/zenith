@@ -13,8 +13,8 @@ pub struct Engine {
     pipeline_cache: PipelineCache,
     swapchain: Swapchain,
     pub render_device: RenderDevice,
-    physical_device: PhysicalDevice,
-    rhi_core: RhiCore,
+    _physical_device: PhysicalDevice,
+    _rhi_core: RhiCore,
 
     // _puffin_server: puffin_http::Server,
 
@@ -43,8 +43,8 @@ impl Engine {
 
         Ok(Self {
             main_window,
-            rhi_core: core,
-            physical_device,
+            _rhi_core: core,
+            _physical_device: physical_device,
             render_device: device,
 
             swapchain,
@@ -72,7 +72,7 @@ impl Engine {
         );
         app.render(render_context);
 
-        let graph = builder.build(&self.render_device);
+        let graph = builder.build();
         let mut graph = graph.compile(&self.render_device, &mut self.pipeline_cache);
 
         graph.execute(&self.render_device);

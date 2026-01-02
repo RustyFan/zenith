@@ -41,17 +41,17 @@ impl BufferState {
 
 pub fn buffer_barrier<'a>(
     buffer: &Buffer,
-    src_stage: vk::PipelineStageFlags2,
+    src_shader_used_stage: vk::PipelineStageFlags2,
     src_state: BufferState,
-    dst_stage: vk::PipelineStageFlags2,
+    dst_shader_used_stage: vk::PipelineStageFlags2,
     dst_state: BufferState,
     src_queue_family: u32,
     dst_queue_family: u32,
     is_readonly: bool,
 ) -> vk::BufferMemoryBarrier2<'a> {
-    let src_stage = src_state.into_pipeline_stage(src_stage);
+    let src_stage = src_state.into_pipeline_stage(src_shader_used_stage);
     let src_access = src_state.into_access_flag(is_readonly);
-    let dst_stage = dst_state.into_pipeline_stage(dst_stage);
+    let dst_stage = dst_state.into_pipeline_stage(dst_shader_used_stage);
     let dst_access = dst_state.into_access_flag(is_readonly);
 
     // TODO: The src and dst pipeline stage comes from shader reflection and previous usage.
@@ -75,12 +75,27 @@ pub enum TextureState {
     TransferDst,
     Sampled,
     Storage,
+    General,
     Color,
     DepthStencil,
     Present,
 }
 
 impl TextureState {
+    pub fn into_pipeline_stage(self, shader_used_stage: vk::PipelineStageFlags2) -> vk::PipelineStageFlags2 {
+        match self {
+            TextureState::Undefined => vk::PipelineStageFlags2::NONE,
+            TextureState::TransferSrc |
+            TextureState::TransferDst => vk::PipelineStageFlags2::TRANSFER,
+            TextureState::Sampled => shader_used_stage,
+            TextureState::Storage => shader_used_stage,
+            TextureState::General => shader_used_stage,
+            TextureState::Color => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            TextureState::DepthStencil => vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            TextureState::Present => vk::PipelineStageFlags2::NONE,
+        }
+    }
+
     pub fn into_access_flag(self, is_readonly: bool) -> vk::AccessFlags2 {
         match self {
             TextureState::Undefined => vk::AccessFlags2::NONE,
@@ -89,6 +104,7 @@ impl TextureState {
             TextureState::Sampled => vk::AccessFlags2::SHADER_SAMPLED_READ,
             // TODO: Is it better to identify the write-only case?
             TextureState::Storage => if is_readonly { vk::AccessFlags2::SHADER_STORAGE_READ } else { vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE },
+            TextureState::General => if is_readonly { vk::AccessFlags2::MEMORY_READ } else { vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE },
             TextureState::Color => if is_readonly { vk::AccessFlags2::COLOR_ATTACHMENT_READ } else { vk::AccessFlags2::COLOR_ATTACHMENT_WRITE }
             TextureState::DepthStencil => if is_readonly { vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ } else { vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE }
             TextureState::Present => vk::AccessFlags2::NONE
@@ -102,6 +118,7 @@ impl TextureState {
             TextureState::TransferDst => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             TextureState::Sampled => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             TextureState::Storage => vk::ImageLayout::GENERAL,
+            TextureState::General => vk::ImageLayout::GENERAL,
             TextureState::Color => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             TextureState::DepthStencil => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             TextureState::Present => vk::ImageLayout::PRESENT_SRC_KHR,
@@ -111,16 +128,18 @@ impl TextureState {
 
 pub fn texture_barrier<'a>(
     texture: &Texture,
-    src_stage: vk::PipelineStageFlags2,
+    src_shader_used_stage: vk::PipelineStageFlags2,
     src_state: TextureState,
-    dst_stage: vk::PipelineStageFlags2,
+    dst_shader_used_stage: vk::PipelineStageFlags2,
     dst_state: TextureState,
     src_queue_family: u32,
     dst_queue_family: u32,
     is_readonly: bool,
     is_discard: bool
 ) -> vk::ImageMemoryBarrier2<'a> {
+    let src_stage = src_state.into_pipeline_stage(src_shader_used_stage);
     let src_access = src_state.into_access_flag(is_readonly);
+    let dst_stage = dst_state.into_pipeline_stage(dst_shader_used_stage);
     let dst_access = dst_state.into_access_flag(is_readonly);
     let mut old_layout = src_state.into_image_layout();
     let new_layout = dst_state.into_image_layout();
