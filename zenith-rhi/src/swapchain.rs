@@ -7,7 +7,7 @@ use winit::window::Window;
 use zenith_core::log::info;
 use anyhow::{anyhow, Result};
 use ash::vk::{Handle};
-use crate::{RhiCore, RenderDevice, Texture};
+use crate::{RhiCore, RenderDevice, Texture, Queue, Fence};
 
 #[derive(Clone)]
 pub struct SwapchainWindow {
@@ -79,7 +79,7 @@ impl Default for SwapchainConfig {
 pub struct FrameSync {
     pub image_available: vk::Semaphore,
     pub render_finished: vk::Semaphore,
-    pub in_flight_fence: vk::Fence,
+    pub in_flight_fence: Fence,
 }
 
 /// Vulkan swapchain management.
@@ -123,7 +123,7 @@ impl Swapchain {
         window: SwapchainWindow,
         config: SwapchainConfig,
     ) -> Result<Self> {
-        if device.graphics_queue_family() != device.present_queue_family() {
+        if device.graphics_queue().family_index() != device.present_queue().family_index() {
             return Err(anyhow!("Graphic queue and present queue should be the same!"));
         }
 
@@ -228,7 +228,7 @@ impl Swapchain {
     /// Present the rendered image.
     /// Returns whether the swapchain is suboptimal.
     #[profiling::function]
-    pub fn present(&mut self, present_queue: vk::Queue, image_index: u32) -> Result<bool, vk::Result> {
+    pub fn present(&mut self, present_queue: Queue, image_index: u32) -> Result<bool, vk::Result> {
         let swapchains = [self.swapchain];
         let image_indices = [image_index];
         let wait_semaphores = [self.render_finished_semaphores[self.current_frame]];
@@ -239,7 +239,7 @@ impl Swapchain {
             .image_indices(&image_indices);
 
         self.window.window.upgrade().unwrap().pre_present_notify();
-        let result = unsafe { self.swapchain_loader.queue_present(present_queue, &present_info) };
+        let result = unsafe { self.swapchain_loader.queue_present(present_queue.handle(), &present_info) };
 
         self.current_frame = (self.current_frame + 1) % self.textures.len();
 
@@ -255,7 +255,7 @@ impl Swapchain {
         FrameSync {
             image_available: self.image_available_semaphores[self.current_frame],
             render_finished: self.render_finished_semaphores[self.current_frame],
-            in_flight_fence: self.in_flight_fences[self.current_frame],
+            in_flight_fence: Fence::new(self.in_flight_fences[self.current_frame]),
         }
     }
 

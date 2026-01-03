@@ -5,6 +5,8 @@ use crate::core::PhysicalDevice;
 use crate::defer_release::DeferReleaseQueue;
 use crate::descriptor::{DescriptorPool, DescriptorSetLayout};
 use crate::{Buffer, Texture};
+use crate::queue::Queue;
+use crate::synchronization::Fence;
 use ash::{vk, Device, Instance};
 use std::collections::HashSet;
 use zenith_core::collections::SmallVec;
@@ -183,18 +185,18 @@ impl RenderDevice {
 
     pub fn frame_index(&self) -> usize { self.current_frame as _ }
 
-    pub fn frame_resource_fence(&self) -> vk::Fence {
-        self.frame_resource_fences[self.current_frame as usize]
+    pub fn frame_resource_fence(&self) -> Fence {
+        Fence::new(self.frame_resource_fences[self.current_frame as usize])
     }
 
-    /// Get the total number of deferred buffers across all frames.
+    /// Get the total number of deferred buffers for this frame.
     pub fn deferred_buffer_count(&self) -> usize {
-        self.defer_release_queues.iter().map(|q| q.buffer_count()).sum()
+        self.defer_release_queues[self.current_frame as usize].buffer_count()
     }
 
-    /// Get the total number of deferred textures across all frames.
+    /// Get the total number of deferred textures for this frame.
     pub fn deferred_texture_count(&self) -> usize {
-        self.defer_release_queues.iter().map(|q| q.texture_count()).sum()
+        self.defer_release_queues[self.current_frame as usize].texture_count()
     }
 
     /// Get the physical device properties.
@@ -207,15 +209,13 @@ impl RenderDevice {
         &self.parent_physical_device.memory_properties()
     }
 
-    pub fn graphics_queue_family(&self) -> u32 { self.parent_physical_device.graphics_queue_family() }
-
-    pub fn present_queue_family(&self) -> u32 { self.parent_physical_device.present_queue_family() }
-
-    pub fn graphics_queue(&self) -> vk::Queue {
-        self.graphics_queue
+    pub fn graphics_queue(&self) -> Queue {
+        Queue::new(self.graphics_queue, self.parent_physical_device.graphics_queue_family())
     }
 
-    pub fn present_queue(&self) -> vk::Queue { self.present_queue }
+    pub fn present_queue(&self) -> Queue {
+        Queue::new(self.present_queue, self.parent_physical_device.present_queue_family())
+    }
 
     pub fn wait_until_idle(&self) -> Result<(), vk::Result> {
         unsafe { self.device.device_wait_idle() }
@@ -228,12 +228,12 @@ impl RenderDevice {
     pub fn submit_commands<'a>(
         &self,
         command: vk::CommandBuffer,
-        queue: vk::Queue,
+        queue: Queue,
         wait_semaphores: &'a [vk::Semaphore],
         wait_stage: vk::PipelineStageFlags2,
         signal_semaphores: &'a [vk::Semaphore],
         signal_stage: vk::PipelineStageFlags2,
-        fence: vk::Fence,
+        fence: Fence,
     ) {
         let command_submit_info = vk::CommandBufferSubmitInfo::default()
             .command_buffer(command);
@@ -261,9 +261,9 @@ impl RenderDevice {
 
         unsafe {
             self.device.queue_submit2(
-                queue,
+                queue.handle(),
                 &[submit_info],
-                fence
+                fence.handle()
             ).unwrap();
         }
     }

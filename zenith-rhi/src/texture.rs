@@ -277,11 +277,12 @@ pub struct Texture {
 
 impl Texture {
     /// Create a new texture from a descriptor (view is not created).
-    pub fn from_desc(
-        device: &Device,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    pub fn new(
+        device: &crate::RenderDevice,
         desc: &TextureDesc,
     ) -> Result<Self, vk::Result> {
+        let memory_properties = device.memory_properties();
+        let device = device.handle();
         // Create image
         let image_info = vk::ImageCreateInfo::default()
             .image_type(desc.image_type)
@@ -328,91 +329,6 @@ impl Texture {
             view_type: desc.view_type,
         };
         Ok(texture)
-    }
-
-    /// Create a new texture with the specified parameters (view is lazily created on first view() call).
-    pub fn new(
-        device: &Device,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
-        format: vk::Format,
-        extent: vk::Extent3D,
-        usage: vk::ImageUsageFlags,
-        memory_flags: vk::MemoryPropertyFlags,
-        image_type: vk::ImageType,
-        view_type: vk::ImageViewType,
-    ) -> Result<Self, vk::Result> {
-        // Create image
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(image_type)
-            .format(format)
-            .extent(extent)
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-
-        let image = unsafe { device.create_image(&image_info, None)? };
-
-        // Get memory requirements
-        let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
-
-        // Find suitable memory type
-        let memory_type_index =
-            find_memory_type(memory_properties, mem_requirements.memory_type_bits, memory_flags)
-                .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)?;
-
-        // Allocate memory
-        let alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_requirements.size)
-            .memory_type_index(memory_type_index);
-
-        let memory = unsafe { device.allocate_memory(&alloc_info, None)? };
-
-        // Bind memory to image
-        unsafe { device.bind_image_memory(image, memory, 0)? };
-
-        let texture = Self {
-            device: device.clone(),
-            image,
-            memory,
-            view: RefCell::new(None),
-            format,
-            extent,
-            usage,
-            mip_levels: 1,
-            array_layers: 1,
-            view_type,
-        };
-        Ok(texture)
-    }
-
-    /// Create a 2D texture (convenience constructor, view is lazily created on first view() call).
-    pub fn new_2d(
-        device: &Device,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
-        format: vk::Format,
-        width: u32,
-        height: u32,
-        usage: vk::ImageUsageFlags,
-        memory_flags: vk::MemoryPropertyFlags,
-    ) -> Result<Self, vk::Result> {
-        Self::new(
-            device,
-            memory_properties,
-            format,
-            vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            },
-            usage,
-            memory_flags,
-            vk::ImageType::TYPE_2D,
-            vk::ImageViewType::TYPE_2D,
-        )
     }
 
     /// Create a texture wrapper for a swapchain image (does not own the image or memory).

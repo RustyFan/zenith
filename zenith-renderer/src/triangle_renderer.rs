@@ -1,11 +1,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 use bytemuck::{Pod, Zeroable};
-use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, Shader, TextureState, BufferState, Texture};
-use zenith_rendergraph::{
-    RenderGraphBuilder, RenderGraphResource,
-    ColorInfo,
-};
+use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, Shader, TextureState, BufferState, Texture, ImmediateCommandEncoder, UploadPool};
+use zenith_rendergraph::{RenderGraphBuilder, RenderGraphResource, ColorAttachmentDescBuilder};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -17,7 +14,6 @@ pub struct Vertex {
 pub struct TriangleRenderer {
     vertex_buffer: Arc<Buffer>,
     index_buffer: Arc<Buffer>,
-    time_buffer: Arc<Buffer>,
     vertex_shader: Arc<Shader>,
     fragment_shader: Arc<Shader>,
     start_time: Instant,
@@ -35,45 +31,25 @@ impl TriangleRenderer {
         let vertex_data = bytemuck::cast_slice(&vertices);
         let index_data = bytemuck::cast_slice(&indices);
 
-        let vertex_buffer = Buffer::from_desc(
-            device.handle(),
-            device.memory_properties(),
-            &BufferDesc {
-                size: vertex_data.len() as u64,
-                usage: vk::BufferUsageFlags::VERTEX_BUFFER,
-                memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-            },
-        ).expect("Failed to create vertex buffer");
+        // Device-local GPU buffers (uploaded via staging)
+        let vertex_buffer = Arc::new(
+            Buffer::new(device, &BufferDesc::vertex(vertex_data.len() as u64))
+                .expect("Failed to create vertex buffer")
+        );
+        let index_buffer = Arc::new(
+            Buffer::new(device, &BufferDesc::index(index_data.len() as u64))
+                .expect("Failed to create index buffer")
+        );
 
-        // Copy vertex data
-        vertex_buffer.map_and_write(vertex_data);
-
-        let index_buffer = Buffer::from_desc(
-            device.handle(),
-            device.memory_properties(),
-            &BufferDesc {
-                size: index_data.len() as u64,
-                usage: vk::BufferUsageFlags::INDEX_BUFFER,
-                memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-            },
-        ).expect("Failed to create index buffer");
-
-        // Copy index data
-        index_buffer.map_and_write(index_data);
-
-        // Create uniform buffer for time
-        let time_buffer = Buffer::from_desc(
-            device.handle(),
-            device.memory_properties(),
-            &BufferDesc {
-                size: size_of::<f32>() as u64,
-                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-            },
-        ).expect("Failed to create time buffer");
+        // Upload via staging buffer (blocking for now)
+        let immediate = ImmediateCommandEncoder::new(device.handle(), device.graphics_queue())
+            .expect("Failed to create ImmediateCommandEncoder");
+        let mut upload_pool = UploadPool::new(device, 1024 * 1024).expect("Failed to create UploadPool");
+        upload_pool.enqueue_copy(vertex_buffer.clone(), 0, vertex_data, BufferState::Vertex)
+            .expect("Failed to enqueue vertex upload");
+        upload_pool.enqueue_copy(index_buffer.clone(), 0, index_data, BufferState::Index)
+            .expect("Failed to enqueue index upload");
+        upload_pool.flush(&immediate, device).expect("Failed to flush uploads");
 
         // Load HLSL shaders from files
         let vertex_shader = match Shader::from_hlsl_file(
@@ -106,9 +82,8 @@ impl TriangleRenderer {
         };
 
         Self {
-            vertex_buffer: Arc::new(vertex_buffer),
-            index_buffer: Arc::new(index_buffer),
-            time_buffer: Arc::new(time_buffer),
+            vertex_buffer,
+            index_buffer,
             vertex_shader: Arc::new(vertex_shader),
             fragment_shader: Arc::new(fragment_shader),
             start_time: Instant::now(),
@@ -133,10 +108,14 @@ impl TriangleRenderer {
             self.index_buffer.clone(),
             BufferState::Undefined,
         );
-        let tb = builder.import(
+        let tb = builder.create(
             "triangle.time",
-            self.time_buffer.clone(),
-            BufferState::Undefined,
+            BufferDesc {
+                size: size_of::<f32>() as u64,
+                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                sharing_mode: vk::SharingMode::EXCLUSIVE,
+            }
         );
 
         let mut node = builder.add_graphic_node("triangle");
@@ -146,19 +125,10 @@ impl TriangleRenderer {
         let tb = node.read(&tb, BufferState::Uniform);
         let output_rt = node.write(output, TextureState::Color);
 
-        let color_info = ColorInfo {
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
-            clear_value: [0.1, 0.1, 0.1, 1.0],
-            blend_enable: false,
-            src_color_blend: vk::BlendFactor::ONE,
-            dst_color_blend: vk::BlendFactor::ZERO,
-            color_blend_op: vk::BlendOp::ADD,
-            src_alpha_blend: vk::BlendFactor::ONE,
-            dst_alpha_blend: vk::BlendFactor::ZERO,
-            alpha_blend_op: vk::BlendOp::ADD,
-            write_mask: vk::ColorComponentFlags::RGBA,
-        };
+        let color_info = ColorAttachmentDescBuilder::default()
+            .clear_input()
+            .clear_value([0.1, 0.1, 0.1, 1.0])
+            .build().unwrap();
 
         node.setup_pipeline()
             .with_vertex_shader(self.vertex_shader.clone())
@@ -175,12 +145,12 @@ impl TriangleRenderer {
             let encoder = ctx.encoder();
 
             // Update time buffer
-            let time_buffer = ctx.get_buffer(&tb);
+            let time_buffer = ctx.get(&tb);
             time_buffer.map_and_write(bytemuck::bytes_of(&elapsed));
 
             // Bind uniform buffer using shader resource binder
             if let Some(mut binder) = ctx.create_resource_binder() {
-                match binder.bind_buffer("TimeData", time_buffer.handle(), 0, 4) {
+                match binder.bind_buffer("TimeData", time_buffer.handle(), 0, size_of_val(&elapsed) as _) {
                     Ok(_) => {
                         let sets = binder.finish();
                         ctx.bind_descriptor_sets(&sets);
@@ -212,8 +182,8 @@ impl TriangleRenderer {
             };
             encoder.set_scissor(0, &[scissor]);
 
-            encoder.bind_vertex_buffers(0, &[ctx.get_buffer(&vb).handle()], &[0]);
-            encoder.bind_index_buffer(ctx.get_buffer(&ib).handle(), 0, vk::IndexType::UINT16);
+            encoder.bind_vertex_buffers(0, &[ctx.get(&vb).handle()], &[0]);
+            encoder.bind_index_buffer(ctx.get(&ib).handle(), 0, vk::IndexType::UINT16);
 
             encoder.draw_indexed(3, 1, 0, 0, 0);
 

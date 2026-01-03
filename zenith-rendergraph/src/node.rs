@@ -8,7 +8,7 @@ use crate::resource::{RenderGraphResourceAccess, Rt};
 
 #[derive(Clone, Debug, Builder)]
 #[builder(setter(into))]
-pub struct ColorInfo {
+pub struct ColorAttachmentDesc {
     #[builder(default)]
     pub blend_enable: bool,
     #[builder(default = "vk::BlendFactor::ONE")]
@@ -33,7 +33,7 @@ pub struct ColorInfo {
     pub clear_value: [f32; 4],
 }
 
-impl Default for ColorInfo {
+impl Default for ColorAttachmentDesc {
     fn default() -> Self {
         Self {
             blend_enable: false,
@@ -48,6 +48,33 @@ impl Default for ColorInfo {
             store_op: vk::AttachmentStoreOp::STORE,
             clear_value: [0.0, 0.0, 0.0, 1.0],
         }
+    }
+}
+
+impl ColorAttachmentDescBuilder {
+    pub fn discard_input(&mut self) -> &mut Self {
+        self.load_op.replace(vk::AttachmentLoadOp::DONT_CARE);
+        self
+    }
+
+    pub fn clear_input(&mut self) -> &mut Self {
+        self.load_op.replace(vk::AttachmentLoadOp::CLEAR);
+        self
+    }
+
+    pub fn discard_output(&mut self) -> &mut Self {
+        self.store_op.replace(vk::AttachmentStoreOp::DONT_CARE);
+        self
+    }
+
+    pub fn translucent(&mut self) -> &mut Self {
+        self.blend_enable.replace(true);
+        self.src_color_blend.replace(vk::BlendFactor::SRC_ALPHA);
+        self.dst_color_blend.replace(vk::BlendFactor::DST_ALPHA);
+        self.color_blend_op.replace(vk::BlendOp::ADD);
+        self.src_alpha_blend.replace(vk::BlendFactor::ZERO);
+        self.dst_alpha_blend.replace(vk::BlendFactor::SRC_ALPHA);
+        self
     }
 }
 
@@ -120,7 +147,7 @@ pub struct VertexAttributeDesc {
 pub struct GraphicPipelineDescriptor {
     pub(crate) vertex_shader: Option<Arc<Shader>>,
     pub(crate) fragment_shader: Option<Arc<Shader>>,
-    pub(crate) color_attachments: Vec<(RenderGraphResourceAccess<Texture, Rt>, ColorInfo)>,
+    pub(crate) color_attachments: Vec<(RenderGraphResourceAccess<Texture, Rt>, ColorAttachmentDesc)>,
     pub(crate) depth_stencil_attachment: Option<(RenderGraphResourceAccess<Texture, Rt>, DepthStencilInfo)>,
     pub(crate) vertex_bindings: Vec<VertexBindingDesc>,
     pub(crate) vertex_attributes: Vec<VertexAttributeDesc>,

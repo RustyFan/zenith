@@ -2,36 +2,34 @@
 
 use crate::interface::{Buffer, BufferState, ResourceState, Texture, TextureState};
 use crate::node::{NodePipelineState, RenderGraphNode};
-use crate::resource::{
-    GraphResourceId, GraphResourceView, RenderGraphResourceAccess,
-};
-use crate::GraphicPipelineDescriptor;
+use crate::resource::{GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess};
+use crate::{GraphicPipelineDescriptor};
 use std::cell::Cell;
 use std::sync::Arc;
 use zenith_core::collections::SmallVec;
-use zenith_rhi::{CommandEncoder};
-use zenith_rhi::{buffer_barrier, texture_barrier, vk, ColorBlendAttachment, GraphicPipeline, GraphicPipelineKey, PipelineCache, RenderDevice, ShaderResourceBinder, Swapchain, VertexAttribute, VertexBinding};
+use zenith_rhi::{CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages};
+use zenith_rhi::{vk, ColorBlendAttachment, GraphicPipeline, GraphicPipelineKey, PipelineCache, RenderDevice, ShaderResourceBinder, Swapchain, VertexAttribute, VertexBinding};
 
-pub(crate) enum ResourceStorage {
+pub enum ResourceStorage {
     ManagedBuffer {
         name: String,
         resource: Buffer,
-        state_tracker: BufferStateTracker,
+        state_tracker: ResourceStateTracker<BufferState>,
     },
     ManagedTexture {
         name: String,
         resource: Texture,
-        state_tracker: TextureStateTracker,
+        state_tracker: ResourceStateTracker<TextureState>,
     },
     ImportedBuffer {
         name: String,
         resource: Arc<Buffer>,
-        state_tracker: BufferStateTracker,
+        state_tracker: ResourceStateTracker<BufferState>,
     },
     ImportedTexture {
         name: String,
         resource: Arc<Texture>,
-        state_tracker: TextureStateTracker,
+        state_tracker: ResourceStateTracker<TextureState>,
     },
 }
 
@@ -53,20 +51,20 @@ impl ResourceStorage {
     }
 }
 
-pub(crate) struct BufferStateTracker {
-    current_access: Cell<BufferState>,
+pub struct ResourceStateTracker<S: GraphResourceState> {
+    current_access: Cell<S>,
     current_stage: Cell<vk::PipelineStageFlags2>,
 }
 
-impl BufferStateTracker {
-    pub(crate) fn new(access: BufferState) -> Self {
+impl<S: GraphResourceState> ResourceStateTracker<S> {
+    pub(crate) fn new(access: S) -> Self {
         Self {
             current_access: Cell::new(access),
             current_stage: Cell::new(vk::PipelineStageFlags2::NONE),
         }
     }
 
-    pub(crate) fn current_access(&self) -> BufferState {
+    pub(crate) fn current_access(&self) -> S {
         self.current_access.get()
     }
 
@@ -74,40 +72,11 @@ impl BufferStateTracker {
         self.current_stage.get()
     }
 
-    pub(crate) fn transition_to(&self, next_access: BufferState, next_stage: vk::PipelineStageFlags2) {
+    pub(crate) fn transition_to(&self, next_access: S, next_stage: vk::PipelineStageFlags2) {
         self.current_access.set(next_access);
         self.current_stage.set(next_stage);
     }
 }
-
-pub(crate) struct TextureStateTracker {
-    current_access: Cell<TextureState>,
-    current_stage: Cell<vk::PipelineStageFlags2>,
-}
-
-impl TextureStateTracker {
-    pub(crate) fn new(state: TextureState) -> Self {
-        Self {
-            current_access: Cell::new(state),
-            current_stage: Cell::new(vk::PipelineStageFlags2::NONE),
-        }
-    }
-
-    pub(crate) fn current_access(&self) -> TextureState {
-        self.current_access.get()
-    }
-
-    pub(crate) fn current_stage(&self) -> vk::PipelineStageFlags2 {
-        self.current_stage.get()
-    }
-
-    pub(crate) fn transition_to(&self, next_state: TextureState, next_stage: vk::PipelineStageFlags2) {
-        self.current_access.set(next_state);
-        self.current_stage.set(next_stage);
-    }
-}
-
-use crate::resource::InitialResourceStorage;
 
 pub struct RenderGraph {
     pub(crate) nodes: Vec<RenderGraphNode>,
@@ -127,38 +96,30 @@ impl RenderGraph {
             .map(|res| {
                 match res {
                     InitialResourceStorage::ManagedBuffer(name, desc) => {
-                        let resource = Buffer::from_desc(
-                            device.handle(),
-                            device.memory_properties(),
-                            &desc
-                        ).expect("Failed to create buffer");
+                        let resource = Buffer::new(device, &desc).expect("Failed to create buffer");
                         ResourceStorage::ManagedBuffer {
                             name,
                             resource,
-                            state_tracker: BufferStateTracker::new(BufferState::Undefined),
+                            state_tracker: ResourceStateTracker::new(BufferState::Undefined),
                         }
                     }
                     InitialResourceStorage::ManagedTexture(name, desc) => {
-                        let resource = Texture::from_desc(
-                            device.handle(),
-                            device.memory_properties(),
-                            &desc
-                        ).expect("Failed to create texture");
+                        let resource = Texture::new(device, &desc).expect("Failed to create texture");
                         ResourceStorage::ManagedTexture {
                             name,
                             resource,
-                            state_tracker: TextureStateTracker::new(TextureState::Undefined),
+                            state_tracker: ResourceStateTracker::new(TextureState::Undefined),
                         }
                     }
                     InitialResourceStorage::ImportedBuffer(name, buffer, initial_state) => ResourceStorage::ImportedBuffer {
                         name,
                         resource: buffer.clone(),
-                        state_tracker: BufferStateTracker::new(initial_state),
+                        state_tracker: ResourceStateTracker::new(initial_state),
                     },
                     InitialResourceStorage::ImportedTexture(name, tex, initial_state) => ResourceStorage::ImportedTexture {
                         name,
                         resource: tex.clone(),
-                        state_tracker: TextureStateTracker::new(initial_state),
+                        state_tracker: ResourceStateTracker::new(initial_state),
                     },
                 }
             })
@@ -428,7 +389,7 @@ impl CompiledRenderGraph {
             if let Some(ResourceStorage::ImportedTexture { resource, state_tracker, .. }) = self.resources.get_mut(self.swapchain_tex_id as usize) {
                 *resource = swapchain_tex;
                 // Reset state tracker since this is a newly acquired image
-                *state_tracker = TextureStateTracker::new(TextureState::Undefined);
+                *state_tracker = ResourceStateTracker::new(TextureState::Undefined);
             }
         }
 
@@ -541,8 +502,10 @@ impl CompiledRenderGraph {
         resources_to_transition: impl Iterator<Item = (GraphResourceId, ResourceState, Option<vk::PipelineStageFlags2>)>,
         pipeline_desc: Option<&GraphicPipelineDescriptor>,
     ) {
-        let mut image_barriers: SmallVec<[vk::ImageMemoryBarrier2; 8]> = SmallVec::new();
-        let mut buffer_barriers: SmallVec<[vk::BufferMemoryBarrier2; 8]> = SmallVec::new();
+        let mut image_barriers: Vec<TextureBarrier> = Vec::new();
+        let mut buffer_barriers: Vec<BufferBarrier> = Vec::new();
+
+        let queue = device.graphics_queue();
 
         // Get combined shader stages from all bindings in reflection
         let combined_shader_stage = pipeline_desc
@@ -551,92 +514,120 @@ impl CompiledRenderGraph {
             .map(shader_stage_to_pipeline_stage)
             .unwrap_or(vk::PipelineStageFlags2::ALL_COMMANDS);
 
-        let mut add_buffer_barrier = |resource: &Buffer, access: ResourceState, state_tracker: &BufferStateTracker, stage_hint: Option<vk::PipelineStageFlags2>, name: &String| {
-            let ResourceState::Buffer(next_state) = access else {
-                return;
-            };
-
-            let prev_state = state_tracker.current_access();
-            if prev_state == next_state {
-                return;
-            }
-
-            let dst_stage = stage_hint.unwrap_or(combined_shader_stage);
-            if dst_stage == vk::PipelineStageFlags2::ALL_COMMANDS {
-                log::warn!("Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.",
-                name)
-            }
-
-            buffer_barriers.push(buffer_barrier(
-                resource,
-                state_tracker.current_stage(),
-                prev_state,
-                dst_stage,
-                next_state,
-                device.graphics_queue_family(),
-                device.graphics_queue_family(),
-                false,
-            ));
-            state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage));
-        };
-
-        let mut add_texture_barrier = |resource: &Texture, access: ResourceState, state_tracker: &TextureStateTracker, stage_hint: Option<vk::PipelineStageFlags2>, name: &String| {
-            let ResourceState::Texture(next_state) = access else {
-                return;
-            };
-
-            let prev_state = state_tracker.current_access();
-            if prev_state == next_state {
-                return;
-            }
-
-            let dst_stage = stage_hint.unwrap_or(combined_shader_stage);
-            if dst_stage == vk::PipelineStageFlags2::ALL_COMMANDS {
-                log::warn!(r#"
-                Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage.
-                Use read_hint() or write_hint() to get better performance."#,
-                name)
-            }
-
-            image_barriers.push(texture_barrier(
-                resource,
-                state_tracker.current_stage(),
-                prev_state,
-                dst_stage,
-                next_state,
-                device.graphics_queue_family(),
-                device.graphics_queue_family(),
-                false,
-                prev_state == TextureState::Undefined,
-            ));
-            state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage));
-        };
-
         for (id, access, stage_hint) in resources_to_transition {
             let storage = utility::resource_storage_ref(resource_storage, id);
 
             match storage {
                 ResourceStorage::ManagedBuffer { resource, state_tracker, name } => {
-                    add_buffer_barrier(resource, access, state_tracker, stage_hint, name);
+                    let ResourceState::Buffer(next_state) = access else { continue; };
+                    let prev_state = state_tracker.current_access();
+                    if prev_state == next_state { continue; }
+
+                    let dst_stage_vk = stage_hint.unwrap_or(combined_shader_stage);
+                    let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
+                    let dst_stage = PipelineStages::from_vk(dst_stage_vk);
+                    if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
+                        log::warn!("Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.", name)
+                    }
+
+                    buffer_barriers.push(BufferBarrier::new(
+                        resource,
+                        prev_state,
+                        next_state,
+                        src_stage,
+                        dst_stage,
+                        queue,
+                        queue,
+                        false,
+                    ));
+                    state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
                 ResourceStorage::ImportedBuffer { resource, state_tracker, name } => {
-                    add_buffer_barrier(resource, access, state_tracker, stage_hint, name);
+                    let ResourceState::Buffer(next_state) = access else { continue; };
+                    let prev_state = state_tracker.current_access();
+                    if prev_state == next_state { continue; }
+
+                    let dst_stage_vk = stage_hint.unwrap_or(combined_shader_stage);
+                    let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
+                    let dst_stage = PipelineStages::from_vk(dst_stage_vk);
+                    if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
+                        log::warn!("Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.", name)
+                    }
+
+                    buffer_barriers.push(BufferBarrier::new(
+                        resource,
+                        prev_state,
+                        next_state,
+                        src_stage,
+                        dst_stage,
+                        queue,
+                        queue,
+                        false,
+                    ));
+                    state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
                 ResourceStorage::ManagedTexture { resource, state_tracker, name } => {
-                    add_texture_barrier(resource, access, state_tracker, stage_hint, name);
+                    let ResourceState::Texture(next_state) = access else { continue; };
+                    let prev_state = state_tracker.current_access();
+                    if prev_state == next_state { continue; }
+
+                    let dst_stage_vk = stage_hint.unwrap_or(combined_shader_stage);
+                    let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
+                    let dst_stage = PipelineStages::from_vk(dst_stage_vk);
+                    if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
+                        log::warn!(r#"
+                 Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage.
+                 Use read_hint() or write_hint() to get better performance."#, name)
+                    }
+
+                    image_barriers.push(TextureBarrier::new(
+                        resource,
+                        prev_state,
+                        next_state,
+                        src_stage,
+                        dst_stage,
+                        queue,
+                        queue,
+                        false,
+                        prev_state == TextureState::Undefined,
+                    ));
+                    state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
                 ResourceStorage::ImportedTexture { resource, state_tracker, name } => {
-                    add_texture_barrier(resource, access, state_tracker, stage_hint, name);
+                    let ResourceState::Texture(next_state) = access else { continue; };
+                    let prev_state = state_tracker.current_access();
+                    if prev_state == next_state { continue; }
+
+                    let dst_stage_vk = stage_hint.unwrap_or(combined_shader_stage);
+                    let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
+                    let dst_stage = PipelineStages::from_vk(dst_stage_vk);
+                    if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
+                        log::warn!(r#"
+                 Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage.
+                 Use read_hint() or write_hint() to get better performance."#, name)
+                    }
+
+                    image_barriers.push(TextureBarrier::new(
+                        resource,
+                        prev_state,
+                        next_state,
+                        src_stage,
+                        dst_stage,
+                        queue,
+                        queue,
+                        false,
+                        prev_state == TextureState::Undefined,
+                    ));
+                    state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
             }
         }
 
-        if !image_barriers.is_empty() || !buffer_barriers.is_empty() {
-            let dependency_info = vk::DependencyInfo::default()
-                .image_memory_barriers(&image_barriers)
-                .buffer_memory_barriers(&buffer_barriers);
-
-            encoder.pipeline_barrier(&dependency_info);
+        if !image_barriers.is_empty() {
+            encoder.barrier_textures(&image_barriers);
+        }
+        if !buffer_barriers.is_empty() {
+            encoder.barrier_buffers(&buffer_barriers);
         }
     }
 }
@@ -675,13 +666,10 @@ pub struct GraphicNodeExecutionContext<'node> {
 
 impl<'node> GraphicNodeExecutionContext<'node> {
     #[inline]
-    pub fn get_buffer<V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<Buffer, V>) -> &Buffer {
-        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_buffer()
-    }
-
-    #[inline]
-    pub fn get_texture<V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<Texture, V>) -> &Texture {
-        self.resources.get(resource.id as usize).expect("Graph resource index out of bound!").as_texture()
+    pub fn get<R: GraphResource, V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<R, V>) -> &R {
+        let storage = self.resources.get(resource.id as usize)
+            .expect("Graph resource index out of bound!");
+        R::from_storage(storage)
     }
 
     pub fn bind_pipeline(&self) {
@@ -776,6 +764,13 @@ pub struct LambdaNodeExecutionContext<'node> {
 }
 
 impl<'node> LambdaNodeExecutionContext<'node> {
+    #[inline]
+    pub fn get<R: GraphResource, V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<R, V>) -> &R {
+        let storage = self.resources.get(resource.id as usize)
+            .expect("Graph resource index out of bound!");
+        R::from_storage(storage)
+    }
+
     #[inline]
     #[allow(dead_code)]
     pub fn get_buffer<V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<Buffer, V>) -> &Buffer {

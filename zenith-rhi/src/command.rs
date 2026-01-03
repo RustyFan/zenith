@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use ash::{vk, Device};
+use crate::barrier::{BufferBarrier, TextureBarrier, MemoryBarrier};
 
 /// Command buffer pool for allocating command buffers.
 pub struct CommandPool {
@@ -167,6 +168,33 @@ impl<'a> CommandEncoder<'a> {
         unsafe { self.device.cmd_pipeline_barrier2(self.cmd, dependency_info) }
     }
 
+    pub fn barrier_buffers<'b>(&self, barriers: &[BufferBarrier<'b>]) {
+        if barriers.is_empty() {
+            return;
+        }
+        let vk_barriers: Vec<vk::BufferMemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
+        let dep = vk::DependencyInfo::default().buffer_memory_barriers(&vk_barriers);
+        self.pipeline_barrier(&dep);
+    }
+
+    pub fn barrier_textures<'b>(&self, barriers: &[TextureBarrier<'b>]) {
+        if barriers.is_empty() {
+            return;
+        }
+        let vk_barriers: Vec<vk::ImageMemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
+        let dep = vk::DependencyInfo::default().image_memory_barriers(&vk_barriers);
+        self.pipeline_barrier(&dep);
+    }
+
+    pub fn barrier_memory(&self, barriers: &[MemoryBarrier]) {
+        if barriers.is_empty() {
+            return;
+        }
+        let vk_barriers: Vec<vk::MemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
+        let dep = vk::DependencyInfo::default().memory_barriers(&vk_barriers);
+        self.pipeline_barrier(&dep);
+    }
+
     // Copy commands
     pub fn copy_buffer(&self, src: vk::Buffer, dst: vk::Buffer, regions: &[vk::BufferCopy]) {
         unsafe { self.device.cmd_copy_buffer(self.cmd, src, dst, regions) }
@@ -183,8 +211,8 @@ impl<'a> CommandEncoder<'a> {
 
     pub fn custom<F>(&self, func: F)
     where
-        F: FnOnce(vk::CommandBuffer)
+        F: FnOnce(&Device, vk::CommandBuffer)
     {
-        func(self.cmd.clone());
+        func(&self.device, self.cmd.clone());
     }
 }

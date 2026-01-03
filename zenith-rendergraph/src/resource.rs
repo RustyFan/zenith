@@ -4,14 +4,25 @@ use std::sync::Arc;
 use derive_more::From;
 use zenith_rhi::vk;
 use crate::builder::ResourceAccessStorage;
-
+use crate::graph::ResourceStorage;
 use crate::interface::{Buffer, Texture, BufferDesc, TextureDesc, BufferState, TextureState, ResourceDescriptor, ResourceState};
 
-pub trait GraphResource {
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
+pub trait GraphResource: Sized + sealed::Sealed {
     type Descriptor: GraphResourceDescriptor;
+    type State: GraphResourceState;
+
+    fn from_storage(storage: &ResourceStorage) -> &Self;
 }
 
 pub trait GraphResourceDescriptor: Clone + Into<ResourceDescriptor> {
+    type Resource: GraphResource;
+}
+
+pub trait GraphResourceState: Copy + Into<ResourceState> {
     type Resource: GraphResource;
 }
 
@@ -79,7 +90,7 @@ impl<R: GraphResource, V: GraphResourceView> RenderGraphResourceAccess<R, V> {
     }
 }
 
-pub trait GraphImportExportResource: GraphResource + Sized {
+pub trait GraphImportExportResource: GraphResource {
     fn import(shared_resource: impl Into<Arc<Self>>, name: &str, builder: &mut crate::builder::RenderGraphBuilder, access: impl Into<ResourceState>) -> RenderGraphResource<Self>;
     fn export(resource: RenderGraphResource<Self>, builder: &mut crate::builder::RenderGraphBuilder, access: impl Into<ResourceState>) -> ExportedRenderGraphResource<Self>;
 }

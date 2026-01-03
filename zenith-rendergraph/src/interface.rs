@@ -2,7 +2,8 @@ use derive_more::{From, TryInto};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use crate::builder::{RenderGraphBuilder};
-use crate::resource::{ExportedRenderGraphResource, GraphImportExportResource, GraphResource, GraphResourceDescriptor, RenderGraphResource};
+use crate::graph::ResourceStorage;
+use crate::resource::{sealed, ExportedRenderGraphResource, GraphImportExportResource, GraphResource, GraphResourceDescriptor, GraphResourceState, RenderGraphResource};
 
 // #[macro_export]
 // macro_rules! render_graph_resource_interface {
@@ -66,11 +67,23 @@ pub(crate) type Texture = zenith_rhi::Texture;
 pub(crate) type TextureDesc = zenith_rhi::TextureDesc;
 pub(crate) type TextureState = zenith_rhi::TextureState;
 
+impl sealed::Sealed for Buffer {}
+
 impl GraphResource for Buffer {
     type Descriptor = BufferDesc;
+    type State = BufferState;
+
+    #[doc(hidden)]
+    fn from_storage(storage: &ResourceStorage) -> &Self {
+        storage.as_buffer()
+    }
 }
 
 impl GraphResourceDescriptor for BufferDesc {
+    type Resource = Buffer;
+}
+
+impl GraphResourceState for BufferState {
     type Resource = Buffer;
 }
 
@@ -96,11 +109,22 @@ impl GraphImportExportResource for Buffer {
     }
 }
 
+impl sealed::Sealed for Texture {}
+
 impl GraphResource for Texture {
     type Descriptor = TextureDesc;
+    type State = TextureState;
+
+    fn from_storage(storage: &ResourceStorage) -> &Self {
+        storage.as_texture()
+    }
 }
 
 impl GraphResourceDescriptor for TextureDesc {
+    type Resource = Texture;
+}
+
+impl GraphResourceState for TextureState {
     type Resource = Texture;
 }
 
@@ -137,7 +161,6 @@ pub enum ResourceState {
     Buffer(BufferState),
     Texture(TextureState),
 }
-
 
 // render_graph_resource_interface!(
 //     Buffer => Arc<zenith_rhi::Buffer>, BufferDesc => zenith_rhi::BufferDesc, BufferState => zenith_rhi::BufferState,

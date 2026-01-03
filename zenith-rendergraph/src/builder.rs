@@ -1,6 +1,6 @@
 use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph};
 use crate::interface::{ResourceDescriptor, ResourceState};
-use crate::node::{ColorInfo, DepthStencilInfo, GraphicPipelineDescriptor, NodePipelineState, RenderGraphNode, VertexAttributeDesc, VertexBindingDesc};
+use crate::node::{ColorAttachmentDesc, DepthStencilInfo, GraphicPipelineDescriptor, NodePipelineState, RenderGraphNode, VertexAttributeDesc, VertexBindingDesc};
 use crate::resource::{
     ExportResourceStorage, ExportedRenderGraphResource, GraphImportExportResource,
     GraphResource, GraphResourceDescriptor, GraphResourceId,
@@ -59,8 +59,8 @@ impl RenderGraphBuilder {
     pub fn import<R: GraphImportExportResource>(
         &mut self,
         name: &str,
-        import_resource: impl Into<Arc<R>>,
-        access: impl Into<ResourceState>,
+        import_resource: Arc<R>,
+        access: <R as GraphResource>::State,
     ) -> RenderGraphResource<R> {
         GraphImportExportResource::import(import_resource, name, self, access)
     }
@@ -69,7 +69,7 @@ impl RenderGraphBuilder {
     pub fn export<R: GraphImportExportResource>(
         &mut self,
         resource: RenderGraphResource<R>,
-        access: impl Into<ResourceState>,
+        access: <R as GraphResource>::State,
     ) -> ExportedRenderGraphResource<R> {
         GraphImportExportResource::export(resource, self, access)
     }
@@ -259,7 +259,7 @@ macro_rules! inject_common_node_builder_methods {
         pub fn read<R: GraphResource>(
             &mut self,
             resource: &RenderGraphResource<R>,
-            access: impl Into<ResourceState>
+            access: <R as GraphResource>::State,
         ) -> RenderGraphResourceAccess<R, $read_view> {
             self.common.read(resource, access)
         }
@@ -269,7 +269,7 @@ macro_rules! inject_common_node_builder_methods {
         pub fn read_hint<R: GraphResource>(
             &mut self,
             resource: &RenderGraphResource<R>,
-            access: impl Into<ResourceState>,
+            access: <R as GraphResource>::State,
             stage_hint: vk::PipelineStageFlags2,
         ) -> RenderGraphResourceAccess<R, $read_view> {
             self.common.read_hint(resource, access, stage_hint)
@@ -280,7 +280,7 @@ macro_rules! inject_common_node_builder_methods {
         pub fn write<R: GraphResource>(
             &mut self,
             resource: &mut RenderGraphResource<R>,
-            access: impl Into<ResourceState>,
+            access: <R as GraphResource>::State,
         ) -> RenderGraphResourceAccess<R, $write_view>  {
             self.common.write(resource, access)
         }
@@ -290,7 +290,7 @@ macro_rules! inject_common_node_builder_methods {
         pub fn write_hint<R: GraphResource>(
             &mut self,
             resource: &mut RenderGraphResource<R>,
-            access: impl Into<ResourceState>,
+            access: <R as GraphResource>::State,
             stage_hint: vk::PipelineStageFlags2,
         ) -> RenderGraphResourceAccess<R, $write_view>  {
             self.common.write_hint(resource, access, stage_hint)
@@ -399,7 +399,7 @@ impl<'a> GraphicPipelineBuilder<'a> {
     }
 
     #[inline]
-    pub fn with_color(self, color: RenderGraphResourceAccess<Texture, Rt>, color_info: ColorInfo) -> Self {
+    pub fn with_color(self, color: RenderGraphResourceAccess<Texture, Rt>, color_info: ColorAttachmentDesc) -> Self {
         self.pipeline_desc.color_attachments.push((color, color_info));
         self
     }

@@ -30,9 +30,9 @@ impl RenderableApp for SimpleApp {
             let rt = ctx.get_texture(&output_access);
             let encoder = ctx.command_encoder();
 
-            encoder.custom(|cmd| {
+            encoder.custom(|device, cmd| {
                 unsafe {
-                    ctx.device().handle().cmd_clear_color_image(
+                    device.cmd_clear_color_image(
                         cmd,
                         rt.handle(),
                         vk::ImageLayout::GENERAL,

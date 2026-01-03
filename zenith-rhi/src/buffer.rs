@@ -82,8 +82,7 @@ impl BufferDesc {
         Self {
             size,
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
-            memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                | vk::MemoryPropertyFlags::HOST_COHERENT,
+            memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
         }
     }
@@ -159,11 +158,12 @@ pub struct Buffer {
 
 impl Buffer {
     /// Create a new buffer from a descriptor.
-    pub fn from_desc(
-        device: &ash::Device,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    pub fn new(
+        device: &crate::RenderDevice,
         desc: &BufferDesc,
     ) -> Result<Self, vk::Result> {
+        let memory_properties = device.memory_properties();
+        let device = device.handle();
         // Create buffer
         let buffer_info = vk::BufferCreateInfo::default()
             .size(desc.size)
@@ -190,7 +190,7 @@ impl Buffer {
         // Bind memory to buffer
         unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
 
-        log::info!("new buffer created.");
+        log::trace!("new buffer created.");
 
         Ok(Self {
             device: device.clone(),
@@ -198,52 +198,6 @@ impl Buffer {
             memory,
             size: desc.size,
             usage: desc.usage,
-            mapped_ptr: None,
-        })
-    }
-
-    /// Create a new buffer with the specified size, usage, and memory properties.
-    pub fn new(
-        device: &ash::Device,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
-        size: vk::DeviceSize,
-        usage: vk::BufferUsageFlags,
-        memory_flags: vk::MemoryPropertyFlags,
-    ) -> Result<Self, vk::Result> {
-        // Create buffer
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let buffer = unsafe { device.create_buffer(&buffer_info, None)? };
-
-        // Get memory requirements
-        let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
-        // Find suitable memory type
-        let memory_type_index =
-            find_memory_type(memory_properties, mem_requirements.memory_type_bits, memory_flags)
-                .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)?;
-
-        // Allocate memory
-        let alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_requirements.size)
-            .memory_type_index(memory_type_index);
-
-        let memory = unsafe { device.allocate_memory(&alloc_info, None)? };
-
-        // Bind memory to buffer
-        unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
-
-        log::info!("new buffer created.");
-
-        Ok(Self {
-            device: device.clone(),
-            buffer,
-            memory,
-            size,
-            usage,
             mapped_ptr: None,
         })
     }
@@ -282,6 +236,23 @@ impl Buffer {
         }
     }
 
+    /// Write bytes into the buffer at `offset` (in bytes). This is intended for staging buffers.
+    pub fn write_at(&self, offset: vk::DeviceSize, data: &[u8]) -> Result<(), vk::Result> {
+        let len = data.len() as vk::DeviceSize;
+        if len == 0 {
+            return Ok(());
+        }
+        if offset + len > self.size {
+            return Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        }
+        unsafe {
+            let ptr = self.device.map_memory(self.memory, offset, len, vk::MemoryMapFlags::empty())?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+            self.device.unmap_memory(self.memory);
+        }
+        Ok(())
+    }
+
     /// Get buffer device address (requires BUFFER_DEVICE_ADDRESS usage flag).
     pub fn device_address(&self) -> vk::DeviceAddress {
         let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
@@ -311,5 +282,7 @@ impl Drop for Buffer {
             self.device.destroy_buffer(self.buffer, None);
             self.device.free_memory(self.memory, None);
         }
+
+        log::trace!("buffer destroyed.");
     }
 }

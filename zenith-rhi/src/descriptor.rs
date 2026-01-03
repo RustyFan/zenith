@@ -3,7 +3,7 @@
 use ash::{vk, Device};
 use std::collections::HashMap;
 use std::sync::Arc;
-
+use zenith_core::collections::SmallVec;
 use crate::shader::{ShaderBinding, ShaderReflection};
 
 /// Descriptor binding validation error.
@@ -579,10 +579,9 @@ impl<'a> ShaderResourceBinder<'a> {
 
     /// Finish binding and return the descriptor sets for binding to the pipeline.
     pub fn finish(self) -> Vec<vk::DescriptorSet> {
-        // Group writes by descriptor set
         let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
-        let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
-        let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
+        let mut buffer_infos: SmallVec<[vk::DescriptorBufferInfo; 8]> = SmallVec::new();
+        let mut image_infos: SmallVec<[vk::DescriptorImageInfo; 8]> = SmallVec::new();
 
         for pending in &self.pending_writes {
             if let Some(buf_info) = pending.buffer_info {
