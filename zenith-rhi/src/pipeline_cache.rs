@@ -5,6 +5,7 @@ use ash::{vk, Device};
 use std::sync::Arc;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_rhi_derive::DeviceObject;
+use crate::RenderDevice;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PipelineCacheStats {
@@ -20,14 +21,14 @@ pub struct PipelineCache {
 
 impl PipelineCache {
     /// Create a new pipeline cache.
-    pub fn new(device: &Device) -> Result<Self, vk::Result> {
+    pub fn new(device: &RenderDevice) -> Result<Self, vk::Result> {
         let cache_info = vk::PipelineCacheCreateInfo::default();
-        let vk_cache = unsafe { device.create_pipeline_cache(&cache_info, None)? };
+        let vk_cache = unsafe { device.handle().create_pipeline_cache(&cache_info, None)? };
 
         Ok(Self {
             cache: vk_cache,
             pipelines: HashMap::new(),
-            device: device.clone(),
+            device: device.handle().clone(),
         })
     }
 
