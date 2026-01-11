@@ -24,10 +24,6 @@ VSOutput vsmain(VSInput input) {
     return output;
 }
 
-struct PSOutput {
-    float4 output : SV_Target;
-};
-
 struct TimeData {
     float time;
 };
@@ -36,9 +32,7 @@ struct TimeData {
 ConstantBuffer<TimeData> Time;
 
 [shader("fragment")]
-PSOutput psmain(PSInput input) {
+float4 psmain(PSInput input) : SV_Target {
     float3 animated = input.color * (0.5 + 0.5 * sin(Time.time * 3.0 + input.color * 6.28));
-    PSOutput output;
-    output.output = float4(animated, 1.0);
-    return output;
+    return float4(animated, 1.0);
 }
