@@ -51,7 +51,7 @@ pub use pipeline_cache::{PipelineCache, PipelineCacheStats};
 pub use resource_cache::ResourceCache;
 pub use sampler::{Sampler, SamplerConfig};
 pub use shader::{
-    compile_hlsl, reflect_spirv, Shader, ShaderBinding, ShaderError, ShaderReflection, ShaderStage,
+    reflect_spirv, Shader, ShaderBinding, ShaderError, ShaderReflection, ShaderStage,
 };
 pub use swapchain::{FrameSync, SwapchainConfig, Swapchain};
 pub use texture::{Texture, TextureDesc};

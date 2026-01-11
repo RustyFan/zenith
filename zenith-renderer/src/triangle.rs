@@ -7,7 +7,6 @@ use zenith_rendergraph::{
     GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
 };
 use zenith_rhi::pipeline::RasterizationStateBuilder;
-use zenith_rhi::shader::ShaderModel;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
@@ -49,23 +48,21 @@ impl TriangleRenderer {
             upload_pool.flush(&immediate, device)?;
         }
 
-        // Load HLSL shaders from files
-        let vertex_shader = Shader::from_hlsl_file(
+        // Load Slang shaders from file
+        let vertex_shader = Shader::from_file(
             "shader.triangle.vs",
             &device,
-            "content/shaders/triangle.vs.hlsl",
-            "main",
+            std::path::Path::new("content/shaders/triangle.slang"),
+            "vsmain",
             zenith_rhi::ShaderStage::Vertex,
-            ShaderModel::SM6,
         )?;
 
-        let fragment_shader = Shader::from_hlsl_file(
+        let fragment_shader = Shader::from_file(
             "shader.triangle.ps",
             &device,
-            "content/shaders/triangle.ps.hlsl",
-            "main",
+            std::path::Path::new("content/shaders/triangle.slang"),
+            "psmain",
             zenith_rhi::ShaderStage::Fragment,
-            ShaderModel::SM6,
         )?;
 
         Ok(Self {
@@ -142,7 +139,7 @@ impl TriangleRenderer {
 
             // Bind uniform buffer using shader resource binder
             let mut binder = ctx.create_binder();
-            match binder.bind_buffer("TimeData", time_buffer) {
+            match binder.bind_buffer("Time", time_buffer) {
                 Ok(_) => {
                     ctx.bind_descriptor_sets(binder);
                 }

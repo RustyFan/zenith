@@ -1,13 +1,15 @@
 //! Vulkan Shader - HLSL compilation and SPIR-V reflection.
 
 use ash::{vk, Device};
-use hassle_rs::{Dxc, HassleError};
+// use hassle_rs::HassleError;
 use rspirv_reflect::{Reflection, DescriptorType, BindingCount};
 use std::ffi::CString;
 use std::collections::HashMap;
 use zenith_rhi_derive::DeviceObject;
 use crate::RenderDevice;
 use crate::device::DebuggableObject;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use crate::device::set_debug_name_handle;
 
 pub enum ShaderModel {
@@ -33,30 +35,32 @@ pub struct Shader {
 }
 
 impl Shader {
-    /// Create a shader from an HLSL file.
-    pub fn from_hlsl_file(
+    pub fn from_file(
         name: &str,
         device: &RenderDevice,
-        path: impl AsRef<std::path::Path>,
+        path: &Path,
         entry_point: &str,
         stage: ShaderStage,
-        shader_model: ShaderModel,
     ) -> Result<Self, ShaderError> {
-        let source = std::fs::read_to_string(path)?;
-        Self::from_hlsl(name, device, &source, entry_point, stage, shader_model)
-    }
+        // Compile two variants:
+        // - runtime SPIR-V: has embedded debug info for RenderDoc
+        // - reflection SPIR-V: no debug info to keep reflection robust
+        let runtime_spirv = compile_slang_file_to_spirv(name, path, entry_point, stage, true)?;
+        let reflection_spirv = compile_slang_file_to_spirv(name, path, entry_point, stage, false)?;
 
-    /// Create a shader from HLSL source code.
-    pub fn from_hlsl(
-        name: &str,
-        device: &RenderDevice,
-        source: &str,
-        entry_point: &str,
-        stage: ShaderStage,
-        shader_model: ShaderModel,
-    ) -> Result<Self, ShaderError> {
-        let spirv = compile_hlsl(source, entry_point, stage, shader_model.as_str())?;
-        Self::from_spirv(name, device, &spirv, entry_point, stage)
+        let reflection = reflect_spirv(&reflection_spirv, stage)?;
+        let module = create_shader_module(device.handle(), &runtime_spirv)?;
+
+        let shader = Self {
+            name: name.to_owned(),
+            module,
+            stage,
+            entry_point: CString::new(entry_point).unwrap(),
+            reflection,
+            device: device.handle().clone(),
+        };
+        device.set_debug_name(&shader);
+        Ok(shader)
     }
 
     /// Create a shader from pre-compiled SPIR-V bytecode.
@@ -67,7 +71,7 @@ impl Shader {
         entry_point: &str,
         stage: ShaderStage,
     ) -> Result<Self, ShaderError> {
-        // Reflect the shader
+        // Reflect the shader.
         let reflection = reflect_spirv(spirv, stage)?;
 
         // Create shader module
@@ -153,12 +157,6 @@ impl From<std::io::Error> for ShaderError {
     }
 }
 
-impl From<HassleError> for ShaderError {
-    fn from(e: HassleError) -> Self {
-        ShaderError::CompilationFailed(format!("{:?}", e))
-    }
-}
-
 impl std::fmt::Display for ShaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -181,16 +179,6 @@ pub enum ShaderStage {
 }
 
 impl ShaderStage {
-    /// Get the DXC target profile string for this stage.
-    fn to_profile(&self, shader_model: &str) -> String {
-        let prefix = match self {
-            ShaderStage::Vertex => "vs",
-            ShaderStage::Fragment => "ps",
-            ShaderStage::Compute => "cs",
-        };
-        format!("{}_{}", prefix, shader_model)
-    }
-
     /// Convert to Vulkan shader stage flags.
     pub fn to_vk_stage(&self) -> vk::ShaderStageFlags {
         match self {
@@ -281,54 +269,100 @@ impl ShaderReflection {
     }
 }
 
-/// Compile HLSL source to SPIR-V bytecode using DXC.
-pub fn compile_hlsl(
-    source: &str,
+fn slangc_path() -> Result<PathBuf, ShaderError> {
+    if let Ok(p) = std::env::var("SLANGC") {
+        return Ok(PathBuf::from(p));
+    }
+    if let Ok(vk) = std::env::var("VULKAN_SDK") {
+        return Ok(PathBuf::from(vk).join("Bin").join("slangc.exe"));
+    }
+    Ok(PathBuf::from("slangc"))
+}
+
+fn stage_arg(stage: ShaderStage) -> &'static str {
+    match stage {
+        ShaderStage::Vertex => "vertex",
+        ShaderStage::Fragment => "fragment",
+        ShaderStage::Compute => "compute",
+    }
+}
+
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+/// Compile Slang source file to SPIR-V using VulkanSDK `slangc.exe`.
+///
+/// We enable SPIR-V debug info (DWARF) for RenderDoc.
+pub fn compile_slang_file_to_spirv(
+    shader_name: &str,
+    path: &Path,
     entry_point: &str,
     stage: ShaderStage,
-    shader_model: &str,
+    debug: bool,
 ) -> Result<Vec<u8>, ShaderError> {
-    let dxc = Dxc::new(None)?;
-    let compiler = dxc.create_compiler()?;
-    let library = dxc.create_library()?;
+    compile_slang_file_to_spirv_cli(shader_name, path, entry_point, stage, debug)
+}
 
-    let blob = library.create_blob_with_encoding_from_str(source)?;
+fn compile_slang_file_to_spirv_cli(
+    shader_name: &str,
+    path: &Path,
+    entry_point: &str,
+    stage: ShaderStage,
+    debug: bool,
+) -> Result<Vec<u8>, ShaderError> {
+    let slangc = slangc_path()?;
 
-    let profile = stage.to_profile(shader_model);
+    let out_dir = PathBuf::from("target").join("shader_pdb");
+    std::fs::create_dir_all(&out_dir)?;
 
-    let args = [
-        "-spirv",
-        "-fspv-target-env=vulkan1.3",
-        "-fvk-use-scalar-layout",
-        "-fvk-use-dx-position-w",
-        "-Zpc", // Pack matrices in column-major order
-    ];
+    let out_spv = out_dir.join(format!(
+        "{}.{}.{}.{}.spv",
+        sanitize_filename(shader_name),
+        stage_arg(stage),
+        sanitize_filename(entry_point),
+        if debug { "debug" } else { "nodebug" },
+    ));
 
-    let result = compiler.compile(
-        &blob,
-        "shader.hlsl",
-        entry_point,
-        &profile,
-        &args,
-        None,
-        &[],
-    );
+    let include_dir = path
+        .parent()
+        .ok_or_else(|| ShaderError::CompilationFailed("Shader path has no parent dir".into()))?;
 
-    match result {
-        Ok(compiled) => {
-            let result_blob = compiled.get_result()?;
-            Ok(result_blob.to_vec())
-        }
-        Err(e) => {
-            let error_msg = e
-                .0
-                .get_error_buffer()
-                .ok()
-                .and_then(|buf| library.get_blob_as_string(&buf.into()).ok())
-                .unwrap_or_else(|| "Unknown hlsl compilation error".to_string());
-            Err(ShaderError::CompilationFailed(error_msg))
-        }
+    let mut cmd = Command::new(slangc);
+    cmd.arg(path)
+        .arg("-target")
+        .arg("spirv")
+        .arg("-profile")
+        .arg("sm_6_8")
+        .arg("-matrix-layout-column-major")
+        .arg("-fvk-use-scalar-layout")
+        .arg("-fvk-use-entrypoint-name")
+        .arg("-entry")
+        .arg(entry_point)
+        .arg("-stage")
+        .arg(stage_arg(stage))
+        .arg("-I")
+        .arg(include_dir)
+        .arg("-o")
+        .arg(&out_spv);
+
+    if debug {
+        // Debug: include debug info (level 3) in DWARF format for SPIR-V.
+        cmd.arg("-g3").arg("-gdwarf");
     }
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let mut msg = String::new();
+        msg.push_str("slangc failed\n");
+        msg.push_str(&String::from_utf8_lossy(&output.stdout));
+        msg.push_str(&String::from_utf8_lossy(&output.stderr));
+        return Err(ShaderError::CompilationFailed(msg));
+    }
+
+    Ok(std::fs::read(out_spv)?)
 }
 
 /// Reflect SPIR-V bytecode to extract resource bindings using rspirv_reflect.
