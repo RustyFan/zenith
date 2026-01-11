@@ -8,6 +8,114 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use zenith_rhi_derive::DeviceObject;
 use crate::descriptor::DescriptorSetLayout;
+use crate::RenderDevice;
+
+pub enum ShaderModel {
+    SM6,
+}
+
+impl ShaderModel {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ShaderModel::SM6 => { "6_0" }
+        }
+    }
+}
+
+/// Compiled shader with Vulkan shader module and reflection data.
+#[DeviceObject]
+pub struct Shader {
+    module: vk::ShaderModule,
+    stage: ShaderStage,
+    entry_point: CString,
+    reflection: ShaderReflection,
+}
+
+impl Shader {
+    /// Create a shader from an HLSL file.
+    pub fn from_hlsl_file(
+        device: &RenderDevice,
+        path: impl AsRef<std::path::Path>,
+        entry_point: &str,
+        stage: ShaderStage,
+        shader_model: ShaderModel,
+    ) -> Result<Self, ShaderError> {
+        let source = std::fs::read_to_string(path)?;
+        Self::from_hlsl(device, &source, entry_point, stage, shader_model)
+    }
+
+    /// Create a shader from HLSL source code.
+    pub fn from_hlsl(
+        device: &RenderDevice,
+        source: &str,
+        entry_point: &str,
+        stage: ShaderStage,
+        shader_model: ShaderModel,
+    ) -> Result<Self, ShaderError> {
+        let spirv = compile_hlsl(source, entry_point, stage, shader_model.as_str())?;
+        Self::from_spirv(device, &spirv, entry_point, stage)
+    }
+
+    /// Create a shader from pre-compiled SPIR-V bytecode.
+    pub fn from_spirv(
+        device: &RenderDevice,
+        spirv: &[u8],
+        entry_point: &str,
+        stage: ShaderStage,
+    ) -> Result<Self, ShaderError> {
+        // Reflect the shader
+        let reflection = reflect_spirv(spirv, stage)?;
+
+        // Create shader module
+        let module = create_shader_module(device.handle(), spirv)?;
+
+        Ok(Self {
+            module,
+            stage,
+            entry_point: CString::new(entry_point).unwrap(),
+            reflection,
+            // descriptor_set_layouts,
+            device: device.handle().clone(),
+        })
+    }
+
+    /// Get the Vulkan shader module handle.
+    pub fn module(&self) -> vk::ShaderModule {
+        self.module
+    }
+
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// Get the shader stage.
+    pub fn stage(&self) -> ShaderStage {
+        self.stage
+    }
+
+    /// Get the entry point name.
+    pub fn entry_point(&self) -> &CString {
+        &self.entry_point
+    }
+
+    /// Get the shader reflection data.
+    pub fn reflection(&self) -> &ShaderReflection {
+        &self.reflection
+    }
+
+    /// Get Vulkan shader stage flags.
+    pub fn vk_stage(&self) -> vk::ShaderStageFlags {
+        self.stage.to_vk_stage()
+    }
+}
+
+impl Drop for Shader {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_shader_module(self.module, None);
+        }
+    }
+}
 
 /// Shader compilation and reflection errors.
 #[derive(Debug)]
@@ -175,7 +283,7 @@ pub fn compile_hlsl(
 
     let args = [
         "-spirv",
-        "-fspv-target-env=vulkan1.2",
+        "-fspv-target-env=vulkan1.3",
         "-fvk-use-scalar-layout",
         "-fvk-use-dx-position-w",
         "-Zpc", // Pack matrices in column-major order
@@ -598,112 +706,6 @@ fn convert_descriptor_type(reflect_type: DescriptorType) -> vk::DescriptorType {
     vk::DescriptorType::from_raw(reflect_type.0 as i32)
 }
 
-/// Compiled shader with Vulkan shader module and reflection data.
-#[DeviceObject]
-pub struct Shader {
-    module: vk::ShaderModule,
-    stage: ShaderStage,
-    entry_point: CString,
-    reflection: ShaderReflection,
-    /// Cached descriptor set layouts derived from this shader's reflection.
-    descriptor_set_layouts: Vec<Arc<DescriptorSetLayout>>,
-}
-
-impl Shader {
-    /// Create a shader from HLSL source code.
-    pub fn from_hlsl(
-        device: &Device,
-        source: &str,
-        entry_point: &str,
-        stage: ShaderStage,
-        shader_model: &str,
-    ) -> Result<Self, ShaderError> {
-        let spirv = compile_hlsl(source, entry_point, stage, shader_model)?;
-        Self::from_spirv(device, &spirv, entry_point, stage)
-    }
-
-    /// Create a shader from an HLSL file.
-    pub fn from_hlsl_file(
-        device: &Device,
-        path: impl AsRef<std::path::Path>,
-        entry_point: &str,
-        stage: ShaderStage,
-        shader_model: &str,
-    ) -> Result<Self, ShaderError> {
-        let source = std::fs::read_to_string(path)?;
-        Self::from_hlsl(device, &source, entry_point, stage, shader_model)
-    }
-
-    /// Create a shader from pre-compiled SPIR-V bytecode.
-    pub fn from_spirv(
-        device: &Device,
-        spirv: &[u8],
-        entry_point: &str,
-        stage: ShaderStage,
-    ) -> Result<Self, ShaderError> {
-        // Reflect the shader
-        let reflection = reflect_spirv(spirv, stage)?;
-
-        // Create shader module
-        let module = create_shader_module(device, spirv)?;
-
-        // Create and cache descriptor set layouts
-        let descriptor_set_layouts = crate::descriptor::create_layouts_from_reflection(device, &reflection)
-            .map_err(ShaderError::VulkanError)?;
-
-        Ok(Self {
-            module,
-            stage,
-            entry_point: CString::new(entry_point).unwrap(),
-            reflection,
-            descriptor_set_layouts,
-            device: device.clone(),
-        })
-    }
-
-    /// Get the Vulkan shader module handle.
-    pub fn module(&self) -> vk::ShaderModule {
-        self.module
-    }
-
-    pub(crate) fn device(&self) -> &Device {
-        &self.device
-    }
-
-    /// Get the shader stage.
-    pub fn stage(&self) -> ShaderStage {
-        self.stage
-    }
-
-    /// Get the entry point name.
-    pub fn entry_point(&self) -> &CString {
-        &self.entry_point
-    }
-
-    /// Get the shader reflection data.
-    pub fn reflection(&self) -> &ShaderReflection {
-        &self.reflection
-    }
-
-    /// Get Vulkan shader stage flags.
-    pub fn vk_stage(&self) -> vk::ShaderStageFlags {
-        self.stage.to_vk_stage()
-    }
-
-    /// Get the cached descriptor set layouts for this shader.
-    pub fn descriptor_set_layouts(&self) -> &[Arc<DescriptorSetLayout>] {
-        &self.descriptor_set_layouts
-    }
-}
-
-impl Drop for Shader {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_shader_module(self.module, None);
-        }
-    }
-}
-
 /// Create a Vulkan shader module from SPIR-V bytecode.
 fn create_shader_module(device: &Device, spirv: &[u8]) -> Result<vk::ShaderModule, ShaderError> {
     assert_eq!(spirv.len() % 4, 0, "SPIR-V bytecode must be 4-byte aligned");
@@ -714,4 +716,20 @@ fn create_shader_module(device: &Device, spirv: &[u8]) -> Result<vk::ShaderModul
     let module = unsafe { device.create_shader_module(&create_info, None)? };
 
     Ok(module)
+}
+
+/// Create all descriptor set layouts from shader reflection.
+pub(crate) fn create_layouts_from_reflection(
+    device: &Device,
+    reflection: &ShaderReflection,
+) -> Result<Vec<Arc<DescriptorSetLayout>>, vk::Result> {
+    let max_set = reflection.max_set().unwrap_or(0);
+    let mut layouts = Vec::with_capacity((max_set + 1) as usize);
+
+    for set_index in 0..=max_set {
+        let layout = DescriptorSetLayout::from_reflection(device, &reflection.bindings, set_index)?;
+        layouts.push(Arc::new(layout));
+    }
+
+    Ok(layouts)
 }

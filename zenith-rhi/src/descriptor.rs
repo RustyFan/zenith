@@ -241,22 +241,6 @@ impl Drop for DescriptorPool {
     }
 }
 
-/// Create all descriptor set layouts from shader reflection.
-pub(crate) fn create_layouts_from_reflection(
-    device: &Device,
-    reflection: &ShaderReflection,
-) -> Result<Vec<Arc<DescriptorSetLayout>>, vk::Result> {
-    let max_set = reflection.max_set().unwrap_or(0);
-    let mut layouts = Vec::with_capacity((max_set + 1) as usize);
-
-    for set_index in 0..=max_set {
-        let layout = DescriptorSetLayout::from_reflection(device, &reflection.bindings, set_index)?;
-        layouts.push(Arc::new(layout));
-    }
-
-    Ok(layouts)
-}
-
 /// Error type for shader resource binding.
 #[derive(Debug)]
 pub enum ShaderBindingError {

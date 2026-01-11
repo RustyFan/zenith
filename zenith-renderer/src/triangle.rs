@@ -7,6 +7,7 @@ use zenith_rendergraph::{
     GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
 };
 use zenith_rhi::pipeline::RasterizationStateBuilder;
+use zenith_rhi::shader::ShaderModel;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
@@ -50,19 +51,19 @@ impl TriangleRenderer {
 
         // Load HLSL shaders from files
         let vertex_shader = Shader::from_hlsl_file(
-            device.handle(),
+            &device,
             "content/shaders/triangle.vs.hlsl",
             "main",
             zenith_rhi::ShaderStage::Vertex,
-            "6_0",
+            ShaderModel::SM6,
         )?;
 
         let fragment_shader = Shader::from_hlsl_file(
-            device.handle(),
+            &device,
             "content/shaders/triangle.ps.hlsl",
             "main",
             zenith_rhi::ShaderStage::Fragment,
-            "6_0",
+            ShaderModel::SM6,
         )?;
 
         Ok(Self {

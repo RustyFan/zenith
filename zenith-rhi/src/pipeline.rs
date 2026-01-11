@@ -69,7 +69,6 @@ pub struct GraphicShaderInput {
     pub vertex_bindings: Vec<VertexBinding>,
     pub vertex_attributes: Vec<VertexAttribute>,
 
-    // Derived (not hashed)
     pub merged_reflection: ShaderReflection,
     pub descriptor_set_layouts: Vec<Arc<DescriptorSetLayout>>,
     pub push_constant_size: u32,
@@ -91,7 +90,7 @@ impl GraphicShaderInput {
         }
 
         let merged_reflection = ShaderReflection::merge(&reflections);
-        let descriptor_set_layouts = crate::descriptor::create_layouts_from_reflection(vertex_shader.device(), &merged_reflection)
+        let descriptor_set_layouts = crate::shader::create_layouts_from_reflection(vertex_shader.device(), &merged_reflection)
             .map_err(GraphicShaderInputBuildError::DescriptorLayoutCreationFailed)?;
 
         Ok(Self {
