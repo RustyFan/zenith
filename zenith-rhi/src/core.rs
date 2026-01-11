@@ -98,7 +98,7 @@ impl RhiCore {
         RenderDevice::new(
             &self.instance,
             physical_device,
-            NUM_BACK_BUFFERS as u8,
+            NUM_BACK_BUFFERS,
         )
     }
 

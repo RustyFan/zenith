@@ -4,18 +4,19 @@ use winit::window::Window;
 use zenith_rendergraph::RenderGraphBuilder;
 use zenith_rhi::core::{select_physical_device, PhysicalDevice};
 use zenith_rhi::swapchain::SwapchainWindow;
-use zenith_rhi::{vk, PipelineCache, RenderDevice, RhiCore, Swapchain, SwapchainConfig};
+use zenith_rhi::{vk, CommandPool, PipelineCache, RenderDevice, RhiCore, Swapchain, SwapchainConfig};
 use crate::app::RenderContext;
 
 pub struct Engine {
-    pub main_window: Arc<Window>,
-
+    execute_command_pools: Vec<CommandPool>,
+    present_command_pools: Vec<CommandPool>,
     pipeline_cache: PipelineCache,
     swapchain: Swapchain,
     pub render_device: RenderDevice,
     _physical_device: PhysicalDevice,
     _rhi_core: RhiCore,
 
+    pub main_window: Arc<Window>,
     // _puffin_server: puffin_http::Server,
 
     should_exit: bool,
@@ -39,19 +40,40 @@ impl Engine {
             swapchain_config,
         )?;
 
-        let pipeline_cache = PipelineCache::new(device.handle())?;
+        let pipeline_cache = PipelineCache::new(&device)?;
+
+        let num_frames = device.num_frames();
+        let (execute_command_pools, present_command_pools) = (0..num_frames)
+            .map(|_| -> Result<(CommandPool, CommandPool), vk::Result> {
+                Ok((
+                    CommandPool::new(
+                        &device,
+                        physical_device.graphics_queue_family(),
+                        vk::CommandPoolCreateFlags::empty(),
+                    )?,
+                    CommandPool::new(
+                        &device,
+                        physical_device.present_queue_family(),
+                        vk::CommandPoolCreateFlags::empty(),
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .unzip();
 
         Ok(Self {
-            main_window,
-            _rhi_core: core,
-            _physical_device: physical_device,
-            render_device: device,
-
-            swapchain,
+            execute_command_pools,
+            present_command_pools,
             pipeline_cache,
+            swapchain,
+            render_device: device,
+            _physical_device: physical_device,
+            _rhi_core: core,
 
             // _puffin_server,
 
+            main_window,
             should_exit: false,
         })
     }
@@ -62,22 +84,24 @@ impl Engine {
 
     #[profiling::function]
     pub fn render<A: RenderableApp>(&mut self, app: &mut A) {
-        self.render_device.begin_frame();
+        let frame_index = self.render_device.begin_frame();
+        self.execute_command_pools[frame_index].reset().expect("Failed to reset execute command pool");
 
         let mut builder = RenderGraphBuilder::new();
         let render_context = RenderContext::new(
             &mut builder,
             &self.swapchain,
-            self.render_device.frame_index(),
+            frame_index,
         );
         app.render(render_context);
 
         let render_graph = builder.build();
         let mut compiled = render_graph.compile(&mut self.render_device, &mut self.pipeline_cache);
 
-        compiled.execute(&mut self.render_device);
+        compiled.execute(&mut self.render_device, &self.execute_command_pools[frame_index])
+            .expect("Failed to execute render graph!");
 
-        let retired = compiled.present(&mut self.swapchain, &mut self.render_device)
+        let retired = compiled.present(&mut self.render_device, &self.present_command_pools[frame_index], &mut self.swapchain)
             .expect("Failed to present swapchain!");
 
         retired.release_frame_resources(&mut self.render_device);

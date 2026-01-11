@@ -32,7 +32,7 @@ impl RenderableApp for SimpleApp {
 
             encoder.custom(|device, cmd| {
                 unsafe {
-                    device.cmd_clear_color_image(
+                    device.handle().cmd_clear_color_image(
                         cmd,
                         rt.handle(),
                         vk::ImageLayout::GENERAL,

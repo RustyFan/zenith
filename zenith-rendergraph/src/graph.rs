@@ -6,7 +6,7 @@ use crate::resource::{GraphResource, GraphResourceId, GraphResourceState, GraphR
 use std::cell::Cell;
 use std::sync::Arc;
 use zenith_core::collections::SmallVec;
-use zenith_rhi::{CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection};
+use zenith_rhi::{CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool};
 use zenith_rhi::{
     vk, GraphicPipeline, GraphicPipelineDesc, PipelineCache, RenderDevice,
     DescriptorSetBinder, Swapchain,
@@ -201,19 +201,18 @@ pub struct CompiledRenderGraph {
 
 impl CompiledRenderGraph {
     #[profiling::function]
-    pub fn execute(&mut self, device: &RenderDevice) {
-        let cmd = device.execute_command_pool().allocate().expect("Failed to allocate command buffer");
-        let encoder = CommandEncoder::new(device.handle(), cmd);
+    pub fn execute(&mut self, device: &RenderDevice, cmd_pool: &CommandPool) -> anyhow::Result<()>  {
+        let encoder = CommandEncoder::new(device, cmd_pool)?;
         
-        encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT).unwrap();
-        
+        encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
+
         let nodes = std::mem::take(&mut self.serial_nodes);
         self.record_nodes(device, &encoder, nodes);
-        
-        encoder.end().unwrap();
+
+        encoder.end()?;
 
         device.submit_commands(
-            cmd,
+            encoder,
             device.graphics_queue(),
             &[],
             vk::PipelineStageFlags2::NONE,
@@ -221,13 +220,15 @@ impl CompiledRenderGraph {
             vk::PipelineStageFlags2::NONE,
             device.frame_resource_fence(),
         );
+
+        Ok(())
     }
 
-    pub fn present(mut self, swapchain: &mut Swapchain, device: &mut RenderDevice) -> anyhow::Result<RetiredRenderGraph> {
+    pub fn present(mut self, device: &mut RenderDevice, cmd_pool: &CommandPool, swapchain: &mut Swapchain) -> anyhow::Result<RetiredRenderGraph> {
         let (image_index, _) = swapchain.acquire_next_image(device.handle())?;
         swapchain.reset_current_fence(device.handle())?;
         device.reset_frame_resources();
-        device.present_command_pool().reset()?;
+        cmd_pool.reset()?;
 
         // update the swapchain texture reference to the acquired image
         if self.swapchain_tex_id != GraphResourceId::MAX {
@@ -239,8 +240,7 @@ impl CompiledRenderGraph {
             }
         }
 
-        let cmd = device.present_command_pool().allocate().expect("Failed to allocate command buffer");
-        let encoder = CommandEncoder::new(device.handle(), cmd);
+        let encoder = CommandEncoder::new(device, cmd_pool)?;
         encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
 
         let nodes = std::mem::take(&mut self.present_nodes);
@@ -257,7 +257,7 @@ impl CompiledRenderGraph {
         let frame_sync = swapchain.current_frame_sync();
 
         device.submit_commands(
-            cmd,
+            encoder,
             device.graphics_queue(),
             &[frame_sync.image_available],
             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,

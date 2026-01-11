@@ -1,6 +1,5 @@
 //! Vulkan Device - logical device and queue management.
 
-use crate::command::CommandPool;
 use crate::core::PhysicalDevice;
 use crate::defer_release::{DeferRelease, DeferReleaseQueue};
 use crate::resource_cache::ResourceCache;
@@ -9,6 +8,7 @@ use crate::synchronization::{Fence, Semaphore};
 use ash::{vk, Device, Instance};
 use std::cell::RefCell;
 use zenith_core::collections::{SmallVec, hashset::HashSet};
+use crate::CommandEncoder;
 
 /// Get required device extensions.
 fn get_required_device_extensions() -> Vec<*const i8> {
@@ -22,13 +22,10 @@ pub struct RenderDevice {
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
-    execute_command_pools: Vec<CommandPool>,
-    present_command_pools: Vec<CommandPool>,
     frame_resource_fences: Vec<Fence>,
     defer_release_queues: RefCell<Vec<DeferReleaseQueue>>,
     resource_caches: Vec<ResourceCache>,
 
-    num_frames: u8,
     current_frame: u8,
 }
 
@@ -37,7 +34,7 @@ impl RenderDevice {
     pub fn new(
         instance: &Instance,
         physical_device: &PhysicalDevice,
-        num_frames: u8,
+        num_frames: u32,
     ) -> Result<Self, vk::Result> {
         // Collect unique queue families
         let unique_families: HashSet<u32> = [physical_device.graphics_queue_family(), physical_device.present_queue_family()]
@@ -85,17 +82,10 @@ impl RenderDevice {
         let graphics_queue = unsafe { device.get_device_queue(physical_device.graphics_queue_family(), 0) };
         let present_queue = unsafe { device.get_device_queue(physical_device.present_queue_family(), 0) };
 
-        let mut execute_command_pools = Vec::with_capacity(num_frames as usize);
-        let mut present_command_pools = Vec::with_capacity(num_frames as usize);
         let mut frame_resource_fences = Vec::with_capacity(num_frames as usize);
         let mut defer_release_queues = Vec::with_capacity(num_frames as usize);
+
         for _ in 0..num_frames {
-            execute_command_pools.push(
-                CommandPool::new(&device, physical_device.graphics_queue_family(), vk::CommandPoolCreateFlags::empty())?
-            );
-            present_command_pools.push(
-                CommandPool::new(&device, physical_device.graphics_queue_family(), vk::CommandPoolCreateFlags::empty())?
-            );
             frame_resource_fences.push(Fence::new(&device, true)?);
             defer_release_queues.push(
                 DeferReleaseQueue::new()
@@ -109,58 +99,56 @@ impl RenderDevice {
             device,
             graphics_queue,
             present_queue,
-            execute_command_pools,
-            present_command_pools,
             frame_resource_fences,
             defer_release_queues: RefCell::new(defer_release_queues),
             resource_caches,
-            num_frames,
             current_frame: 0,
         })
     }
 
     /// Get a reference to the logical device.
+    #[inline]
     pub fn handle(&self) -> &Device {
         &self.device
     }
 
-    pub fn execute_command_pool(&self) -> &CommandPool {
-        &self.execute_command_pools[self.current_frame as usize]
-    }
-
-    pub fn present_command_pool(&self) -> &CommandPool {
-        &self.present_command_pools[self.current_frame as usize]
-    }
-
-    pub fn begin_frame(&mut self) {
+    pub fn begin_frame(&mut self) -> usize {
         // wait and reset until execution of current frame completes on GPU side
         unsafe {
             let fence = self.frame_resource_fences[self.current_frame as usize].handle();
             self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
             self.device.reset_fences(&[fence]).unwrap();
         }
-        self.execute_command_pools[self.current_frame as usize].reset().expect("Failed to reset execute command pool");
+        self.current_frame as _
     }
 
+    #[inline]
     pub fn reset_frame_resources(&self) {
         self.defer_release_queues.borrow_mut()[self.current_frame as usize].release_all();
     }
 
+    #[inline]
     pub fn defer_release<T: DeferRelease>(&self, value: T) {
         self.defer_release_queues.borrow_mut()[self.current_frame as usize].push(value);
     }
 
+    #[inline]
     pub fn last_defer_release_stats(&self) -> crate::LastFreedStats {
         self.defer_release_queues.borrow()[self.current_frame as usize]
             .last_freed()
             .clone()
     }
 
+    #[inline]
     pub fn end_frame(&mut self) {
-        self.current_frame = (self.current_frame + 1) % self.num_frames;
+        self.current_frame = (self.current_frame + 1) % (self.defer_release_queues.borrow().len() as u8);
     }
 
-    pub fn frame_index(&self) -> usize { self.current_frame as _ }
+    #[inline]
+    pub fn current_frame_index(&self) -> usize { self.current_frame as _ }
+
+    #[inline]
+    pub fn num_frames(&self) -> usize { self.defer_release_queues.borrow().len() as _ }
 
     pub fn acquire_buffer(&mut self, desc: &crate::BufferDesc) -> Result<crate::Buffer, vk::Result> {
         let frame = self.current_frame as usize;
@@ -238,7 +226,7 @@ impl RenderDevice {
 
     pub fn submit_commands<'a>(
         &self,
-        command: vk::CommandBuffer,
+        encoder: CommandEncoder<'a>,
         queue: Queue,
         wait_semaphores: &'a [&Semaphore],
         wait_stage: vk::PipelineStageFlags2,
@@ -247,7 +235,7 @@ impl RenderDevice {
         fence: &Fence,
     ) {
         let command_submit_info = vk::CommandBufferSubmitInfo::default()
-            .command_buffer(command);
+            .command_buffer(encoder.handle());
 
         let wait_semaphore_infos = wait_semaphores.iter()
             .map(|semaphore| {
@@ -283,9 +271,6 @@ impl RenderDevice {
 impl Drop for RenderDevice {
     fn drop(&mut self) {
         unsafe { self.device.device_wait_idle().unwrap(); }
-
-        self.execute_command_pools.clear();
-        self.present_command_pools.clear();
 
         for queue in self.defer_release_queues.get_mut() {
             queue.release_all();
