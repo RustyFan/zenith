@@ -32,18 +32,18 @@ impl Default for BufferDesc {
 
 impl BufferDesc {
     /// Create a new buffer descriptor with the specified size.
-    pub fn new(size: vk::DeviceSize) -> Self {
+    pub fn new(name: &str, size: vk::DeviceSize) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             size,
             ..Default::default()
         }
     }
 
     /// Create a vertex buffer descriptor.
-    pub fn vertex(size: vk::DeviceSize) -> Self {
+    pub fn vertex(name: &str, size: vk::DeviceSize) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             size,
             usage: vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
@@ -51,9 +51,9 @@ impl BufferDesc {
     }
 
     /// Create an index buffer descriptor.
-    pub fn index(size: vk::DeviceSize) -> Self {
+    pub fn index(name: &str, size: vk::DeviceSize) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             size,
             usage: vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
@@ -61,9 +61,9 @@ impl BufferDesc {
     }
 
     /// Create a uniform buffer descriptor.
-    pub fn uniform(size: vk::DeviceSize) -> Self {
+    pub fn uniform(name: &str, size: vk::DeviceSize) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             size,
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
             memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -71,9 +71,9 @@ impl BufferDesc {
     }
 
     /// Create a storage buffer descriptor.
-    pub fn storage(size: vk::DeviceSize) -> Self {
+    pub fn storage(name: &str, size: vk::DeviceSize) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             size,
             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
             memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
@@ -81,9 +81,9 @@ impl BufferDesc {
     }
 
     /// Create a staging buffer descriptor (CPU-visible for transfers).
-    pub fn staging(size: vk::DeviceSize) -> Self {
+    pub fn staging(name: &str, size: vk::DeviceSize) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             size,
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,

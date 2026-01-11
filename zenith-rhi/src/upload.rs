@@ -28,7 +28,7 @@ pub struct UploadPool<'a> {
 
 impl<'a> UploadPool<'a> {
     pub fn new(device: &RenderDevice, staging_size: vk::DeviceSize) -> Result<Self, vk::Result> {
-        let staging = Buffer::new(device, &BufferDesc::staging(staging_size))?;
+        let staging = Buffer::new(device, &BufferDesc::staging("upload_pool_staging", staging_size))?;
         Ok(Self {
             staging,
             staging_size,

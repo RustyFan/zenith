@@ -39,7 +39,7 @@ pub struct TextureDesc {
 impl Default for TextureDesc {
     fn default() -> Self {
         Self {
-            name: String::new(),
+            name: "Unnamed texture".to_owned(),
             format: vk::Format::R8G8B8A8_UNORM,
             extent: vk::Extent3D {
                 width: 1,
@@ -60,9 +60,9 @@ impl Default for TextureDesc {
 
 impl TextureDesc {
     /// Create a new 2D texture descriptor.
-    pub fn new_2d(width: u32, height: u32, format: vk::Format) -> Self {
+    pub fn new_2d(name: &str, width: u32, height: u32, format: vk::Format) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             format,
             extent: vk::Extent3D {
                 width,
@@ -76,9 +76,9 @@ impl TextureDesc {
     }
 
     /// Create a new 3D texture descriptor.
-    pub fn new_3d(width: u32, height: u32, depth: u32, format: vk::Format) -> Self {
+    pub fn new_3d(name: &str, width: u32, height: u32, depth: u32, format: vk::Format) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             format,
             extent: vk::Extent3D {
                 width,
@@ -92,9 +92,9 @@ impl TextureDesc {
     }
 
     /// Create a cube map texture descriptor.
-    pub fn new_cube(size: u32, format: vk::Format) -> Self {
+    pub fn new_cube(name: &str, size: u32, format: vk::Format) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             format,
             extent: vk::Extent3D {
                 width: size,
@@ -109,9 +109,9 @@ impl TextureDesc {
     }
 
     /// Create a 2D texture array descriptor.
-    pub fn new_2d_array(width: u32, height: u32, layers: u32, format: vk::Format) -> Self {
+    pub fn new_2d_array(name: &str, width: u32, height: u32, layers: u32, format: vk::Format) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             format,
             extent: vk::Extent3D {
                 width,
@@ -126,9 +126,9 @@ impl TextureDesc {
     }
 
     /// Create a color attachment descriptor.
-    pub fn new_color_attachment(width: u32, height: u32, format: vk::Format) -> Self {
+    pub fn new_color(name: &str, width: u32, height: u32, format: vk::Format) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             format,
             extent: vk::Extent3D {
                 width,
@@ -143,9 +143,9 @@ impl TextureDesc {
     }
 
     /// Create a depth attachment descriptor.
-    pub fn new_depth_attachment(width: u32, height: u32) -> Self {
+    pub fn new_depth(name: &str, width: u32, height: u32) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             format: vk::Format::D32_SFLOAT,
             extent: vk::Extent3D {
                 width,
@@ -160,9 +160,9 @@ impl TextureDesc {
     }
 
     /// Create a depth-stencil attachment descriptor.
-    pub fn new_depth_stencil_attachment(width: u32, height: u32) -> Self {
+    pub fn new_depth_stencil(name: &str, width: u32, height: u32) -> Self {
         Self {
-            name: String::new(),
+            name: name.to_owned(),
             format: vk::Format::D24_UNORM_S8_UINT,
             extent: vk::Extent3D {
                 width,

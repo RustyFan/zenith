@@ -36,8 +36,8 @@ impl TriangleRenderer {
         let vertex_data = bytemuck::cast_slice(&vertices);
         let index_data = bytemuck::cast_slice(&indices);
 
-        let vertex_buffer = Arc::new(Buffer::new(device, &BufferDesc::vertex(vertex_data.len() as u64))?);
-        let index_buffer = Arc::new(Buffer::new(device, &BufferDesc::index(index_data.len() as u64))?);
+        let vertex_buffer = Arc::new(Buffer::new(device, &BufferDesc::vertex("triangle.vertex", vertex_data.len() as u64))?);
+        let index_buffer = Arc::new(Buffer::new(device, &BufferDesc::index("triangle.index", index_data.len() as u64))?);
 
         {
             let total_size = vertex_data.len() + index_data.len();
@@ -92,7 +92,7 @@ impl TriangleRenderer {
             BufferState::Undefined,
         );
         let tb = builder.create(
-            BufferDesc::uniform(size_of::<f32>() as _),
+            BufferDesc::uniform("triangle.time", size_of::<f32>() as _),
         );
 
         let mut node = builder.add_graphic_node("triangle");
