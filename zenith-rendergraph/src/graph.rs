@@ -281,23 +281,23 @@ impl CompiledRenderGraph {
         nodes: impl IntoIterator<Item = RenderGraphNode>,
     ) {
         for node in nodes {
+            {
+                profiling::scope!("rendergraph::barriers");
+                let output_iter = node.outputs.iter()
+                    .map(|res| (res.id, res.access, res.stage_hint));
+
+                Self::transition_resources(
+                    device, encoder, &self.resources,
+                    node.inputs.iter()
+                        .map(|res| (res.id, res.access, res.stage_hint))
+                        .chain(output_iter),
+                    None,
+                );
+            }
+
             match node.pipeline_state {
                 NodePipelineState::Graphic { pipeline_desc, color_attachments, depth_attachment, mut job_functor } => {
                     let pipeline_desc = pipeline_desc.as_ref();
-                    {
-                        profiling::scope!("rendergraph::barriers");
-                        let output_iter = node.outputs.iter()
-                            .map(|res| (res.id, res.access, res.stage_hint));
-
-                        Self::transition_resources(
-                            device, encoder, &self.resources,
-                            node.inputs.iter()
-                                .map(|res| (res.id, res.access, res.stage_hint))
-                                .chain(output_iter),
-                            pipeline_desc,
-                        );
-                    }
-
                     let name = node.name;
                     let pipeline = self.graphic_pipelines.get(self.graphic_pipe_index as usize).unwrap();
                     let pipeline = pipeline.as_ref().map(|pipe| pipe.as_ref());
@@ -330,20 +330,6 @@ impl CompiledRenderGraph {
                 }
                 NodePipelineState::Compute { .. } => unimplemented!(),
                 NodePipelineState::Lambda { mut job_functor } => {
-                    {
-                        profiling::scope!("rendergraph::barriers");
-                        let output_iter = node.outputs.iter()
-                            .map(|res| (res.id, res.access, res.stage_hint));
-
-                        Self::transition_resources(
-                            device, encoder, &self.resources,
-                            node.inputs.iter()
-                                .map(|res| (res.id, res.access, res.stage_hint))
-                                .chain(output_iter),
-                            None,
-                        );
-                    }
-
                     let name = node.name;
                     if let Some(record) = job_functor.take() {
                         profiling::scope!("rendergraph::node_recording", &name);

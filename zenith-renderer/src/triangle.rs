@@ -106,8 +106,7 @@ impl TriangleRenderer {
             .vertex_shader(self.vertex_shader.clone())
             .fragment_shader(self.fragment_shader.clone())
             .vertex_layout::<Vertex>()
-            .build()
-            .unwrap();
+            .build().unwrap();
 
         let color_info = ColorAttachmentDescBuilder::default()
             .clear_input()
