@@ -384,7 +384,7 @@ impl Texture {
         texture
     }
 
-    pub fn to_range<R: RangeBounds<u32>>(&self, mipmaps: R, levels: R) -> Result<TextureRange<'_>, vk::Result> {
+    pub fn as_range<R: RangeBounds<u32>>(&self, mipmaps: R, levels: R) -> Result<TextureRange<'_>, vk::Result> {
         let (base_mip, num_mips) = normalize_range_u32(mipmaps, self.desc.mip_levels)?;
         let (base_layer, num_layers) = normalize_range_u32(levels, self.desc.array_layers)?;
 
@@ -397,39 +397,6 @@ impl Texture {
                 num_layers,
             },
         })
-    }
-
-    /// Get (or lazily create) a full-range image view for this texture.
-    ///
-    /// This is a convenience for common cases (e.g. render targets / sampled textures).
-    pub fn view(&self) -> Result<vk::ImageView, vk::Result> {
-        let subresource = TextureSubresource {
-            base_mip: 0,
-            num_mips: self.desc.mip_levels,
-            base_layer: 0,
-            num_layers: self.desc.array_layers,
-        };
-
-        if let Some(v) = { self.views.borrow().get(&subresource).copied() } {
-            return Ok(v);
-        }
-
-        let aspect_mask = format_to_aspect_mask(self.desc.format);
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(self.image)
-            .view_type(self.desc.view_type)
-            .format(self.desc.format)
-            .components(vk::ComponentMapping {
-                r: vk::ComponentSwizzle::IDENTITY,
-                g: vk::ComponentSwizzle::IDENTITY,
-                b: vk::ComponentSwizzle::IDENTITY,
-                a: vk::ComponentSwizzle::IDENTITY,
-            })
-            .subresource_range(subresource.to_vk(aspect_mask));
-
-        let view = unsafe { self.device.create_image_view(&view_info, None)? };
-        self.views.borrow_mut().insert(subresource, view);
-        Ok(view)
     }
 
     /// Get the raw Vulkan image handle.
