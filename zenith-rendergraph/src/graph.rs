@@ -6,7 +6,7 @@ use crate::resource::{GraphResource, GraphResourceId, GraphResourceState, GraphR
 use std::cell::Cell;
 use std::sync::Arc;
 use zenith_core::collections::SmallVec;
-use zenith_rhi::{CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages};
+use zenith_rhi::{CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection};
 use zenith_rhi::{
     vk, GraphicPipeline, GraphicPipelineDesc, PipelineCache, RenderDevice,
     DescriptorSetBinder, Swapchain,
@@ -248,9 +248,8 @@ impl CompiledRenderGraph {
 
         // make sure the swapchain texture has the right image layout for presentation
         Self::transition_resources(
-            device, &encoder, &self.resources,
+            device, &encoder, None, &self.resources,
             [(self.swapchain_tex_id, TextureState::Present.into(), Some(vk::PipelineStageFlags2::BOTTOM_OF_PIPE))].into_iter(),
-            None,
         );
 
         encoder.end()?;
@@ -281,22 +280,23 @@ impl CompiledRenderGraph {
         nodes: impl IntoIterator<Item = RenderGraphNode>,
     ) {
         for node in nodes {
-            {
+            let transition_resources = |reflection| {
                 profiling::scope!("rendergraph::barriers");
                 let output_iter = node.outputs.iter()
                     .map(|res| (res.id, res.access, res.stage_hint));
 
                 Self::transition_resources(
-                    device, encoder, &self.resources,
+                    device, encoder, reflection, &self.resources,
                     node.inputs.iter()
                         .map(|res| (res.id, res.access, res.stage_hint))
                         .chain(output_iter),
-                    None,
                 );
-            }
+            };
 
             match node.pipeline_state {
                 NodePipelineState::Graphic { pipeline_desc, color_attachments, depth_attachment, mut job_functor } => {
+                    transition_resources(pipeline_desc.as_ref().map(|desc| &desc.shader.merged_reflection));
+
                     let pipeline_desc = pipeline_desc.as_ref();
                     let name = node.name;
                     let pipeline = self.graphic_pipelines.get(self.graphic_pipe_index as usize).unwrap();
@@ -314,6 +314,7 @@ impl CompiledRenderGraph {
                         let Some(pipeline_desc) = pipeline_desc else {
                             continue;
                         };
+
                         let mut ctx = GraphicNodeExecutionContext {
                             pipeline_desc,
                             device,
@@ -330,6 +331,8 @@ impl CompiledRenderGraph {
                 }
                 NodePipelineState::Compute { .. } => unimplemented!(),
                 NodePipelineState::Lambda { mut job_functor } => {
+                    transition_resources(None);
+
                     let name = node.name;
                     if let Some(record) = job_functor.take() {
                         profiling::scope!("rendergraph::node_recording", &name);
@@ -347,21 +350,18 @@ impl CompiledRenderGraph {
     fn transition_resources(
         device: &RenderDevice,
         encoder: &CommandEncoder,
+        merged_reflection: Option<&ShaderReflection>,
         resource_storage: &Vec<ResourceStorage>,
         resources_to_transition: impl Iterator<Item = (GraphResourceId, ResourceState, Option<vk::PipelineStageFlags2>)>,
-        pipeline_desc: Option<&GraphicPipelineDesc>,
     ) {
         let mut image_barriers: Vec<TextureBarrier> = Vec::new();
         let mut buffer_barriers: Vec<BufferBarrier> = Vec::new();
 
         let queue = device.graphics_queue();
 
-        // Get combined shader stages from all bindings in reflection
-        let combined_shader_stage = pipeline_desc
-            .map(|d| {
-                d.shader
-                    .merged_reflection
-                    .bindings
+        let combined_shader_stage = merged_reflection
+            .map(|reflection| {
+                reflection.bindings
                     .iter()
                     .fold(vk::ShaderStageFlags::empty(), |acc, bind| acc | bind.stage_flags)
             })
@@ -381,7 +381,7 @@ impl CompiledRenderGraph {
                     let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
                     let dst_stage = PipelineStages::from_vk(dst_stage_vk);
                     if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
-                        log::warn!("Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.", resource.name())
+                        log::warn!("Render graph buffer resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.", resource.name())
                     }
 
                     buffer_barriers.push(BufferBarrier::new(
@@ -405,7 +405,7 @@ impl CompiledRenderGraph {
                     let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
                     let dst_stage = PipelineStages::from_vk(dst_stage_vk);
                     if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
-                        log::warn!("Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.", resource.name())
+                        log::warn!("Render graph buffer resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.", resource.name())
                     }
 
                     buffer_barriers.push(BufferBarrier::new(
@@ -429,13 +429,11 @@ impl CompiledRenderGraph {
                     let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
                     let dst_stage = PipelineStages::from_vk(dst_stage_vk);
                     if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
-                        log::warn!(r#"
-                         Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage.
-                         Use read_hint() or write_hint() to get better performance."#, resource.name())
+                        log::warn!("Render graph texture resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.", resource.name())
                     }
 
                     image_barriers.push(TextureBarrier::new(
-                        resource.to_range(.., ..).unwrap(),
+                        resource.as_range(.., ..).unwrap(),
                         prev_state,
                         next_state,
                         src_stage,
@@ -456,13 +454,11 @@ impl CompiledRenderGraph {
                     let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
                     let dst_stage = PipelineStages::from_vk(dst_stage_vk);
                     if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
-                        log::warn!(r#"
-                         Render graph resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage.
-                         Use read_hint() or write_hint() to get better performance."#, resource.name())
+                        log::warn!("Render graph texture resource [{}] may cause serve pipeline stall due to unknown pipeline stage usage. Use read_hint() or write_hint() to get better performance.", resource.name())
                     }
 
                     image_barriers.push(TextureBarrier::new(
-                        resource.to_range(.., ..).unwrap(),
+                        resource.as_range(.., ..).unwrap(),
                         prev_state,
                         next_state,
                         src_stage,
@@ -557,7 +553,7 @@ impl<'node> GraphicNodeExecutionContext<'node> {
             .map(|(id, info)| {
                 let texture = utility::resource_storage_ref(self.resources, *id).as_texture();
                 vk::RenderingAttachmentInfo::default()
-                    .image_view(texture.view().expect("Texture view not created"))
+                    .image_view(texture.as_range(.., ..).unwrap().view().expect("Texture view not created"))
                     .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .load_op(info.load_op)
                     .store_op(info.store_op)
@@ -577,7 +573,7 @@ impl<'node> GraphicNodeExecutionContext<'node> {
                 let texture = utility::resource_storage_ref(self.resources, id).as_texture();
                 Some(
                     vk::RenderingAttachmentInfo::default()
-                        .image_view(texture.view().expect("Texture view not created"))
+                        .image_view(texture.as_range(.., ..).unwrap().view().expect("Texture view not created"))
                         .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                         .load_op(info.depth_load_op)
                         .store_op(info.depth_store_op)
