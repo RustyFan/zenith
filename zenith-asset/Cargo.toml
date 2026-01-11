@@ -12,7 +12,7 @@ derive_builder.workspace = true
 glam.workspace = true
 serde = { workspace = true, features = ["derive"] }
 image.workspace = true
-gltf.workspace = true
+gltf = "1.4"
 bincode = { workspace = true, features = ["serde"] }
 profiling.workspace = true
 ash.workspace = true

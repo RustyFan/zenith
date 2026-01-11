@@ -148,12 +148,14 @@ impl<A: RenderableApp> EngineLoop<A> {
             if last_time_print_elapsed > 1. {
                 let fps: u32 = (self.frame_count as f32 / last_time_print_elapsed).ceil() as u32;
                 let engine = self.engine.as_ref().unwrap();
+                let stats = engine.render_device.last_defer_release_stats();
                 info!(
-                    "Frame rate: {} fps, pipelines: {}, deferred: {}b/{}t",
+                    "Frame rate: {} fps, pipelines: {}, deferred: {}b/{}t/{}p",
                     fps,
                     engine.pipeline_cache_size(),
-                    engine.render_device.deferred_buffer_count(),
-                    engine.render_device.deferred_texture_count()
+                    stats.buffer_count,
+                    stats.texture_count,
+                    stats.pool_count,
                 );
                 self.last_time_printed = now;
                 self.frame_count = 0;

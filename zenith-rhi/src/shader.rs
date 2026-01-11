@@ -4,7 +4,9 @@ use ash::{vk, Device};
 use hassle_rs::{Dxc, HassleError};
 use rspirv_reflect::{Reflection, DescriptorType, BindingCount};
 use std::ffi::CString;
+use std::collections::HashMap;
 use std::sync::Arc;
+use zenith_rhi_derive::DeviceObject;
 use crate::descriptor::DescriptorSetLayout;
 
 /// Shader compilation and reflection errors.
@@ -87,21 +89,29 @@ pub struct ShaderBinding {
     pub count: u32,
 }
 
+/// Vertex shader input attribute reflected from SPIR-V.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexInputAttr {
+    pub location: u32,
+    pub format: vk::Format,
+}
+
 /// Shader reflection data.
 #[derive(Debug, Clone, Default)]
 pub struct ShaderReflection {
     pub bindings: Vec<ShaderBinding>,
     pub push_constant_size: u32,
+    /// Vertex inputs (only populated for vertex stage).
+    pub vertex_inputs: Vec<VertexInputAttr>,
 }
 
 impl ShaderReflection {
     /// Merge multiple shader reflections into one.
     /// Combines stage_flags for bindings at the same (set, binding).
     pub fn merge(reflections: &[&ShaderReflection]) -> Self {
-        use std::collections::HashMap;
-
         let mut binding_map: HashMap<(u32, u32), ShaderBinding> = HashMap::new();
         let mut push_constant_size = 0u32;
+        let mut vertex_inputs_map: HashMap<u32, vk::Format> = HashMap::new();
 
         for reflection in reflections {
             push_constant_size = push_constant_size.max(reflection.push_constant_size);
@@ -114,14 +124,26 @@ impl ShaderReflection {
                     binding_map.insert(key, binding.clone());
                 }
             }
+
+            // Merge vertex inputs by location (first wins on conflicts).
+            for vi in &reflection.vertex_inputs {
+                vertex_inputs_map.entry(vi.location).or_insert(vi.format);
+            }
         }
 
         let mut bindings: Vec<ShaderBinding> = binding_map.into_values().collect();
         bindings.sort_by_key(|b| (b.set, b.binding));
 
+        let mut vertex_inputs: Vec<VertexInputAttr> = vertex_inputs_map
+            .into_iter()
+            .map(|(location, format)| VertexInputAttr { location, format })
+            .collect();
+        vertex_inputs.sort_by_key(|v| v.location);
+
         Self {
             bindings,
             push_constant_size,
+            vertex_inputs,
         }
     }
 
@@ -235,10 +257,339 @@ pub fn reflect_spirv(spirv: &[u8], stage: ShaderStage) -> Result<ShaderReflectio
         .map(|info| info.size)
         .unwrap_or(0);
 
+    // Vertex inputs (VS only)
+    let vertex_inputs = if stage == ShaderStage::Vertex {
+        reflect_vertex_inputs_from_spirv(spirv)?
+    } else {
+        Vec::new()
+    };
+
     Ok(ShaderReflection {
         bindings,
         push_constant_size,
+        vertex_inputs,
     })
+}
+
+#[derive(Debug, Clone)]
+enum SpirvType {
+    Int { width: u32, signed: bool },
+    Float { width: u32 },
+    Vector { component_type: u32, count: u32 },
+    Matrix { column_type: u32, count: u32 },
+    Array { element_type: u32, length_id: u32 },
+    Struct { members: Vec<u32> },
+    Pointer { storage_class: u32, pointee_type: u32 },
+}
+
+#[derive(Default)]
+struct MemberDecos {
+    location: Option<u32>,
+    builtin: Option<u32>,
+}
+
+fn reflect_vertex_inputs_from_spirv(spirv: &[u8]) -> Result<Vec<VertexInputAttr>, ShaderError> {
+    // Minimal SPIR-V parser for stage inputs:
+    // - OpVariable (Input)
+    // - OpDecorate / OpMemberDecorate (Location/BuiltIn)
+    // - Type graph enough to map to vk::Format
+
+    let words: &[u32] = unsafe {
+        std::slice::from_raw_parts(spirv.as_ptr() as *const u32, spirv.len() / 4)
+    };
+    if words.len() < 5 {
+        return Err(ShaderError::ReflectionFailed("SPIR-V header too small".into()));
+    }
+
+    // Opcode values from SPIR-V spec.
+    const OP_NAME: u16 = 5;
+    const OP_DECORATE: u16 = 71;
+    const OP_MEMBER_DECORATE: u16 = 72;
+    const OP_VARIABLE: u16 = 59;
+    const OP_TYPE_INT: u16 = 21;
+    const OP_TYPE_FLOAT: u16 = 22;
+    const OP_TYPE_VECTOR: u16 = 23;
+    const OP_TYPE_MATRIX: u16 = 24;
+    const OP_TYPE_ARRAY: u16 = 28;
+    const OP_TYPE_STRUCT: u16 = 30;
+    const OP_TYPE_POINTER: u16 = 32;
+    const OP_CONSTANT: u16 = 43;
+
+    // Decorations.
+    const DECORATION_BUILTIN: u32 = 11;
+    const DECORATION_LOCATION: u32 = 30;
+
+    // StorageClass.
+    const STORAGE_CLASS_INPUT: u32 = 1;
+
+    let mut types: HashMap<u32, SpirvType> = HashMap::new();
+    let mut const_u32: HashMap<u32, u32> = HashMap::new();
+    let mut var_ptr_type: HashMap<u32, u32> = HashMap::new();
+    let mut var_storage_class: HashMap<u32, u32> = HashMap::new();
+    let mut var_location: HashMap<u32, u32> = HashMap::new();
+    let mut var_builtin: HashMap<u32, u32> = HashMap::new();
+    let mut member_decos: HashMap<(u32, u32), MemberDecos> = HashMap::new();
+
+    // Skip header (5 words).
+    let mut i = 5usize;
+    while i < words.len() {
+        let first = words[i];
+        let wc = (first >> 16) as usize;
+        let op = (first & 0xFFFF) as u16;
+        if wc == 0 || i + wc > words.len() {
+            return Err(ShaderError::ReflectionFailed("invalid SPIR-V instruction word count".into()));
+        }
+
+        let inst = &words[i..i + wc];
+        match op {
+            OP_TYPE_INT => {
+                // OpTypeInt %result width signedness
+                if wc >= 4 {
+                    let result_id = inst[1];
+                    let width = inst[2];
+                    let signed = inst[3] != 0;
+                    types.insert(result_id, SpirvType::Int { width, signed });
+                }
+            }
+            OP_TYPE_FLOAT => {
+                // OpTypeFloat %result width
+                if wc >= 3 {
+                    let result_id = inst[1];
+                    let width = inst[2];
+                    types.insert(result_id, SpirvType::Float { width });
+                }
+            }
+            OP_TYPE_VECTOR => {
+                // OpTypeVector %result %component count
+                if wc >= 4 {
+                    let result_id = inst[1];
+                    let component_type = inst[2];
+                    let count = inst[3];
+                    types.insert(result_id, SpirvType::Vector { component_type, count });
+                }
+            }
+            OP_TYPE_MATRIX => {
+                // OpTypeMatrix %result %column_type count
+                if wc >= 4 {
+                    let result_id = inst[1];
+                    let column_type = inst[2];
+                    let count = inst[3];
+                    types.insert(result_id, SpirvType::Matrix { column_type, count });
+                }
+            }
+            OP_TYPE_ARRAY => {
+                // OpTypeArray %result %element_type %length_id
+                if wc >= 4 {
+                    let result_id = inst[1];
+                    let element_type = inst[2];
+                    let length_id = inst[3];
+                    types.insert(result_id, SpirvType::Array { element_type, length_id });
+                }
+            }
+            OP_TYPE_STRUCT => {
+                // OpTypeStruct %result %member0 %member1 ...
+                if wc >= 2 {
+                    let result_id = inst[1];
+                    let members = inst[2..].to_vec();
+                    types.insert(result_id, SpirvType::Struct { members });
+                }
+            }
+            OP_TYPE_POINTER => {
+                // OpTypePointer %result StorageClass %type
+                if wc >= 4 {
+                    let result_id = inst[1];
+                    let storage_class = inst[2];
+                    let pointee_type = inst[3];
+                    types.insert(result_id, SpirvType::Pointer { storage_class, pointee_type });
+                }
+            }
+            OP_CONSTANT => {
+                // OpConstant %type %result value...
+                if wc >= 4 {
+                    let result_type = inst[1];
+                    let result_id = inst[2];
+                    // Only handle 32-bit scalar ints for array lengths.
+                    match types.get(&result_type) {
+                        Some(SpirvType::Int { width: 32, .. }) => {
+                            const_u32.insert(result_id, inst[3]);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            OP_VARIABLE => {
+                // OpVariable %result_type %result StorageClass [initializer]
+                if wc >= 4 {
+                    let result_type = inst[1];
+                    let result_id = inst[2];
+                    let storage_class = inst[3];
+                    var_ptr_type.insert(result_id, result_type);
+                    var_storage_class.insert(result_id, storage_class);
+                }
+            }
+            OP_DECORATE => {
+                // OpDecorate %target Decoration [literals...]
+                if wc >= 3 {
+                    let target_id = inst[1];
+                    let deco = inst[2];
+                    match deco {
+                        DECORATION_LOCATION => {
+                            if wc >= 4 {
+                                var_location.insert(target_id, inst[3]);
+                            }
+                        }
+                        DECORATION_BUILTIN => {
+                            if wc >= 4 {
+                                var_builtin.insert(target_id, inst[3]);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            OP_MEMBER_DECORATE => {
+                // OpMemberDecorate %struct member Decoration [literals...]
+                if wc >= 4 {
+                    let struct_id = inst[1];
+                    let member = inst[2];
+                    let deco = inst[3];
+                    let entry = member_decos.entry((struct_id, member)).or_insert_with(MemberDecos::default);
+                    match deco {
+                        DECORATION_LOCATION => {
+                            if wc >= 5 {
+                                entry.location = Some(inst[4]);
+                            }
+                        }
+                        DECORATION_BUILTIN => {
+                            if wc >= 5 {
+                                entry.builtin = Some(inst[4]);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            OP_NAME => {
+                // not needed for minimal schema
+            }
+            _ => {}
+        }
+
+        i += wc;
+    }
+
+    let mut out: Vec<VertexInputAttr> = Vec::new();
+
+    for (&var_id, &storage_class) in &var_storage_class {
+        if storage_class != STORAGE_CLASS_INPUT {
+            continue;
+        }
+        if var_builtin.contains_key(&var_id) {
+            continue;
+        }
+
+        let Some(&ptr_type_id) = var_ptr_type.get(&var_id) else { continue };
+        let pointee_type_id = match types.get(&ptr_type_id) {
+            Some(SpirvType::Pointer { storage_class: sc, pointee_type }) if *sc == STORAGE_CLASS_INPUT => *pointee_type,
+            Some(SpirvType::Pointer { pointee_type, .. }) => *pointee_type,
+            _ => continue,
+        };
+
+        match types.get(&pointee_type_id) {
+            Some(SpirvType::Struct { members }) => {
+                for (member_index, &member_ty) in members.iter().enumerate() {
+                    let key = (pointee_type_id, member_index as u32);
+                    let Some(decos) = member_decos.get(&key) else { continue };
+                    if decos.builtin.is_some() {
+                        continue;
+                    }
+                    let Some(loc) = decos.location else { continue };
+                    expand_type_to_vertex_attrs(&types, &const_u32, member_ty, loc, &mut out)?;
+                }
+            }
+            _ => {
+                let Some(&loc) = var_location.get(&var_id) else { continue };
+                expand_type_to_vertex_attrs(&types, &const_u32, pointee_type_id, loc, &mut out)?;
+            }
+        }
+    }
+
+    out.sort_by_key(|v| v.location);
+
+    // Dedup by location: keep first if format matches, otherwise keep first.
+    out.dedup_by(|a, b| a.location == b.location && a.format == b.format);
+
+    Ok(out)
+}
+
+fn expand_type_to_vertex_attrs(
+    types: &HashMap<u32, SpirvType>,
+    const_u32: &HashMap<u32, u32>,
+    ty_id: u32,
+    base_location: u32,
+    out: &mut Vec<VertexInputAttr>,
+) -> Result<(), ShaderError> {
+    match types.get(&ty_id) {
+        Some(SpirvType::Float { width: 32 }) => {
+            out.push(VertexInputAttr { location: base_location, format: vk::Format::R32_SFLOAT });
+            Ok(())
+        }
+        Some(SpirvType::Int { width: 32, signed }) => {
+            out.push(VertexInputAttr {
+                location: base_location,
+                format: if *signed { vk::Format::R32_SINT } else { vk::Format::R32_UINT },
+            });
+            Ok(())
+        }
+        Some(SpirvType::Vector { component_type, count }) => {
+            let comp = types.get(component_type).ok_or_else(|| ShaderError::ReflectionFailed("unknown vector component type".into()))?;
+            let (is_float, is_signed_int) = match comp {
+                SpirvType::Float { width: 32 } => (true, false),
+                SpirvType::Int { width: 32, signed } => (false, *signed),
+                _ => return Err(ShaderError::ReflectionFailed("unsupported vertex input component type".into())),
+            };
+
+            let fmt = match (is_float, is_signed_int, *count) {
+                (true, _, 2) => vk::Format::R32G32_SFLOAT,
+                (true, _, 3) => vk::Format::R32G32B32_SFLOAT,
+                (true, _, 4) => vk::Format::R32G32B32A32_SFLOAT,
+
+                (false, true, 2) => vk::Format::R32G32_SINT,
+                (false, true, 3) => vk::Format::R32G32B32_SINT,
+                (false, true, 4) => vk::Format::R32G32B32A32_SINT,
+
+                (false, false, 2) => vk::Format::R32G32_UINT,
+                (false, false, 3) => vk::Format::R32G32B32_UINT,
+                (false, false, 4) => vk::Format::R32G32B32A32_UINT,
+
+                _ => return Err(ShaderError::ReflectionFailed("unsupported vertex vector width/count".into())),
+            };
+
+            out.push(VertexInputAttr { location: base_location, format: fmt });
+            Ok(())
+        }
+        Some(SpirvType::Matrix { column_type, count }) => {
+            // Matrices occupy multiple locations: one per column vector.
+            let cols = *count;
+            for c in 0..cols {
+                expand_type_to_vertex_attrs(types, const_u32, *column_type, base_location + c, out)?;
+            }
+            Ok(())
+        }
+        Some(SpirvType::Array { element_type, length_id }) => {
+            let Some(&len) = const_u32.get(length_id) else {
+                return Err(ShaderError::ReflectionFailed("unsupported array length (non-constant)".into()));
+            };
+            for idx in 0..len {
+                expand_type_to_vertex_attrs(types, const_u32, *element_type, base_location + idx, out)?;
+            }
+            Ok(())
+        }
+        Some(SpirvType::Struct { .. }) => Err(ShaderError::ReflectionFailed(
+            "unexpected struct vertex input without member locations".into(),
+        )),
+        _ => Err(ShaderError::ReflectionFailed("unsupported vertex input type".into())),
+    }
 }
 
 /// Convert rspirv_reflect descriptor type to Vulkan descriptor type.
@@ -248,8 +599,8 @@ fn convert_descriptor_type(reflect_type: DescriptorType) -> vk::DescriptorType {
 }
 
 /// Compiled shader with Vulkan shader module and reflection data.
+#[DeviceObject]
 pub struct Shader {
-    device: Device,
     module: vk::ShaderModule,
     stage: ShaderStage,
     entry_point: CString,
@@ -301,18 +652,22 @@ impl Shader {
             .map_err(ShaderError::VulkanError)?;
 
         Ok(Self {
-            device: device.clone(),
             module,
             stage,
             entry_point: CString::new(entry_point).unwrap(),
             reflection,
             descriptor_set_layouts,
+            device: device.clone(),
         })
     }
 
     /// Get the Vulkan shader module handle.
     pub fn module(&self) -> vk::ShaderModule {
         self.module
+    }
+
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
     }
 
     /// Get the shader stage.

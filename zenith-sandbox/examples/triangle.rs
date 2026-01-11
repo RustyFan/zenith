@@ -4,8 +4,6 @@ use zenith::{launch, App, Args, RenderableApp, RenderContext};
 use zenith::rhi::{RenderDevice, TextureState};
 use zenith::renderer::TriangleRenderer;
 
-static mut FIRST_FRAME_COUNTER: u8 = 3;
-
 pub struct TriangleApp {
     triangle_renderer: Option<TriangleRenderer>,
 }
@@ -20,7 +18,7 @@ impl App for TriangleApp {
 
 impl RenderableApp for TriangleApp {
     fn prepare(&mut self, render_device: &RenderDevice, _window: Arc<Window>) -> Result<(), anyhow::Error> {
-        self.triangle_renderer = Some(TriangleRenderer::new(render_device));
+        self.triangle_renderer = Some(TriangleRenderer::new(render_device)?);
         Ok(())
     }
 
@@ -33,13 +31,7 @@ impl RenderableApp for TriangleApp {
         let output = context.swapchain_texture();
         let builder = context.builder();
 
-        let initial_state = if unsafe { FIRST_FRAME_COUNTER > 0 } {
-            TextureState::Undefined
-        } else {
-            TextureState::Present
-        };
-
-        let mut output = builder.import("back_buffer", output, initial_state);
+        let mut output = builder.import(output, TextureState::Undefined);
 
         self.triangle_renderer.as_ref().unwrap().render_to(
             builder,
@@ -47,8 +39,6 @@ impl RenderableApp for TriangleApp {
             extent.width,
             extent.height,
         );
-
-        unsafe { if FIRST_FRAME_COUNTER > 0 { FIRST_FRAME_COUNTER -= 1 }; }
     }
 }
 

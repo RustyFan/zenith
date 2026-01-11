@@ -2,11 +2,14 @@
 
 use std::cell::{Cell, RefCell};
 use ash::{vk, Device};
+use zenith_rhi_derive::DeviceObject;
 use crate::barrier::{BufferBarrier, TextureBarrier, MemoryBarrier};
+use crate::{Queue, RenderDevice};
+use crate::synchronization::Fence;
 
 /// Command buffer pool for allocating command buffers.
+#[DeviceObject]
 pub struct CommandPool {
-    device: Device,
     pool: vk::CommandPool,
     buffers: RefCell<Vec<vk::CommandBuffer>>,
     next_index: Cell<usize>,
@@ -21,10 +24,10 @@ impl CommandPool {
         let pool = unsafe { device.create_command_pool(&create_info, None)? };
 
         Ok(Self {
-            device: device.clone(),
             pool,
             buffers: RefCell::new(Vec::new()),
             next_index: Cell::new(0),
+            device: device.clone(),
         })
     }
 
@@ -162,37 +165,32 @@ impl<'a> CommandEncoder<'a> {
     pub fn end_rendering(&self) {
         unsafe { self.device.cmd_end_rendering(self.cmd) }
     }
-
-    // Image layout transitions
-    pub fn pipeline_barrier(&self, dependency_info: &vk::DependencyInfo) {
-        unsafe { self.device.cmd_pipeline_barrier2(self.cmd, dependency_info) }
-    }
-
-    pub fn barrier_buffers<'b>(&self, barriers: &[BufferBarrier<'b>]) {
+    
+    pub fn buffer_barriers<'b>(&self, barriers: &[BufferBarrier<'b>]) {
         if barriers.is_empty() {
             return;
         }
         let vk_barriers: Vec<vk::BufferMemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
         let dep = vk::DependencyInfo::default().buffer_memory_barriers(&vk_barriers);
-        self.pipeline_barrier(&dep);
+        unsafe { self.device.cmd_pipeline_barrier2(self.cmd, &dep) }
     }
 
-    pub fn barrier_textures<'b>(&self, barriers: &[TextureBarrier<'b>]) {
+    pub fn texture_barriers<'b>(&self, barriers: &[TextureBarrier<'b>]) {
         if barriers.is_empty() {
             return;
         }
         let vk_barriers: Vec<vk::ImageMemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
         let dep = vk::DependencyInfo::default().image_memory_barriers(&vk_barriers);
-        self.pipeline_barrier(&dep);
+        unsafe { self.device.cmd_pipeline_barrier2(self.cmd, &dep) }
     }
 
-    pub fn barrier_memory(&self, barriers: &[MemoryBarrier]) {
+    pub fn memory_barrier(&self, barriers: &[MemoryBarrier]) {
         if barriers.is_empty() {
             return;
         }
         let vk_barriers: Vec<vk::MemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
         let dep = vk::DependencyInfo::default().memory_barriers(&vk_barriers);
-        self.pipeline_barrier(&dep);
+        unsafe { self.device.cmd_pipeline_barrier2(self.cmd, &dep) }
     }
 
     // Copy commands
@@ -216,3 +214,60 @@ impl<'a> CommandEncoder<'a> {
         func(&self.device, self.cmd.clone());
     }
 }
+
+
+/// An immediate encoder that can submit commands to a queue at any time and
+/// block on a fence until completion.
+pub struct ImmediateCommandEncoder<'a> {
+    device: &'a RenderDevice,
+    queue: Queue,
+    pool: CommandPool,
+    fence: Fence,
+}
+
+impl<'a> ImmediateCommandEncoder<'a> {
+    pub fn new(device: &'a RenderDevice, queue: Queue) -> Result<Self, vk::Result> {
+        let pool = CommandPool::new(device.handle(), queue.family_index(), vk::CommandPoolCreateFlags::empty())?;
+        let fence = Fence::new(device.handle(), false)?;
+
+        Ok(Self {
+            device,
+            queue,
+            pool,
+            fence,
+        })
+    }
+
+    /// Record commands and submit immediately, blocking until the GPU finishes.
+    pub fn submit_and_wait<F>(&self, record: F) -> Result<(), vk::Result>
+    where
+        F: FnOnce(&CommandEncoder),
+    {
+        self.pool.reset()?;
+        let cmd = self.pool.allocate()?;
+
+        let encoder = CommandEncoder::new(self.device.handle(), cmd);
+        encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
+        record(&encoder);
+        encoder.end()?;
+
+        let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
+        let submit_info = vk::SubmitInfo2::default()
+            .command_buffer_infos(std::slice::from_ref(&cmd_info));
+
+        unsafe {
+            let fence = self.fence.handle();
+            self.device.handle().queue_submit2(self.queue.handle(), &[submit_info], fence)?;
+            self.device.handle().wait_for_fences(&[fence], true, u64::MAX)?;
+            self.device.handle().reset_fences(&[fence])?;
+        }
+
+        Ok(())
+    }
+
+    pub fn device(&self) -> &RenderDevice { &self.device }
+
+    pub fn queue(&self) -> Queue { self.queue }
+}
+
+// Fence handles destruction.

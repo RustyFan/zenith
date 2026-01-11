@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 bytemuck.workspace  = true
 log.workspace = true
+anyhow.workspace = true
 
 zenith-rhi = { path = "../zenith-rhi" }
 zenith-rendergraph = { path = "../zenith-rendergraph" }

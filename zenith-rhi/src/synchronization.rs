@@ -1,33 +1,55 @@
-﻿use ash::vk;
-use crate::RenderDevice;
+﻿use ash::{vk, Device};
+use zenith_rhi_derive::DeviceObject;
 
-/// A non-owning fence handle wrapper for public APIs.
-///
-/// This type does NOT destroy the underlying Vulkan fence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// An owning Vulkan fence.
+#[DeviceObject]
 pub struct Fence {
     fence: vk::Fence,
 }
 
 impl Fence {
-    pub fn new(fence: vk::Fence) -> Self { Self { fence } }
-    pub fn handle(&self) -> vk::Fence { self.fence }
+    pub fn new(device: &Device, signaled: bool) -> Result<Self, vk::Result> {
+        let fence_info = vk::FenceCreateInfo::default().flags(if signaled {
+            vk::FenceCreateFlags::SIGNALED
+        } else {
+            vk::FenceCreateFlags::empty()
+        });
+        let fence = unsafe { device.create_fence(&fence_info, None)? };
+
+        Ok(Self {
+            fence,
+            device: device.clone(),
+        })
+    }
+
+    pub fn handle(&self) -> vk::Fence {
+        self.fence
+    }
 }
 
+impl Drop for Fence {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_fence(self.fence, None);
+        }
+}
+}
+
+/// An owning Vulkan semaphore.
+#[DeviceObject]
 pub struct Semaphore {
-    device: ash::Device,
     semaphore: vk::Semaphore,
 }
 
 impl Semaphore {
-    pub fn new(device: &RenderDevice) -> anyhow::Result<Self> {
+    pub fn new(device: &Device) -> Result<Self, vk::Result> {
         let semaphore = unsafe {
-            device.handle().create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?
+            device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?
         };
 
         Ok(Self {
-            device: device.handle().clone(),
             semaphore,
+            device: device.clone(),
         })
     }
 

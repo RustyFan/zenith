@@ -7,12 +7,18 @@ mod resource;
 pub use resource::{
     RenderGraphResource, RenderGraphResourceAccess
 };
-pub use builder::{RenderGraphBuilder, GraphicNodeBuilder, GraphicPipelineBuilder};
-pub use node::{
-    RenderGraphNode, GraphicPipelineDescriptor,
+pub use builder::{RenderGraphBuilder, GraphicNodeBuilder};
+pub use zenith_rhi::{
     ColorAttachmentDesc, ColorAttachmentDescBuilder, ColorAttachmentDescBuilderError,
-    DepthStencilInfo, DepthStencilInfoBuilder, DepthStencilInfoBuilderError,
-    VertexBindingDesc, VertexAttributeDesc};
+    DepthStencilDesc, DepthStencilDescBuilder, DepthStencilDescBuilderError,
+    GraphicPipelineDesc, GraphicShaderInput, GraphicPipelineState,
+    GraphicShaderInputBuilder, GraphicShaderInputBuildError,
+    GraphicPipelineStateBuilder,
+    VertexLayout,
+};
+pub use node::{
+    RenderGraphNode,
+};
 pub use graph::{
     RenderGraph, CompiledRenderGraph, RetiredRenderGraph,
     GraphicNodeExecutionContext, LambdaNodeExecutionContext,

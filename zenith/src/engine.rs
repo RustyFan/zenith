@@ -72,15 +72,15 @@ impl Engine {
         );
         app.render(render_context);
 
-        let graph = builder.build();
-        let mut graph = graph.compile(&self.render_device, &mut self.pipeline_cache);
+        let render_graph = builder.build();
+        let mut compiled = render_graph.compile(&mut self.render_device, &mut self.pipeline_cache);
 
-        graph.execute(&self.render_device);
+        compiled.execute(&mut self.render_device);
 
-        let graph = graph.present(&mut self.swapchain, &mut self.render_device)
+        let retired = compiled.present(&mut self.swapchain, &mut self.render_device)
             .expect("Failed to present swapchain!");
 
-        graph.release_frame_resources(&mut self.render_device);
+        retired.release_frame_resources(&mut self.render_device);
         self.render_device.end_frame();
     }
 

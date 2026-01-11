@@ -5,7 +5,6 @@ use crate::builder::{RenderGraphBuilder};
 use crate::graph::ResourceStorage;
 use crate::resource::{sealed, ExportedRenderGraphResource, GraphImportExportResource, GraphResource, GraphResourceDescriptor, GraphResourceState, RenderGraphResource};
 
-// #[macro_export]
 // macro_rules! render_graph_resource_interface {
 // 	($($res:ident => $res_ty:ty, $res_desc:ident => $res_desc_ty:ty, $res_state:ident => $res_state_ty:ty),+) => {
 //         $(
@@ -90,13 +89,12 @@ impl GraphResourceState for BufferState {
 impl GraphImportExportResource for Buffer {
     fn import(
         shared_resource: impl Into<Arc<Buffer>>,
-        name: &str,
         builder: &mut RenderGraphBuilder,
         access: impl Into<ResourceState>
     ) -> RenderGraphResource<Self> {
         let id = builder.initial_resources.len() as u32;
         let uses = access.into().try_into().expect("Inconsistent import resource access!");
-        builder.initial_resources.push((name.to_owned(), shared_resource.into(), uses).into());
+        builder.initial_resources.push((shared_resource.into(), uses).into());
 
         RenderGraphResource {
             id,
@@ -115,6 +113,7 @@ impl GraphResource for Texture {
     type Descriptor = TextureDesc;
     type State = TextureState;
 
+    #[doc(hidden)]
     fn from_storage(storage: &ResourceStorage) -> &Self {
         storage.as_texture()
     }
@@ -131,13 +130,12 @@ impl GraphResourceState for TextureState {
 impl GraphImportExportResource for Texture {
     fn import(
         shared_resource: impl Into<Arc<Self>>,
-        name: &str,
         builder: &mut RenderGraphBuilder,
         access: impl Into<ResourceState>
     ) -> RenderGraphResource<Self> {
         let id = builder.initial_resources.len() as u32;
         let state = access.into().try_into().expect("Inconsistent import resource access!");
-        builder.initial_resources.push((name.to_owned(), shared_resource.into(), state).into());
+        builder.initial_resources.push((shared_resource.into(), state).into());
 
         RenderGraphResource {
             id,

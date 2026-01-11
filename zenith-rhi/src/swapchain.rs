@@ -7,7 +7,8 @@ use winit::window::Window;
 use zenith_core::log::info;
 use anyhow::{anyhow, Result};
 use ash::vk::{Handle};
-use crate::{RhiCore, RenderDevice, Texture, Queue, Fence};
+use zenith_rhi_derive::DeviceObject;
+use crate::{RhiCore, RenderDevice, Texture, Queue, Fence, Semaphore, NUM_BACK_BUFFERS};
 
 #[derive(Clone)]
 pub struct SwapchainWindow {
@@ -70,21 +71,21 @@ impl Default for SwapchainConfig {
             preferred_format: vk::Format::B8G8R8A8_SRGB,
             preferred_color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
             preferred_present_mode: vk::PresentModeKHR::MAILBOX,
-            num_back_buffers: 3,
+            num_back_buffers: NUM_BACK_BUFFERS,
         }
     }
 }
 
 /// Synchronization objects for a single frame.
-pub struct FrameSync {
-    pub image_available: vk::Semaphore,
-    pub render_finished: vk::Semaphore,
-    pub in_flight_fence: Fence,
+pub struct FrameSync<'a> {
+    pub image_available: &'a Semaphore,
+    pub render_finished: &'a Semaphore,
+    pub in_flight_fence: &'a Fence,
 }
 
 /// Vulkan swapchain management.
+#[DeviceObject]
 pub struct Swapchain {
-    device: Device,
     physical_device: vk::PhysicalDevice,
     window: SwapchainWindow,
 
@@ -94,9 +95,9 @@ pub struct Swapchain {
     textures: Vec<Arc<Texture>>,
     extent: vk::Extent2D,
 
-    image_available_semaphores: Vec<vk::Semaphore>,
-    render_finished_semaphores: Vec<vk::Semaphore>,
-    in_flight_fences: Vec<vk::Fence>,
+    image_available_semaphores: Vec<Semaphore>,
+    render_finished_semaphores: Vec<Semaphore>,
+    in_flight_fences: Vec<Fence>,
 
     format: vk::SurfaceFormatKHR,
     present_mode: vk::PresentModeKHR,
@@ -177,7 +178,6 @@ impl Swapchain {
             create_sync_objects(device.handle(), images.len())?;
 
         Ok(Swapchain {
-            device: device.handle().clone(),
             physical_device: physical_device.handle(),
             window,
             swapchain_loader,
@@ -190,6 +190,7 @@ impl Swapchain {
             in_flight_fences,
             current_frame: 0,
             present_mode,
+            device: device.handle().clone(),
         })
     }
 
@@ -198,7 +199,7 @@ impl Swapchain {
         // Wait for the fence of the current frame
         unsafe {
             device.wait_for_fences(
-                &[self.in_flight_fences[self.current_frame]],
+                &[self.in_flight_fences[self.current_frame].handle()],
                 true,
                 u64::MAX,
             )?;
@@ -209,7 +210,7 @@ impl Swapchain {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
                 u64::MAX,
-                self.image_available_semaphores[self.current_frame],
+                self.image_available_semaphores[self.current_frame].handle(),
                 vk::Fence::null(),
             )?
         };
@@ -220,7 +221,7 @@ impl Swapchain {
     /// Reset the fence for the current frame before submitting work.
     pub fn reset_current_fence(&self, device: &Device) -> Result<(), vk::Result> {
         unsafe {
-            device.reset_fences(&[self.in_flight_fences[self.current_frame]])?;
+            device.reset_fences(&[self.in_flight_fences[self.current_frame].handle()])?;
         }
         Ok(())
     }
@@ -231,7 +232,7 @@ impl Swapchain {
     pub fn present(&mut self, present_queue: Queue, image_index: u32) -> Result<bool, vk::Result> {
         let swapchains = [self.swapchain];
         let image_indices = [image_index];
-        let wait_semaphores = [self.render_finished_semaphores[self.current_frame]];
+        let wait_semaphores = [self.render_finished_semaphores[self.current_frame].handle()];
 
         let present_info = vk::PresentInfoKHR::default()
             .wait_semaphores(&wait_semaphores)
@@ -251,11 +252,11 @@ impl Swapchain {
     }
 
     /// Get current frame synchronization objects.
-    pub fn current_frame_sync(&self) -> FrameSync {
+    pub fn current_frame_sync(&self) -> FrameSync<'_> {
         FrameSync {
-            image_available: self.image_available_semaphores[self.current_frame],
-            render_finished: self.render_finished_semaphores[self.current_frame],
-            in_flight_fence: Fence::new(self.in_flight_fences[self.current_frame]),
+            image_available: &self.image_available_semaphores[self.current_frame],
+            render_finished: &self.render_finished_semaphores[self.current_frame],
+            in_flight_fence: &self.in_flight_fences[self.current_frame],
         }
     }
 
@@ -365,17 +366,10 @@ impl Swapchain {
     }
 
     fn clean_up_render_resources(&mut self) {
-        unsafe {
-            for semaphore in self.image_available_semaphores.drain(..) {
-                self.device.destroy_semaphore(semaphore, None);
-            }
-            for semaphore in self.render_finished_semaphores.drain(..) {
-                self.device.destroy_semaphore(semaphore, None);
-            }
-            for fence in self.in_flight_fences.drain(..) {
-                self.device.destroy_fence(fence, None);
-            }
-        }
+        // Fence/Semaphore drop will clean up.
+        self.image_available_semaphores.clear();
+        self.render_finished_semaphores.clear();
+        self.in_flight_fences.clear();
     }
     
     pub fn extent(&self) -> vk::Extent2D {
@@ -448,20 +442,15 @@ fn get_swapchain_extent(
 fn create_sync_objects(
     device: &Device,
     count: usize,
-) -> Result<(Vec<vk::Semaphore>, Vec<vk::Semaphore>, Vec<vk::Fence>), vk::Result> {
-    let semaphore_info = vk::SemaphoreCreateInfo::default();
-    let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED); // Start signaled for first frame
-
+) -> Result<(Vec<Semaphore>, Vec<Semaphore>, Vec<Fence>), vk::Result> {
     let mut image_available = Vec::with_capacity(count);
     let mut render_finished = Vec::with_capacity(count);
     let mut in_flight = Vec::with_capacity(count);
 
     for _ in 0..count {
-        unsafe {
-            image_available.push(device.create_semaphore(&semaphore_info, None)?);
-            render_finished.push(device.create_semaphore(&semaphore_info, None)?);
-            in_flight.push(device.create_fence(&fence_info, None)?);
-        }
+        image_available.push(Semaphore::new(device)?);
+        render_finished.push(Semaphore::new(device)?);
+        in_flight.push(Fence::new(device, true)?);
     }
 
     Ok((image_available, render_finished, in_flight))

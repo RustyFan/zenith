@@ -21,13 +21,13 @@ impl RenderableApp for SimpleApp {
         let output = context.swapchain_texture();
 
         let builder = context.builder();
-        let mut output = builder.import("back_buffer", output, TextureState::Undefined);
+        let mut output = builder.import(output, TextureState::Undefined);
 
         let mut node = builder.add_lambda_node("clear");
 
         let output_access = node.write_hint(&mut output, TextureState::General, vk::PipelineStageFlags2::TRANSFER);
         node.execute(move |ctx| {
-            let rt = ctx.get_texture(&output_access);
+            let rt = ctx.get(&output_access);
             let encoder = ctx.command_encoder();
 
             encoder.custom(|device, cmd| {
@@ -45,6 +45,8 @@ impl RenderableApp for SimpleApp {
                         ]);
                 }
             });
+
+            Ok(())
         });
     }
 }

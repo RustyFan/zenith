@@ -8,6 +8,7 @@ use winit::window::Window;
 use zenith_core::log;
 
 use crate::device::RenderDevice;
+use crate::NUM_BACK_BUFFERS;
 use crate::swapchain::SwapchainWindow;
 
 /// Validation layers to enable in debug builds.
@@ -97,7 +98,7 @@ impl RhiCore {
         RenderDevice::new(
             &self.instance,
             physical_device,
-            3,
+            NUM_BACK_BUFFERS as u8,
         )
     }
 

@@ -5,15 +5,8 @@ edition = "2021"
 description = "Sandbox application for Zenith engine"
 license = "MIT"
 
-[features]
-dhat-heap = []
-
 [dependencies]
 winit.workspace = true
-log.workspace = true
 anyhow.workspace = true
-glam.workspace = true
-profiling.workspace = true
-dhat = "0.3"
 
 zenith = { path = "../zenith" }

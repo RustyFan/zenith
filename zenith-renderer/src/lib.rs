@@ -1,3 +1,3 @@
-mod triangle_renderer;
+mod triangle;
 
-pub use triangle_renderer::TriangleRenderer;
+pub use triangle::TriangleRenderer;

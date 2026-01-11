@@ -1,6 +1,6 @@
 use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph};
 use crate::interface::{ResourceDescriptor, ResourceState};
-use crate::node::{ColorAttachmentDesc, DepthStencilInfo, GraphicPipelineDescriptor, NodePipelineState, RenderGraphNode, VertexAttributeDesc, VertexBindingDesc};
+use crate::node::{NodePipelineState, RenderGraphNode};
 use crate::resource::{
     ExportResourceStorage, ExportedRenderGraphResource, GraphImportExportResource,
     GraphResource, GraphResourceDescriptor, GraphResourceId,
@@ -9,7 +9,7 @@ use crate::resource::{
 use log::warn;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use zenith_rhi::{vk, Shader, ShaderReflection, Texture};
+use zenith_rhi::{vk, ColorAttachmentDesc, DepthStencilDesc, GraphicPipelineDesc, GraphicPipelineState, GraphicShaderInput, GraphicPipelineAttachments};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResourceAccessStorage {
@@ -34,7 +34,6 @@ impl RenderGraphBuilder {
     #[must_use]
     pub fn create<D: GraphResourceDescriptor>(
         &mut self,
-        name: &str,
         desc: D,
     ) -> RenderGraphResource<D::Resource> {
         let id = self.initial_resources.len() as u32;
@@ -42,10 +41,10 @@ impl RenderGraphBuilder {
 
         match desc {
             ResourceDescriptor::Buffer(desc) => {
-                self.initial_resources.push((name.to_owned(), desc).into());
+                self.initial_resources.push(desc.into());
             }
             ResourceDescriptor::Texture(desc) => {
-                self.initial_resources.push((name.to_owned(), desc).into());
+                self.initial_resources.push(desc.into());
             }
         }
 
@@ -58,11 +57,10 @@ impl RenderGraphBuilder {
     #[must_use]
     pub fn import<R: GraphImportExportResource>(
         &mut self,
-        name: &str,
         import_resource: Arc<R>,
         access: <R as GraphResource>::State,
     ) -> RenderGraphResource<R> {
-        GraphImportExportResource::import(import_resource, name, self, access)
+        GraphImportExportResource::import(import_resource, self, access)
     }
 
     #[must_use]
@@ -83,7 +81,9 @@ impl RenderGraphBuilder {
             inputs: vec![],
             outputs: vec![],
             pipeline_state: NodePipelineState::Graphic {
-                pipeline_desc: Default::default(),
+                pipeline_desc: None,
+                color_attachments: vec![],
+                depth_attachment: None,
                 job_functor: None,
             },
         });
@@ -308,7 +308,7 @@ impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
     #[inline]
     pub fn execute<F>(&mut self, node_job: F)
     where
-        F: FnOnce(&mut GraphicNodeExecutionContext) + 'static
+        F: FnOnce(&mut GraphicNodeExecutionContext) -> anyhow::Result<()> + 'static
     {
         if let NodePipelineState::Graphic { job_functor, .. } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));
@@ -317,18 +317,121 @@ impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
         }
     }
 
-    #[must_use]
-    #[inline]
-    pub fn setup_pipeline(&mut self) -> GraphicPipelineBuilder<'_> {
-        let pipeline_desc = if let NodePipelineState::Graphic { pipeline_desc, .. } = &mut self.common.node.pipeline_state {
-            pipeline_desc
+    pub fn pipeline(&mut self, shader: GraphicShaderInput, state: GraphicPipelineState) -> AttachmentBinder<'_, 'res> {
+        // Clear any previous attachment bindings / desc.
+        if let NodePipelineState::Graphic { pipeline_desc, color_attachments, depth_attachment, .. } =
+            &mut self.common.node.pipeline_state
+        {
+            *pipeline_desc = None;
+            color_attachments.clear();
+            *depth_attachment = None;
         } else {
             unreachable!();
+        }
+
+        AttachmentBinder {
+            node: self.common.node,
+            resources: self.common.resources,
+            shader: Some(shader),
+            state: Some(state),
+            finished: false,
+        }
+    }
+}
+
+pub struct AttachmentBinder<'node, 'res> {
+    node: &'node mut RenderGraphNode,
+    resources: &'res Vec<InitialResourceStorage>,
+    shader: Option<GraphicShaderInput>,
+    state: Option<GraphicPipelineState>,
+    finished: bool,
+}
+
+impl<'node, 'res> AttachmentBinder<'node, 'res> {
+    pub fn push_color(
+        &mut self,
+        rt: RenderGraphResourceAccess<crate::interface::Texture, Rt>,
+        desc: ColorAttachmentDesc,
+    ) -> &mut Self {
+        if let NodePipelineState::Graphic { color_attachments, .. } = &mut self.node.pipeline_state {
+            color_attachments.push((rt.id, desc));
+        } else {
+            unreachable!();
+        }
+        self
+    }
+
+    pub fn depth(
+        &mut self,
+        rt: RenderGraphResourceAccess<crate::interface::Texture, Rt>,
+        desc: DepthStencilDesc,
+    ) -> &mut Self {
+        if let NodePipelineState::Graphic { depth_attachment, .. } = &mut self.node.pipeline_state {
+            *depth_attachment = Some((rt.id, desc));
+        } else {
+            unreachable!();
+        }
+        self
+    }
+
+    pub fn finish(mut self) -> GraphicPipelineDesc {
+        let desc = self.finalize();
+        self.finished = true;
+        desc
+    }
+
+    fn finalize(&mut self) -> GraphicPipelineDesc {
+        let shader = self.shader.take().expect("AttachmentBinder finalized twice");
+        let mut state = self.state.take().expect("AttachmentBinder finalized twice");
+
+        let (color_ids, color_descs, depth_id, depth_desc) = match &mut self.node.pipeline_state {
+            NodePipelineState::Graphic { color_attachments, depth_attachment, .. } => {
+                let (ids, descs): (Vec<_>, Vec<_>) = color_attachments.iter().cloned().unzip();
+                let (depth_id, depth_desc) = depth_attachment.clone().map(|(id, d)| (Some(id), Some(d))).unwrap_or((None, None));
+                (ids, descs, depth_id, depth_desc)
+            }
+            _ => unreachable!(),
         };
 
-        GraphicPipelineBuilder {
-            pipeline_desc,
+        // Attachments formats (dynamic rendering order).
+        let mut attachments = GraphicPipelineAttachments::default();
+        attachments.color_formats = color_ids
+            .iter()
+            .map(|id| texture_format(self.resources, *id))
+            .collect();
+        attachments.depth_format = depth_id.map(|id| texture_format(self.resources, id));
+        attachments.stencil_format = None;
+
+        // Populate state attachment descs used for blend state + begin_rendering.
+        state.color_blend.attachments = color_descs;
+        if let Some(ds) = depth_desc {
+            state.depth_stencil = Some(ds);
         }
+
+        let pipeline_desc = GraphicPipelineDesc::new(shader, state, attachments);
+
+        if let NodePipelineState::Graphic { pipeline_desc: slot, .. } = &mut self.node.pipeline_state {
+            *slot = Some(pipeline_desc.clone());
+        }
+
+        pipeline_desc
+    }
+}
+
+impl Drop for AttachmentBinder<'_, '_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.finalize();
+        }
+    }
+}
+
+fn texture_format(resources: &Vec<InitialResourceStorage>, id: GraphResourceId) -> vk::Format {
+    let storage = resources.get(id as usize).expect("Graph resource id out of bound!");
+    match storage {
+        InitialResourceStorage::ManagedTexture(desc) => desc.format,
+        InitialResourceStorage::ImportedTexture(tex, _) => tex.format(),
+        _ => panic!("AttachmentBinder expects a texture resource id."),
     }
 }
 
@@ -342,7 +445,7 @@ impl<'node, 'res> LambdaNodeBuilder<'node, 'res> {
     #[inline]
     pub fn execute<F>(&mut self, node_job: F)
     where
-        F: FnOnce(&mut LambdaNodeExecutionContext) + 'static
+        F: FnOnce(&mut LambdaNodeExecutionContext) -> anyhow::Result<()> + 'static
     {
         if let NodePipelineState::Lambda { job_functor } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));
@@ -352,82 +455,3 @@ impl<'node, 'res> LambdaNodeBuilder<'node, 'res> {
     }
 }
 
-pub struct GraphicPipelineBuilder<'a> {
-    pipeline_desc: &'a mut GraphicPipelineDescriptor,
-}
-
-impl<'a> GraphicPipelineBuilder<'a> {
-    fn update_reflection(&mut self) {
-        let mut reflections: Vec<&ShaderReflection> = Vec::new();
-        if let Some(vs) = &self.pipeline_desc.vertex_shader {
-            reflections.push(vs.reflection());
-        }
-        if let Some(fs) = &self.pipeline_desc.fragment_shader {
-            reflections.push(fs.reflection());
-        }
-
-        if !reflections.is_empty() {
-            let merged = ShaderReflection::merge(&reflections);
-
-            // Use cached layouts from shaders instead of creating new ones
-            // Prefer fragment shader layouts as they typically have more bindings
-            let layouts = if let Some(fs) = &self.pipeline_desc.fragment_shader {
-                fs.descriptor_set_layouts().to_vec()
-            } else if let Some(vs) = &self.pipeline_desc.vertex_shader {
-                vs.descriptor_set_layouts().to_vec()
-            } else {
-                Vec::new()
-            };
-
-            self.pipeline_desc.descriptor_set_layouts = layouts;
-            self.pipeline_desc.merged_reflection = Some(merged);
-        }
-    }
-
-    #[inline]
-    pub fn with_vertex_shader(mut self, shader: Arc<Shader>) -> Self {
-        self.pipeline_desc.vertex_shader = Some(shader);
-        self.update_reflection();
-        self
-    }
-
-    #[inline]
-    pub fn with_fragment_shader(mut self, shader: Arc<Shader>) -> Self {
-        self.pipeline_desc.fragment_shader = Some(shader);
-        self.update_reflection();
-        self
-    }
-
-    #[inline]
-    pub fn with_color(self, color: RenderGraphResourceAccess<Texture, Rt>, color_info: ColorAttachmentDesc) -> Self {
-        self.pipeline_desc.color_attachments.push((color, color_info));
-        self
-    }
-
-    #[inline]
-    pub fn with_depth_stencil(self, depth_stencil: RenderGraphResourceAccess<Texture, Rt>, depth_stencil_info: DepthStencilInfo) -> Self {
-        self.pipeline_desc.depth_stencil_attachment = Some((depth_stencil, depth_stencil_info));
-        self
-    }
-
-    #[inline]
-    pub fn with_vertex_binding(self, binding: u32, stride: u32, input_rate: vk::VertexInputRate) -> Self {
-        self.pipeline_desc.vertex_bindings.push(VertexBindingDesc {
-            binding,
-            stride,
-            input_rate,
-        });
-        self
-    }
-
-    #[inline]
-    pub fn with_vertex_attribute(self, location: u32, binding: u32, format: vk::Format, offset: u32) -> Self {
-        self.pipeline_desc.vertex_attributes.push(VertexAttributeDesc {
-            location,
-            binding,
-            format,
-            offset,
-        });
-        self
-    }
-}

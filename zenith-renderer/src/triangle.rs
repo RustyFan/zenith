@@ -2,10 +2,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use bytemuck::{Pod, Zeroable};
 use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, Shader, TextureState, BufferState, Texture, ImmediateCommandEncoder, UploadPool};
-use zenith_rendergraph::{RenderGraphBuilder, RenderGraphResource, ColorAttachmentDescBuilder};
+use zenith_rendergraph::{
+    ColorAttachmentDescBuilder, RenderGraphBuilder, RenderGraphResource, VertexLayout,
+    GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
+};
+use zenith_rhi::pipeline::RasterizationStateBuilder;
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 3],
@@ -20,7 +24,7 @@ pub struct TriangleRenderer {
 }
 
 impl TriangleRenderer {
-    pub fn new(device: &RenderDevice) -> Self {
+    pub fn new(device: &RenderDevice) -> anyhow::Result<Self> {
         let vertices = [
             Vertex { position: [0.0, 0.5, 0.0], color: [1.0, 0.0, 0.0] },
             Vertex { position: [-0.5, -0.5, 0.0], color: [0.0, 1.0, 0.0] },
@@ -31,63 +35,43 @@ impl TriangleRenderer {
         let vertex_data = bytemuck::cast_slice(&vertices);
         let index_data = bytemuck::cast_slice(&indices);
 
-        // Device-local GPU buffers (uploaded via staging)
-        let vertex_buffer = Arc::new(
-            Buffer::new(device, &BufferDesc::vertex(vertex_data.len() as u64))
-                .expect("Failed to create vertex buffer")
-        );
-        let index_buffer = Arc::new(
-            Buffer::new(device, &BufferDesc::index(index_data.len() as u64))
-                .expect("Failed to create index buffer")
-        );
+        let vertex_buffer = Arc::new(Buffer::new(device, &BufferDesc::vertex(vertex_data.len() as u64))?);
+        let index_buffer = Arc::new(Buffer::new(device, &BufferDesc::index(index_data.len() as u64))?);
 
-        // Upload via staging buffer (blocking for now)
-        let immediate = ImmediateCommandEncoder::new(device.handle(), device.graphics_queue())
-            .expect("Failed to create ImmediateCommandEncoder");
-        let mut upload_pool = UploadPool::new(device, 1024 * 1024).expect("Failed to create UploadPool");
-        upload_pool.enqueue_copy(vertex_buffer.clone(), 0, vertex_data, BufferState::Vertex)
-            .expect("Failed to enqueue vertex upload");
-        upload_pool.enqueue_copy(index_buffer.clone(), 0, index_data, BufferState::Index)
-            .expect("Failed to enqueue index upload");
-        upload_pool.flush(&immediate, device).expect("Failed to flush uploads");
+        {
+            let total_size = vertex_data.len() + index_data.len();
+            let mut upload_pool = UploadPool::new(device, total_size as _)?;
+            upload_pool.enqueue_copy(vertex_buffer.as_range(..)?, vertex_data, BufferState::Vertex)?;
+            upload_pool.enqueue_copy(index_buffer.as_range(..)?, index_data, BufferState::Index)?;
+
+            let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
+            upload_pool.flush(&immediate, device)?;
+        }
 
         // Load HLSL shaders from files
-        let vertex_shader = match Shader::from_hlsl_file(
+        let vertex_shader = Shader::from_hlsl_file(
             device.handle(),
             "content/shaders/triangle.vs.hlsl",
             "main",
             zenith_rhi::ShaderStage::Vertex,
             "6_0",
-        ) {
-            Ok(shader) => shader,
-            Err(e) => {
-                log::warn!("HLSL compilation failed: {:?}. DXC may not be installed.", e);
-                log::warn!("Please ensure dxcompiler.dll and dxil.dll are in your PATH or install the Vulkan SDK.");
-                panic!("Shader compilation failed. See warnings above for details.");
-            }
-        };
+        )?;
 
-        let fragment_shader = match Shader::from_hlsl_file(
+        let fragment_shader = Shader::from_hlsl_file(
             device.handle(),
             "content/shaders/triangle.ps.hlsl",
             "main",
             zenith_rhi::ShaderStage::Fragment,
             "6_0",
-        ) {
-            Ok(shader) => shader,
-            Err(e) => {
-                log::warn!("HLSL compilation failed: {:?}. DXC may not be installed.", e);
-                panic!("Shader compilation failed. See warnings above for details.");
-            }
-        };
+        )?;
 
-        Self {
+        Ok(Self {
             vertex_buffer,
             index_buffer,
             vertex_shader: Arc::new(vertex_shader),
             fragment_shader: Arc::new(fragment_shader),
             start_time: Instant::now(),
-        }
+        })
     }
 
     /// Render the triangle directly to the provided output texture.
@@ -99,23 +83,15 @@ impl TriangleRenderer {
         height: u32,
     ) {
         let vb = builder.import(
-            "triangle.vertex",
             self.vertex_buffer.clone(),
             BufferState::Undefined,
         );
         let ib = builder.import(
-            "triangle.index",
             self.index_buffer.clone(),
             BufferState::Undefined,
         );
         let tb = builder.create(
-            "triangle.time",
-            BufferDesc {
-                size: size_of::<f32>() as u64,
-                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-            }
+            BufferDesc::uniform(size_of::<f32>() as _),
         );
 
         let mut node = builder.add_graphic_node("triangle");
@@ -125,18 +101,27 @@ impl TriangleRenderer {
         let tb = node.read(&tb, BufferState::Uniform);
         let output_rt = node.write(output, TextureState::Color);
 
+        let shader = GraphicShaderInputBuilder::default()
+            .vertex_shader(self.vertex_shader.clone())
+            .fragment_shader(self.fragment_shader.clone())
+            .vertex_layout::<Vertex>()
+            .build()
+            .unwrap();
+
         let color_info = ColorAttachmentDescBuilder::default()
             .clear_input()
             .clear_value([0.1, 0.1, 0.1, 1.0])
             .build().unwrap();
 
-        node.setup_pipeline()
-            .with_vertex_shader(self.vertex_shader.clone())
-            .with_fragment_shader(self.fragment_shader.clone())
-            .with_color(output_rt, color_info)
-            .with_vertex_binding(0, size_of::<Vertex>() as u32, vk::VertexInputRate::VERTEX)
-            .with_vertex_attribute(0, 0, vk::Format::R32G32B32_SFLOAT, 0)
-            .with_vertex_attribute(1, 0, vk::Format::R32G32B32_SFLOAT, 12);
+        let state = GraphicPipelineStateBuilder::default()
+            .rasterization(RasterizationStateBuilder::default().cull_mode(vk::CullModeFlags::NONE).build().unwrap())
+            .build();
+
+        {
+            let mut binder = node.pipeline(shader, state);
+            binder.push_color(output_rt, color_info);
+            binder.finish();
+        }
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
 
@@ -145,22 +130,23 @@ impl TriangleRenderer {
             let encoder = ctx.encoder();
 
             // Update time buffer
-            let time_buffer = ctx.get(&tb);
-            time_buffer.map_and_write(bytemuck::bytes_of(&elapsed));
+            let elapsed_bytes = bytemuck::bytes_of(&elapsed);
+            let time_buffer = ctx.get(&tb)
+                .as_range(0..(elapsed_bytes.len() as u64))
+                .map_err(|e| anyhow::anyhow!("failed to create time buffer range: {:?}", e))?;
+
+            time_buffer.write(elapsed_bytes)
+                .map_err(|e| anyhow::anyhow!("failed to write time buffer: {:?}", e))?;
 
             // Bind uniform buffer using shader resource binder
-            if let Some(mut binder) = ctx.create_resource_binder() {
-                match binder.bind_buffer("TimeData", time_buffer.handle(), 0, size_of_val(&elapsed) as _) {
-                    Ok(_) => {
-                        let sets = binder.finish();
-                        ctx.bind_descriptor_sets(&sets);
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to bind time buffer: {:?}", e);
-                    }
+            let mut binder = ctx.create_binder();
+            match binder.bind_buffer("TimeData", time_buffer) {
+                Ok(_) => {
+                    ctx.bind_descriptor_sets(binder);
                 }
-            } else {
-                log::warn!("No resource binder available");
+                Err(e) => {
+                    log::warn!("Failed to bind time buffer: {:?}", e);
+                }
             }
 
             ctx.begin_rendering(extent);
@@ -188,6 +174,8 @@ impl TriangleRenderer {
             encoder.draw_indexed(3, 1, 0, 0, 0);
 
             ctx.end_rendering();
+
+            Ok(())
         });
     }
 }

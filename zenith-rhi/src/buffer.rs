@@ -2,27 +2,30 @@
 
 use ash::{vk};
 use zenith_core::log;
+use std::hash::{Hash, Hasher};
+use std::ops::RangeBounds;
+use zenith_rhi_derive::DeviceObject;
+use crate::utility::{find_memory_type, normalize_range_u64};
 
 /// Buffer descriptor for creating GPU buffers.
 #[derive(Debug, Clone)]
 pub struct BufferDesc {
+    pub name: String,
     /// Size of the buffer in bytes.
     pub size: vk::DeviceSize,
     /// Buffer usage flags (e.g., VERTEX_BUFFER, INDEX_BUFFER, UNIFORM_BUFFER).
     pub usage: vk::BufferUsageFlags,
     /// Memory property flags for allocation.
     pub memory_flags: vk::MemoryPropertyFlags,
-    /// Sharing mode between queue families.
-    pub sharing_mode: vk::SharingMode,
 }
 
 impl Default for BufferDesc {
     fn default() -> Self {
         Self {
+            name: "Unnamed buffer".to_string(),
             size: 0,
             usage: vk::BufferUsageFlags::empty(),
             memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
         }
     }
 }
@@ -31,6 +34,7 @@ impl BufferDesc {
     /// Create a new buffer descriptor with the specified size.
     pub fn new(size: vk::DeviceSize) -> Self {
         Self {
+            name: String::new(),
             size,
             ..Default::default()
         }
@@ -39,52 +43,56 @@ impl BufferDesc {
     /// Create a vertex buffer descriptor.
     pub fn vertex(size: vk::DeviceSize) -> Self {
         Self {
+            name: String::new(),
             size,
             usage: vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
         }
     }
 
     /// Create an index buffer descriptor.
     pub fn index(size: vk::DeviceSize) -> Self {
         Self {
+            name: String::new(),
             size,
             usage: vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
         }
     }
 
     /// Create a uniform buffer descriptor.
     pub fn uniform(size: vk::DeviceSize) -> Self {
         Self {
+            name: String::new(),
             size,
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-            memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                | vk::MemoryPropertyFlags::HOST_COHERENT,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         }
     }
 
     /// Create a storage buffer descriptor.
     pub fn storage(size: vk::DeviceSize) -> Self {
         Self {
+            name: String::new(),
             size,
             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
             memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
         }
     }
 
     /// Create a staging buffer descriptor (CPU-visible for transfers).
     pub fn staging(size: vk::DeviceSize) -> Self {
         Self {
+            name: String::new(),
             size,
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             memory_flags: vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
         }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     /// Set the buffer usage flags.
@@ -123,37 +131,34 @@ impl BufferDesc {
         self.usage |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
         self
     }
+}
 
-    /// Set sharing mode.
-    pub fn with_sharing_mode(mut self, mode: vk::SharingMode) -> Self {
-        self.sharing_mode = mode;
-        self
+impl PartialEq for BufferDesc {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.size == other.size
+            && self.usage.as_raw() == other.usage.as_raw()
+            && self.memory_flags.as_raw() == other.memory_flags.as_raw()
     }
 }
 
-/// Find a suitable memory type index.
-pub fn find_memory_type(
-    memory_properties: &vk::PhysicalDeviceMemoryProperties,
-    type_filter: u32,
-    properties: vk::MemoryPropertyFlags,
-) -> Option<u32> {
-    for i in 0..memory_properties.memory_type_count {
-        let memory_type = memory_properties.memory_types[i as usize];
-        if (type_filter & (1 << i)) != 0 && memory_type.property_flags.contains(properties) {
-            return Some(i);
-        }
+impl Eq for BufferDesc {}
+
+impl Hash for BufferDesc {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.size.hash(state);
+        self.usage.as_raw().hash(state);
+        self.memory_flags.as_raw().hash(state);
     }
-    None
 }
 
 /// GPU buffer with memory allocation.
+#[DeviceObject]
 pub struct Buffer {
-    device: ash::Device,
     buffer: vk::Buffer,
+    desc: BufferDesc,
     memory: vk::DeviceMemory,
-    size: vk::DeviceSize,
-    usage: vk::BufferUsageFlags,
-    mapped_ptr: Option<*mut std::ffi::c_void>,
 }
 
 impl Buffer {
@@ -168,7 +173,7 @@ impl Buffer {
         let buffer_info = vk::BufferCreateInfo::default()
             .size(desc.size)
             .usage(desc.usage)
-            .sharing_mode(desc.sharing_mode);
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let buffer = unsafe { device.create_buffer(&buffer_info, None)? };
 
@@ -176,9 +181,8 @@ impl Buffer {
         let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
         // Find suitable memory type
-        let memory_type_index =
-            find_memory_type(memory_properties, mem_requirements.memory_type_bits, desc.memory_flags)
-                .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)?;
+        let memory_type_index = find_memory_type(memory_properties, mem_requirements.memory_type_bits, desc.memory_flags)
+            .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)?;
 
         // Allocate memory
         let alloc_info = vk::MemoryAllocateInfo::default()
@@ -193,64 +197,20 @@ impl Buffer {
         log::trace!("new buffer created.");
 
         Ok(Self {
-            device: device.clone(),
             buffer,
+            desc: desc.clone(),
             memory,
-            size: desc.size,
-            usage: desc.usage,
-            mapped_ptr: None,
+            device: device.clone(),
         })
     }
 
-    /// Map buffer memory for CPU access. Returns a pointer to the mapped memory.
-    pub fn map(&mut self) -> Result<*mut std::ffi::c_void, vk::Result> {
-        if let Some(ptr) = self.mapped_ptr {
-            return Ok(ptr);
-        }
-
-        let ptr = unsafe {
-            self.device
-                .map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty())?
-        };
-
-        self.mapped_ptr = Some(ptr);
-        Ok(ptr)
-    }
-
-    /// Unmap buffer memory.
-    pub fn unmap(&mut self) {
-        if self.mapped_ptr.is_some() {
-            unsafe { self.device.unmap_memory(self.memory) };
-            self.mapped_ptr = None;
-        }
-    }
-
-    /// Map buffer memory, write data, and unmap.
-    pub fn map_and_write(&self, data: &[u8]) {
-        unsafe {
-            let ptr = self.device
-                .map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty())
-                .expect("Failed to map buffer memory");
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-            self.device.unmap_memory(self.memory);
-        }
-    }
-
-    /// Write bytes into the buffer at `offset` (in bytes). This is intended for staging buffers.
-    pub fn write_at(&self, offset: vk::DeviceSize, data: &[u8]) -> Result<(), vk::Result> {
-        let len = data.len() as vk::DeviceSize;
-        if len == 0 {
-            return Ok(());
-        }
-        if offset + len > self.size {
-            return Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
-        }
-        unsafe {
-            let ptr = self.device.map_memory(self.memory, offset, len, vk::MemoryMapFlags::empty())?;
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-            self.device.unmap_memory(self.memory);
-        }
-        Ok(())
+    pub fn as_range<R: RangeBounds<u64>>(&self, range: R) -> Result<BufferRange<'_>, vk::Result> {
+        let (offset, size) = normalize_range_u64(range, self.desc.size as u64)?;
+        Ok(BufferRange {
+            buffer: self,
+            offset,
+            size,
+        })
     }
 
     /// Get buffer device address (requires BUFFER_DEVICE_ADDRESS usage flag).
@@ -264,25 +224,83 @@ impl Buffer {
         self.buffer
     }
 
-    /// Get the buffer size.
-    pub fn size(&self) -> vk::DeviceSize {
-        self.size
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.desc.name
+    }
+    
+    #[inline]
+    pub fn desc(&self) -> &BufferDesc {
+        &self.desc
     }
 
-    /// Get the buffer usage flags.
+    #[inline]
+    pub fn size(&self) -> vk::DeviceSize {
+        self.desc.size
+    }
+
+    #[inline]
     pub fn usage(&self) -> vk::BufferUsageFlags {
-        self.usage
+        self.desc.usage
     }
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        self.unmap();
         unsafe {
             self.device.destroy_buffer(self.buffer, None);
             self.device.free_memory(self.memory, None);
         }
 
         log::trace!("buffer destroyed.");
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct BufferRange<'a> {
+    buffer: &'a Buffer,
+    offset: u64,
+    size: u64,
+}
+
+impl<'a> BufferRange<'a> {
+    #[inline]
+    pub fn buffer(&self) -> &'a Buffer { self.buffer }
+
+    #[inline]
+    pub fn offset(&self) -> u64 { self.offset }
+
+    #[inline]
+    pub fn size(&self) -> u64 { self.size }
+
+    pub fn to_binding(&self) -> vk::DescriptorBufferInfo {
+        vk::DescriptorBufferInfo::default()
+            .buffer(self.buffer.handle())
+            .offset(self.offset)
+            .range(self.size)
+    }
+
+    pub fn write(&self, data: &[u8]) -> Result<(), vk::Result>  {
+        let len = data.len() as u64;
+        if len == 0 {
+            return Ok(());
+        }
+        if len > self.size {
+            return Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        }
+
+        // SAFETY: range is checked before constructing, and mapping is limited to `len`.
+        unsafe {
+            let ptr = self.buffer.device.map_memory(
+                self.buffer.memory,
+                self.offset as vk::DeviceSize,
+                len as vk::DeviceSize,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+            self.buffer.device.unmap_memory(self.buffer.memory);
+        }
+
+        Ok(())
     }
 }

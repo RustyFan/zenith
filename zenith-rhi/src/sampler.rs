@@ -1,6 +1,7 @@
 //! Vulkan Sampler - texture sampling configuration.
 
-use ash::{vk, Device};
+use ash::{vk};
+use zenith_rhi_derive::DeviceObject;
 
 /// Sampler configuration.
 #[derive(Debug, Clone)]
@@ -79,14 +80,14 @@ impl SamplerConfig {
 }
 
 /// Vulkan sampler for texture sampling.
+#[DeviceObject]
 pub struct Sampler {
-    device: Device,
     sampler: vk::Sampler,
 }
 
 impl Sampler {
     /// Create a new sampler with the given configuration.
-    pub fn new(device: &Device, config: &SamplerConfig) -> Result<Self, vk::Result> {
+    pub fn new(device: &ash::Device, config: &SamplerConfig) -> Result<Self, vk::Result> {
         let create_info = vk::SamplerCreateInfo::default()
             .mag_filter(config.mag_filter)
             .min_filter(config.min_filter)
@@ -107,8 +108,8 @@ impl Sampler {
         let sampler = unsafe { device.create_sampler(&create_info, None)? };
 
         Ok(Self {
-            device: device.clone(),
             sampler,
+            device: device.clone(),
         })
     }
 

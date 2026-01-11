@@ -2,14 +2,13 @@
 
 use crate::command::CommandPool;
 use crate::core::PhysicalDevice;
-use crate::defer_release::DeferReleaseQueue;
-use crate::descriptor::{DescriptorPool, DescriptorSetLayout};
-use crate::{Buffer, Texture};
+use crate::defer_release::{DeferRelease, DeferReleaseQueue};
+use crate::resource_cache::ResourceCache;
 use crate::queue::Queue;
-use crate::synchronization::Fence;
+use crate::synchronization::{Fence, Semaphore};
 use ash::{vk, Device, Instance};
-use std::collections::HashSet;
-use zenith_core::collections::SmallVec;
+use std::cell::RefCell;
+use zenith_core::collections::{SmallVec, hashset::HashSet};
 
 /// Get required device extensions.
 fn get_required_device_extensions() -> Vec<*const i8> {
@@ -25,9 +24,9 @@ pub struct RenderDevice {
 
     execute_command_pools: Vec<CommandPool>,
     present_command_pools: Vec<CommandPool>,
-    frame_resource_fences: Vec<vk::Fence>,
-    defer_release_queues: Vec<DeferReleaseQueue>,
-    descriptor_pools: Vec<DescriptorPool>,
+    frame_resource_fences: Vec<Fence>,
+    defer_release_queues: RefCell<Vec<DeferReleaseQueue>>,
+    resource_caches: Vec<ResourceCache>,
 
     num_frames: u8,
     current_frame: u8,
@@ -90,7 +89,6 @@ impl RenderDevice {
         let mut present_command_pools = Vec::with_capacity(num_frames as usize);
         let mut frame_resource_fences = Vec::with_capacity(num_frames as usize);
         let mut defer_release_queues = Vec::with_capacity(num_frames as usize);
-        let mut descriptor_pools = Vec::with_capacity(num_frames as usize);
         for _ in 0..num_frames {
             execute_command_pools.push(
                 CommandPool::new(&device, physical_device.graphics_queue_family(), vk::CommandPoolCreateFlags::empty())?
@@ -98,26 +96,13 @@ impl RenderDevice {
             present_command_pools.push(
                 CommandPool::new(&device, physical_device.graphics_queue_family(), vk::CommandPoolCreateFlags::empty())?
             );
-            let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-            frame_resource_fences.push(
-                unsafe { device.create_fence(&fence_info, None)? }
-            );
+            frame_resource_fences.push(Fence::new(&device, true)?);
             defer_release_queues.push(
                 DeferReleaseQueue::new()
             );
-            // Create descriptor pool with common descriptor types
-            let pool_sizes = [
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1000 },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 1000 },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1000 },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 500 },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 500 },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: 100 },
-            ];
-            descriptor_pools.push(
-                DescriptorPool::new(&device, 1000, &pool_sizes)?
-            );
         }
+        let resource_caches: Vec<ResourceCache> =
+            (0..num_frames as usize).map(|_| ResourceCache::default()).collect();
 
         Ok(Self {
             parent_physical_device: physical_device.clone(),
@@ -127,8 +112,8 @@ impl RenderDevice {
             execute_command_pools,
             present_command_pools,
             frame_resource_fences,
-            defer_release_queues,
-            descriptor_pools,
+            defer_release_queues: RefCell::new(defer_release_queues),
+            resource_caches,
             num_frames,
             current_frame: 0,
         })
@@ -150,33 +135,25 @@ impl RenderDevice {
     pub fn begin_frame(&mut self) {
         // wait and reset until execution of current frame completes on GPU side
         unsafe {
-            self.device.wait_for_fences(&[self.frame_resource_fences[self.current_frame as usize]], true, u64::MAX).unwrap();
-            self.device.reset_fences(&[self.frame_resource_fences[self.current_frame as usize]]).unwrap();
+            let fence = self.frame_resource_fences[self.current_frame as usize].handle();
+            self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
+            self.device.reset_fences(&[fence]).unwrap();
         }
         self.execute_command_pools[self.current_frame as usize].reset().expect("Failed to reset execute command pool");
     }
 
-    pub fn reset_frame_resources(&mut self) {
-        self.descriptor_pools[self.current_frame as usize].reset().expect("Failed to reset descriptor pool");
-        self.defer_release_queues[self.current_frame as usize].release_all();
+    pub fn reset_frame_resources(&self) {
+        self.defer_release_queues.borrow_mut()[self.current_frame as usize].release_all();
     }
 
-    pub fn defer_release_buffer(&mut self, buffer: Buffer) {
-        self.defer_release_queues[self.current_frame as usize].add_buffer(buffer);
+    pub fn defer_release<T: DeferRelease>(&self, value: T) {
+        self.defer_release_queues.borrow_mut()[self.current_frame as usize].push(value);
     }
 
-    pub fn defer_release_texture(&mut self, texture: Texture) {
-        self.defer_release_queues[self.current_frame as usize].add_texture(texture);
-    }
-
-    /// Get the current frame's descriptor pool.
-    pub fn descriptor_pool(&self) -> &DescriptorPool {
-        &self.descriptor_pools[self.current_frame as usize]
-    }
-
-    /// Allocate a descriptor set from the current frame's pool.
-    pub fn allocate_descriptor_set(&self, layout: &DescriptorSetLayout) -> Result<vk::DescriptorSet, vk::Result> {
-        self.descriptor_pools[self.current_frame as usize].allocate(layout)
+    pub fn last_defer_release_stats(&self) -> crate::LastFreedStats {
+        self.defer_release_queues.borrow()[self.current_frame as usize]
+            .last_freed()
+            .clone()
     }
 
     pub fn end_frame(&mut self) {
@@ -185,18 +162,52 @@ impl RenderDevice {
 
     pub fn frame_index(&self) -> usize { self.current_frame as _ }
 
-    pub fn frame_resource_fence(&self) -> Fence {
-        Fence::new(self.frame_resource_fences[self.current_frame as usize])
+    pub fn acquire_buffer(&mut self, desc: &crate::BufferDesc) -> Result<crate::Buffer, vk::Result> {
+        let frame = self.current_frame as usize;
+        {
+            let cache = &mut self.resource_caches[frame];
+            if let Some(buf) = cache.pop_buffer(desc) {
+                return Ok(buf);
+            }
+        }
+        crate::Buffer::new(self, desc)
     }
 
-    /// Get the total number of deferred buffers for this frame.
-    pub fn deferred_buffer_count(&self) -> usize {
-        self.defer_release_queues[self.current_frame as usize].buffer_count()
+    #[inline]
+    pub fn recycle_buffer(&mut self, desc: crate::BufferDesc, buffer: crate::Buffer) {
+        let frame = self.current_frame as usize;
+        self.resource_caches[frame].recycle_buffer(desc, buffer);
     }
 
-    /// Get the total number of deferred textures for this frame.
-    pub fn deferred_texture_count(&self) -> usize {
-        self.defer_release_queues[self.current_frame as usize].texture_count()
+    pub fn acquire_texture(&mut self, desc: &crate::TextureDesc) -> Result<crate::Texture, vk::Result> {
+        let frame = self.current_frame as usize;
+        {
+            let cache = &mut self.resource_caches[frame];
+            if let Some(tex) = cache.pop_texture(desc) {
+                return Ok(tex);
+            }
+        }
+        crate::Texture::new(self, desc)
+    }
+
+    #[inline]
+    pub fn recycle_texture(&mut self, desc: crate::TextureDesc, texture: crate::Texture) {
+        let frame = self.current_frame as usize;
+        self.resource_caches[frame].recycle_texture(desc, texture);
+    }
+
+    #[inline]
+    pub fn resource_cache(&self) -> &ResourceCache {
+        &self.resource_caches[self.current_frame as usize]
+    }
+
+    #[inline]
+    pub fn resource_cache_mut(&mut self) -> &mut ResourceCache {
+        &mut self.resource_caches[self.current_frame as usize]
+    }
+
+    pub fn frame_resource_fence(&self) -> &Fence {
+        &self.frame_resource_fences[self.current_frame as usize]
     }
 
     /// Get the physical device properties.
@@ -229,11 +240,11 @@ impl RenderDevice {
         &self,
         command: vk::CommandBuffer,
         queue: Queue,
-        wait_semaphores: &'a [vk::Semaphore],
+        wait_semaphores: &'a [&Semaphore],
         wait_stage: vk::PipelineStageFlags2,
-        signal_semaphores: &'a [vk::Semaphore],
+        signal_semaphores: &'a [&Semaphore],
         signal_stage: vk::PipelineStageFlags2,
-        fence: Fence,
+        fence: &Fence,
     ) {
         let command_submit_info = vk::CommandBufferSubmitInfo::default()
             .command_buffer(command);
@@ -241,16 +252,16 @@ impl RenderDevice {
         let wait_semaphore_infos = wait_semaphores.iter()
             .map(|semaphore| {
                 vk::SemaphoreSubmitInfo::default()
-                    .semaphore(*semaphore)
-                    .stage_mask(signal_stage)
+                    .semaphore(semaphore.handle())
+                    .stage_mask(wait_stage)
             })
             .collect::<SmallVec<[vk::SemaphoreSubmitInfo; 4]>>();
 
         let signal_semaphore_infos = signal_semaphores.iter()
             .map(|semaphore| {
                 vk::SemaphoreSubmitInfo::default()
-                    .semaphore(*semaphore)
-                    .stage_mask(wait_stage)
+                    .semaphore(semaphore.handle())
+                    .stage_mask(signal_stage)
             })
             .collect::<SmallVec<[vk::SemaphoreSubmitInfo; 4]>>();
 
@@ -271,20 +282,37 @@ impl RenderDevice {
 
 impl Drop for RenderDevice {
     fn drop(&mut self) {
+        unsafe { self.device.device_wait_idle().unwrap(); }
+
         self.execute_command_pools.clear();
         self.present_command_pools.clear();
-        self.descriptor_pools.clear();
 
-        for queue in &mut self.defer_release_queues {
+        for queue in self.defer_release_queues.get_mut() {
             queue.release_all();
         }
-
-        for fence in &mut self.frame_resource_fences {
-            unsafe { self.device.destroy_fence(*fence, None); }
+        // Cached resources may still hold Buffers/Textures that require `Device` to destroy.
+        for cache in &mut self.resource_caches {
+            cache.clear();
         }
+        self.resource_caches.clear();
+        self.frame_resource_fences.clear();
 
         unsafe {
             self.device.destroy_device(None);
         }
     }
+}
+
+#[allow(dead_code)]
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
+/// Crate-only trait for objects that own an `ash::Device` used for destruction and device calls.
+///
+/// This trait is sealed and not visible to users of `zenith-rhi`.
+#[allow(dead_code)]
+pub(crate) trait DeviceObject: sealed::Sealed {
+    fn device(&self) -> &Device;
+    fn set_device(&mut self, device: Device);
 }

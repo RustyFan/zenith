@@ -1,36 +1,32 @@
 //! Staging-buffer-based upload utilities.
 
-use std::sync::Arc;
-
 use ash::vk;
 
 use crate::{
     Buffer, BufferDesc, BufferState, ImmediateCommandEncoder, RenderDevice,
     BufferBarrier, PipelineStage, PipelineStages,
 };
+use crate::buffer::BufferRange;
 
-#[derive(Clone)]
-struct PendingBufferCopy {
-    dst: Arc<Buffer>,
-    dst_offset: vk::DeviceSize,
+struct PendingBufferCopy<'a> {
+    dst: BufferRange<'a>,
     src_offset: vk::DeviceSize,
     size: vk::DeviceSize,
     final_state: BufferState,
-    readonly: bool,
 }
 
 /// A simple upload pool backed by a single reusable staging buffer.
 ///
 /// - Supports queueing multiple buffer uploads and flushing them in one submit.
 /// - Current behavior is **blocking**: `flush()` waits on a fence.
-pub struct UploadPool {
+pub struct UploadPool<'a> {
     staging: Buffer,
     staging_size: vk::DeviceSize,
     write_head: vk::DeviceSize,
-    pending: Vec<PendingBufferCopy>,
+    pending: Vec<PendingBufferCopy<'a>>,
 }
 
-impl UploadPool {
+impl<'a> UploadPool<'a> {
     pub fn new(device: &RenderDevice, staging_size: vk::DeviceSize) -> Result<Self, vk::Result> {
         let staging = Buffer::new(device, &BufferDesc::staging(staging_size))?;
         Ok(Self {
@@ -49,21 +45,18 @@ impl UploadPool {
     /// call `flush()` first and retry.
     pub fn enqueue_copy(
         &mut self,
-        dst: Arc<Buffer>,
-        dst_offset: vk::DeviceSize,
+        dst: BufferRange<'a>,
         data: &[u8],
         final_state: BufferState,
     ) -> Result<(), vk::Result> {
-        self.enqueue_buffer_ex(dst, dst_offset, data, final_state, true)
+        self.enqueue_buffer_ex(dst, data, final_state)
     }
 
     pub fn enqueue_buffer_ex(
         &mut self,
-        dst: Arc<Buffer>,
-        dst_offset: vk::DeviceSize,
+        dst: BufferRange<'a>,
         data: &[u8],
         final_state: BufferState,
-        readonly: bool,
     ) -> Result<(), vk::Result> {
         let size = data.len() as vk::DeviceSize;
         if size == 0 {
@@ -77,16 +70,17 @@ impl UploadPool {
         }
 
         let src_offset = self.write_head;
-        self.staging.write_at(src_offset, data)?;
+        // Write into staging (exact range).
+        self.staging
+            .as_range((src_offset as u64)..((src_offset + size) as u64))?
+            .write(data)?;
         self.write_head += size;
 
         self.pending.push(PendingBufferCopy {
             dst,
-            dst_offset,
             src_offset,
             size,
             final_state,
-            readonly,
         });
 
         Ok(())
@@ -112,7 +106,7 @@ impl UploadPool {
             // Staging: HOST_WRITE -> TRANSFER_READ (as TRANSFER_SRC)
             pre.push(
                 BufferBarrier::new(
-                    &self.staging,
+                    self.staging.as_range(..).unwrap(),
                     BufferState::HostWrite,
                     BufferState::TransferSrc,
                     PipelineStage::Host.into(),
@@ -126,25 +120,25 @@ impl UploadPool {
             // Dst buffers: Undefined -> TransferDst
             for p in pending.iter() {
                 pre.push(BufferBarrier::new(
-                    &p.dst,
+                    p.dst.buffer().as_range(..).unwrap(),
                     BufferState::Undefined,
                     BufferState::TransferDst,
                     PipelineStages::empty(),
                     PipelineStage::Transfer.into(),
                     q,
                     q,
-                    p.readonly,
-                ));
+                    false,
+                ).with_range(p.dst.offset() as usize, p.size as usize));
             }
-            encoder.barrier_buffers(&pre);
+            encoder.buffer_barriers(&pre);
 
             // Copies
             for p in pending.iter() {
                 let region = vk::BufferCopy::default()
                     .src_offset(p.src_offset)
-                    .dst_offset(p.dst_offset)
+                    .dst_offset(p.dst.offset() as vk::DeviceSize)
                     .size(p.size);
-                encoder.copy_buffer(staging_handle, p.dst.handle(), std::slice::from_ref(&region));
+                encoder.copy_buffer(staging_handle, p.dst.buffer().handle(), std::slice::from_ref(&region));
             }
 
             // Post-copy barriers: TRANSFER_DST -> final_state
@@ -158,17 +152,17 @@ impl UploadPool {
                     BufferState::Uniform | BufferState::Storage | BufferState::Undefined => PipelineStage::AllCommands.into(),
                 };
                 post.push(BufferBarrier::new(
-                    &p.dst,
+                    p.dst.buffer().as_range(..).unwrap(),
                     BufferState::TransferDst,
                     p.final_state,
                     PipelineStage::Transfer.into(),
                     dst_stage,
                     q,
                     q,
-                    p.readonly,
-                ));
+                    true,
+                ).with_range(p.dst.offset() as usize, p.size as usize));
             }
-            encoder.barrier_buffers(&post);
+            encoder.buffer_barriers(&post);
         });
 
         if result.is_err() {
@@ -186,14 +180,13 @@ impl UploadPool {
         &mut self,
         immediate: &ImmediateCommandEncoder,
         device: &RenderDevice,
-        dst: Arc<Buffer>,
-        dst_offset: vk::DeviceSize,
+        dst: BufferRange<'a>,
         data: &[u8],
         final_state: BufferState,
     ) -> Result<(), vk::Result> {
-        if self.enqueue_copy(dst.clone(), dst_offset, data, final_state).is_err() {
+        if self.enqueue_copy(dst, data, final_state).is_err() {
             self.flush(immediate, device)?;
-            self.enqueue_copy(dst, dst_offset, data, final_state)?;
+            self.enqueue_copy(dst, data, final_state)?;
         }
         self.flush(immediate, device)
     }

@@ -15,6 +15,7 @@ pub trait GraphResource: Sized + sealed::Sealed {
     type Descriptor: GraphResourceDescriptor;
     type State: GraphResourceState;
 
+    #[doc(hidden)]
     fn from_storage(storage: &ResourceStorage) -> &Self;
 }
 
@@ -91,7 +92,7 @@ impl<R: GraphResource, V: GraphResourceView> RenderGraphResourceAccess<R, V> {
 }
 
 pub trait GraphImportExportResource: GraphResource {
-    fn import(shared_resource: impl Into<Arc<Self>>, name: &str, builder: &mut crate::builder::RenderGraphBuilder, access: impl Into<ResourceState>) -> RenderGraphResource<Self>;
+    fn import(shared_resource: impl Into<Arc<Self>>, builder: &mut crate::builder::RenderGraphBuilder, access: impl Into<ResourceState>) -> RenderGraphResource<Self>;
     fn export(resource: RenderGraphResource<Self>, builder: &mut crate::builder::RenderGraphBuilder, access: impl Into<ResourceState>) -> ExportedRenderGraphResource<Self>;
 }
 
@@ -104,19 +105,19 @@ pub struct ExportedRenderGraphResource<R: GraphResource> {
 
 #[derive(From)]
 pub(crate) enum InitialResourceStorage {
-    ManagedBuffer(String, BufferDesc),
-    ManagedTexture(String, TextureDesc),
-    ImportedBuffer(String, Arc<Buffer>, BufferState),
-    ImportedTexture(String, Arc<Texture>, TextureState),
+    ManagedBuffer(BufferDesc),
+    ManagedTexture(TextureDesc),
+    ImportedBuffer(Arc<Buffer>, BufferState),
+    ImportedTexture(Arc<Texture>, TextureState),
 }
 
 impl InitialResourceStorage {
     pub(crate) fn name(&self) -> &str {
         match self {
-            InitialResourceStorage::ManagedBuffer(name, _) => name,
-            InitialResourceStorage::ManagedTexture(name, _) => name,
-            InitialResourceStorage::ImportedBuffer(name, _, _) => name,
-            InitialResourceStorage::ImportedTexture(name, _, _) => name,
+            InitialResourceStorage::ManagedBuffer(desc) => &desc.name,
+            InitialResourceStorage::ManagedTexture(desc) => &desc.name,
+            InitialResourceStorage::ImportedBuffer(buf, _) => buf.name(),
+            InitialResourceStorage::ImportedTexture(tex, _) => tex.name(),
         }
     }
 }

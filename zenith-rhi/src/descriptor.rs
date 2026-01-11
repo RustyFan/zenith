@@ -3,8 +3,13 @@
 use ash::{vk, Device};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::default::Default;
 use zenith_core::collections::SmallVec;
+use zenith_rhi_derive::DeviceObject;
+use crate::buffer::BufferRange;
+use crate::{RenderDevice, Sampler};
 use crate::shader::{ShaderBinding, ShaderReflection};
+use crate::texture::TextureRange;
 
 /// Descriptor binding validation error.
 #[derive(Debug)]
@@ -55,8 +60,8 @@ pub struct LayoutBinding {
 }
 
 /// Descriptor set layout with binding metadata for validation.
+#[DeviceObject]
 pub struct DescriptorSetLayout {
-    device: Device,
     layout: vk::DescriptorSetLayout,
     bindings: Vec<LayoutBinding>,
     binding_map: HashMap<u32, usize>,
@@ -87,10 +92,10 @@ impl DescriptorSetLayout {
             .collect();
 
         Ok(Self {
-            device: device.clone(),
             layout,
             bindings: bindings.to_vec(),
             binding_map,
+            device: device.clone(),
         })
     }
 
@@ -139,8 +144,9 @@ impl Drop for DescriptorSetLayout {
 }
 
 /// Descriptor pool for allocating descriptor sets.
+#[DeviceObject]
 pub struct DescriptorPool {
-    device: Device,
+    pub(crate) name: String,
     pool: vk::DescriptorPool,
     max_sets: u32,
 }
@@ -160,10 +166,22 @@ impl DescriptorPool {
         let pool = unsafe { device.create_descriptor_pool(&create_info, None)? };
 
         Ok(Self {
-            device: device.clone(),
+            name: String::new(),
             pool,
             max_sets,
+            device: device.clone(),
         })
+    }
+
+    #[inline]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Allocate a single descriptor set.
@@ -223,205 +241,8 @@ impl Drop for DescriptorPool {
     }
 }
 
-/// Resource binder for safely binding resources to descriptor sets.
-pub struct ResourceBinder<'a> {
-    device: &'a Device,
-    descriptor_set: vk::DescriptorSet,
-    layout: &'a DescriptorSetLayout,
-    buffer_infos: Vec<vk::DescriptorBufferInfo>,
-    image_infos: Vec<vk::DescriptorImageInfo>,
-    writes: Vec<WriteInfo>,
-}
-
-struct WriteInfo {
-    binding: u32,
-    array_element: u32,
-    descriptor_type: vk::DescriptorType,
-    buffer_info_index: Option<usize>,
-    image_info_index: Option<usize>,
-}
-
-impl<'a> ResourceBinder<'a> {
-    /// Create a new resource binder for a descriptor set.
-    pub fn new(
-        device: &'a Device,
-        descriptor_set: vk::DescriptorSet,
-        layout: &'a DescriptorSetLayout,
-    ) -> Self {
-        Self {
-            device,
-            descriptor_set,
-            layout,
-            buffer_infos: Vec::new(),
-            image_infos: Vec::new(),
-            writes: Vec::new(),
-        }
-    }
-
-    /// Bind a buffer to a binding slot.
-    pub fn bind_buffer(
-        mut self,
-        binding: u32,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        range: vk::DeviceSize,
-    ) -> Result<Self, BindingError> {
-        let layout_binding = self
-            .layout
-            .get_binding(binding)
-            .ok_or(BindingError::BindingNotFound(binding))?;
-
-        // Validate descriptor type is a buffer type
-        let is_buffer_type = matches!(
-            layout_binding.descriptor_type,
-            vk::DescriptorType::UNIFORM_BUFFER
-                | vk::DescriptorType::STORAGE_BUFFER
-                | vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
-                | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
-        );
-
-        if !is_buffer_type {
-            return Err(BindingError::TypeMismatch {
-                binding,
-                expected: layout_binding.descriptor_type,
-                got: vk::DescriptorType::UNIFORM_BUFFER,
-            });
-        }
-
-        let buffer_info_index = self.buffer_infos.len();
-        self.buffer_infos.push(
-            vk::DescriptorBufferInfo::default()
-                .buffer(buffer)
-                .offset(offset)
-                .range(range),
-        );
-
-        self.writes.push(WriteInfo {
-            binding,
-            array_element: 0,
-            descriptor_type: layout_binding.descriptor_type,
-            buffer_info_index: Some(buffer_info_index),
-            image_info_index: None,
-        });
-
-        Ok(self)
-    }
-
-    /// Bind an image view with sampler to a binding slot.
-    pub fn bind_image(
-        mut self,
-        binding: u32,
-        image_view: vk::ImageView,
-        sampler: vk::Sampler,
-        image_layout: vk::ImageLayout,
-    ) -> Result<Self, BindingError> {
-        let layout_binding = self
-            .layout
-            .get_binding(binding)
-            .ok_or(BindingError::BindingNotFound(binding))?;
-
-        // Validate descriptor type is an image type
-        let is_image_type = matches!(
-            layout_binding.descriptor_type,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER
-                | vk::DescriptorType::SAMPLED_IMAGE
-                | vk::DescriptorType::STORAGE_IMAGE
-        );
-
-        if !is_image_type {
-            return Err(BindingError::TypeMismatch {
-                binding,
-                expected: layout_binding.descriptor_type,
-                got: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            });
-        }
-
-        let image_info_index = self.image_infos.len();
-        self.image_infos.push(
-            vk::DescriptorImageInfo::default()
-                .image_view(image_view)
-                .sampler(sampler)
-                .image_layout(image_layout),
-        );
-
-        self.writes.push(WriteInfo {
-            binding,
-            array_element: 0,
-            descriptor_type: layout_binding.descriptor_type,
-            buffer_info_index: None,
-            image_info_index: Some(image_info_index),
-        });
-
-        Ok(self)
-    }
-
-    /// Bind a standalone sampler to a binding slot.
-    pub fn bind_sampler(mut self, binding: u32, sampler: vk::Sampler) -> Result<Self, BindingError> {
-        let layout_binding = self
-            .layout
-            .get_binding(binding)
-            .ok_or(BindingError::BindingNotFound(binding))?;
-
-        if layout_binding.descriptor_type != vk::DescriptorType::SAMPLER {
-            return Err(BindingError::TypeMismatch {
-                binding,
-                expected: layout_binding.descriptor_type,
-                got: vk::DescriptorType::SAMPLER,
-            });
-        }
-
-        let image_info_index = self.image_infos.len();
-        self.image_infos.push(
-            vk::DescriptorImageInfo::default()
-                .sampler(sampler)
-                .image_view(vk::ImageView::null())
-                .image_layout(vk::ImageLayout::UNDEFINED),
-        );
-
-        self.writes.push(WriteInfo {
-            binding,
-            array_element: 0,
-            descriptor_type: vk::DescriptorType::SAMPLER,
-            buffer_info_index: None,
-            image_info_index: Some(image_info_index),
-        });
-
-        Ok(self)
-    }
-
-    /// Finish binding and write all descriptors to the set.
-    pub fn finish(self) {
-        let writes: Vec<vk::WriteDescriptorSet> = self
-            .writes
-            .iter()
-            .map(|w| {
-                let mut write = vk::WriteDescriptorSet::default()
-                    .dst_set(self.descriptor_set)
-                    .dst_binding(w.binding)
-                    .dst_array_element(w.array_element)
-                    .descriptor_type(w.descriptor_type);
-
-                if let Some(idx) = w.buffer_info_index {
-                    write = write.buffer_info(std::slice::from_ref(&self.buffer_infos[idx]));
-                }
-                if let Some(idx) = w.image_info_index {
-                    write = write.image_info(std::slice::from_ref(&self.image_infos[idx]));
-                }
-
-                write
-            })
-            .collect();
-
-        if !writes.is_empty() {
-            unsafe {
-                self.device.update_descriptor_sets(&writes, &[]);
-            }
-        }
-    }
-}
-
 /// Create all descriptor set layouts from shader reflection.
-pub fn create_layouts_from_reflection(
+pub(crate) fn create_layouts_from_reflection(
     device: &Device,
     reflection: &ShaderReflection,
 ) -> Result<Vec<Arc<DescriptorSetLayout>>, vk::Result> {
@@ -467,42 +288,32 @@ struct PendingWrite {
 }
 
 /// Shader resource binder that binds resources by name using shader reflection.
-pub struct ShaderResourceBinder<'a> {
-    device: &'a Device,
+pub struct DescriptorSetBinder<'a> {
+    device: &'a RenderDevice,
     reflection: &'a ShaderReflection,
-    descriptor_sets: Vec<vk::DescriptorSet>,
+    resource_ty_sizes: HashMap<vk::DescriptorType, u32>,
     pending_writes: Vec<PendingWrite>,
 }
 
-impl<'a> ShaderResourceBinder<'a> {
+impl<'a> DescriptorSetBinder<'a> {
     /// Create a new shader resource binder.
     pub fn new(
-        device: &'a Device,
+        device: &'a RenderDevice,
         reflection: &'a ShaderReflection,
-        layouts: &[Arc<DescriptorSetLayout>],
-        pool: &DescriptorPool,
     ) -> Result<Self, ShaderBindingError> {
-        let mut descriptor_sets = Vec::with_capacity(layouts.len());
-        for layout in layouts {
-            let set = pool.allocate(layout).map_err(ShaderBindingError::AllocationFailed)?;
-            descriptor_sets.push(set);
-        }
-
         Ok(Self {
             device,
             reflection,
-            descriptor_sets,
+            resource_ty_sizes: Default::default(),
             pending_writes: Vec::new(),
         })
     }
 
-    /// Bind a buffer by name.
+    /// Bind a buffer by shader name.
     pub fn bind_buffer(
         &mut self,
         name: &str,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        range: vk::DeviceSize,
+        buffer: BufferRange,
     ) -> Result<&mut Self, ShaderBindingError> {
         let binding = self.reflection.find_binding(name)
             .ok_or_else(|| ShaderBindingError::BindingNotFound(name.to_string()))?;
@@ -527,13 +338,11 @@ impl<'a> ShaderResourceBinder<'a> {
             set_index: binding.set,
             binding: binding.binding,
             descriptor_type: binding.descriptor_type,
-            buffer_info: Some(vk::DescriptorBufferInfo::default()
-                .buffer(buffer)
-                .offset(offset)
-                .range(range)),
+            buffer_info: Some(buffer.to_binding()),
             image_info: None,
         });
 
+        *self.resource_ty_sizes.entry(binding.descriptor_type).or_insert(0) += 1;
         Ok(self)
     }
 
@@ -541,8 +350,8 @@ impl<'a> ShaderResourceBinder<'a> {
     pub fn bind_texture(
         &mut self,
         name: &str,
-        image_view: vk::ImageView,
-        sampler: vk::Sampler,
+        texture: TextureRange<'a>,
+        sampler: &'a Sampler,
         layout: vk::ImageLayout,
     ) -> Result<&mut Self, ShaderBindingError> {
         let binding = self.reflection.find_binding(name)
@@ -568,18 +377,29 @@ impl<'a> ShaderResourceBinder<'a> {
             binding: binding.binding,
             descriptor_type: binding.descriptor_type,
             buffer_info: None,
-            image_info: Some(vk::DescriptorImageInfo::default()
-                .image_view(image_view)
-                .sampler(sampler)
-                .image_layout(layout)),
+            image_info: Some(texture.to_binding(sampler, layout)),
         });
 
+        *self.resource_ty_sizes.entry(binding.descriptor_type).or_insert(0) += 1;
         Ok(self)
     }
 
     /// Finish binding and return the descriptor sets for binding to the pipeline.
-    pub fn finish(self) -> Vec<vk::DescriptorSet> {
-        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
+    pub fn finish(self, layouts: &[Arc<DescriptorSetLayout>]) -> (DescriptorPool, Vec<vk::DescriptorSet>) {
+        let pool_sizes = self.resource_ty_sizes.into_iter()
+            .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
+                ty,
+                descriptor_count,
+            })
+            .collect::<Vec<_>>();
+
+        let pool = DescriptorPool::new(self.device.handle(), layouts.len() as _, &pool_sizes).unwrap();
+        let descriptor_sets = layouts.iter()
+            .map(|layout| {
+                pool.allocate(layout).map_err(ShaderBindingError::AllocationFailed).unwrap()
+            })
+            .collect::<Vec<_>>();
+
         let mut buffer_infos: SmallVec<[vk::DescriptorBufferInfo; 8]> = SmallVec::new();
         let mut image_infos: SmallVec<[vk::DescriptorImageInfo; 8]> = SmallVec::new();
 
@@ -594,11 +414,11 @@ impl<'a> ShaderResourceBinder<'a> {
 
         let mut buf_idx = 0;
         let mut img_idx = 0;
+        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
 
         for pending in &self.pending_writes {
-            let set = self.descriptor_sets[pending.set_index as usize];
             let mut write = vk::WriteDescriptorSet::default()
-                .dst_set(set)
+                .dst_set(descriptor_sets[pending.set_index as usize])
                 .dst_binding(pending.binding)
                 .dst_array_element(0)
                 .descriptor_type(pending.descriptor_type);
@@ -617,10 +437,10 @@ impl<'a> ShaderResourceBinder<'a> {
 
         if !writes.is_empty() {
             unsafe {
-                self.device.update_descriptor_sets(&writes, &[]);
+                self.device.handle().update_descriptor_sets(&writes, &[]);
             }
         }
 
-        self.descriptor_sets
+        (pool, descriptor_sets)
     }
 }
