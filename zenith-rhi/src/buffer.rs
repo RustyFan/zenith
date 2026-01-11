@@ -5,7 +5,10 @@ use zenith_core::log;
 use std::hash::{Hash, Hasher};
 use std::ops::RangeBounds;
 use zenith_rhi_derive::DeviceObject;
+use crate::RenderDevice;
+use crate::device::{DebuggableObject};
 use crate::utility::{find_memory_type, normalize_range_u64};
+use crate::device::set_debug_name_handle;
 
 /// Buffer descriptor for creating GPU buffers.
 #[derive(Debug, Clone)]
@@ -164,21 +167,20 @@ pub struct Buffer {
 impl Buffer {
     /// Create a new buffer from a descriptor.
     pub fn new(
-        device: &crate::RenderDevice,
+        device: &RenderDevice,
         desc: &BufferDesc,
     ) -> Result<Self, vk::Result> {
         let memory_properties = device.memory_properties();
-        let device = device.handle();
         // Create buffer
         let buffer_info = vk::BufferCreateInfo::default()
             .size(desc.size)
             .usage(desc.usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        let buffer = unsafe { device.create_buffer(&buffer_info, None)? };
+        let buffer = unsafe { device.handle().create_buffer(&buffer_info, None)? };
 
         // Get memory requirements
-        let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let mem_requirements = unsafe { device.handle().get_buffer_memory_requirements(buffer) };
 
         // Find suitable memory type
         let memory_type_index = find_memory_type(memory_properties, mem_requirements.memory_type_bits, desc.memory_flags)
@@ -189,19 +191,21 @@ impl Buffer {
             .allocation_size(mem_requirements.size)
             .memory_type_index(memory_type_index);
 
-        let memory = unsafe { device.allocate_memory(&alloc_info, None)? };
+        let memory = unsafe { device.handle().allocate_memory(&alloc_info, None)? };
 
         // Bind memory to buffer
-        unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
+        unsafe { device.handle().bind_buffer_memory(buffer, memory, 0)? };
 
         log::trace!("new buffer created.");
 
-        Ok(Self {
+        let buf = Self {
             buffer,
             desc: desc.clone(),
             memory,
-            device: device.clone(),
-        })
+            device: device.handle().clone(),
+        };
+        device.set_debug_name(&buf);
+        Ok(buf)
     }
 
     pub fn as_range<R: RangeBounds<u64>>(&self, range: R) -> Result<BufferRange<'_>, vk::Result> {
@@ -253,6 +257,18 @@ impl Drop for Buffer {
         }
 
         log::trace!("buffer destroyed.");
+    }
+}
+
+impl DebuggableObject for Buffer {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(device, self.buffer, vk::ObjectType::BUFFER, self.name());
+        set_debug_name_handle(
+            device,
+            self.memory,
+            vk::ObjectType::DEVICE_MEMORY,
+            &format!("{}.memory", self.name()),
+        );
     }
 }
 

@@ -34,24 +34,27 @@ impl Engine {
 
         let swapchain_config = SwapchainConfig::default();
         let swapchain = Swapchain::new(
+            "swapchain.main",
             &core,
             &device,
             swapchain_window,
             swapchain_config,
         )?;
 
-        let pipeline_cache = PipelineCache::new(&device)?;
+        let pipeline_cache = PipelineCache::new("pipeline_cache.main", &device)?;
 
         let num_frames = device.num_frames();
         let (execute_command_pools, present_command_pools) = (0..num_frames)
-            .map(|_| -> Result<(CommandPool, CommandPool), vk::Result> {
+            .map(|idx| -> Result<(CommandPool, CommandPool), vk::Result> {
                 Ok((
                     CommandPool::new(
+                        &format!("command_pool.execute.f{idx}"),
                         &device,
                         physical_device.graphics_queue_family(),
                         vk::CommandPoolCreateFlags::empty(),
                     )?,
                     CommandPool::new(
+                        &format!("command_pool.present.f{idx}"),
                         &device,
                         physical_device.present_queue_family(),
                         vk::CommandPoolCreateFlags::empty(),
@@ -119,7 +122,7 @@ impl Engine {
             height: inner_size.height,
         };
 
-        self.swapchain.resize(window_extent).unwrap();
+        self.swapchain.resize(&self.render_device, window_extent).unwrap();
     }
 
     #[profiling::function]

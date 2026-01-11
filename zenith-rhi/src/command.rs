@@ -6,29 +6,39 @@ use zenith_rhi_derive::DeviceObject;
 use crate::barrier::{BufferBarrier, TextureBarrier, MemoryBarrier};
 use crate::{Queue, RenderDevice};
 use crate::synchronization::Fence;
+use crate::device::DebuggableObject;
+use crate::device::set_debug_name_handle;
 
 /// Command buffer pool for allocating command buffers.
 #[DeviceObject]
 pub struct CommandPool {
+    name: String,
     pool: vk::CommandPool,
     buffers: RefCell<Vec<vk::CommandBuffer>>,
     next_index: Cell<usize>,
 }
 
 impl CommandPool {
-    pub fn new(device: &RenderDevice, queue_family: u32, flags: vk::CommandPoolCreateFlags) -> Result<Self, vk::Result> {
+    pub fn new(
+        name: &str,
+        device: &RenderDevice,
+        queue_family: u32,
+        flags: vk::CommandPoolCreateFlags,
+    ) -> Result<Self, vk::Result> {
         let create_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family)
             .flags(flags);
 
         let pool = unsafe { device.handle().create_command_pool(&create_info, None)? };
-
-        Ok(Self {
+        let pool = Self {
+            name: name.to_string(),
             pool,
             buffers: RefCell::new(Vec::new()),
             next_index: Cell::new(0),
             device: device.handle().clone(),
-        })
+        };
+        device.set_debug_name(&pool);
+        Ok(pool)
     }
 
     pub fn allocate(&self) -> Result<vk::CommandBuffer, vk::Result> {
@@ -59,6 +69,15 @@ impl CommandPool {
     pub fn handle(&self) -> vk::CommandPool {
         self.pool
     }
+
+    #[inline]
+    pub fn name(&self) -> &str { &self.name }
+}
+
+impl DebuggableObject for CommandPool {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(device, self.pool, vk::ObjectType::COMMAND_POOL, self.name());
+    }
 }
 
 impl Drop for CommandPool {
@@ -71,16 +90,21 @@ impl Drop for CommandPool {
 
 /// Command encoder wrapping a command buffer with common graphics commands.
 pub struct CommandEncoder<'a> {
+    name: String,
     device: &'a RenderDevice,
     cmd: vk::CommandBuffer,
 }
 
 impl<'a> CommandEncoder<'a> {
-    pub fn new(device: &'a RenderDevice, pool: &CommandPool) -> anyhow::Result<Self> {
-        Ok(Self {
+    pub fn new(name: &str, device: &'a RenderDevice, pool: &CommandPool) -> anyhow::Result<Self> {
+        let cmd = pool.allocate()?;
+        let encoder = Self {
+            name: name.to_owned(),
             device,
-            cmd: pool.allocate()?,
-        })
+            cmd,
+        };
+        device.set_debug_name(&encoder);
+        Ok(encoder)
     }
 
     pub fn begin(&self, flags: vk::CommandBufferUsageFlags) -> Result<(), vk::Result> {
@@ -218,6 +242,11 @@ impl<'a> CommandEncoder<'a> {
     }
 }
 
+impl<'a> DebuggableObject for CommandEncoder<'a> {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(device, self.cmd, vk::ObjectType::COMMAND_BUFFER, &self.name);
+    }
+}
 
 /// An immediate encoder that can submit commands to a queue at any time and
 /// block on a fence until completion.
@@ -230,8 +259,8 @@ pub struct ImmediateCommandEncoder<'a> {
 
 impl<'a> ImmediateCommandEncoder<'a> {
     pub fn new(device: &'a RenderDevice, queue: Queue) -> Result<Self, vk::Result> {
-        let pool = CommandPool::new(device, queue.family_index(), vk::CommandPoolCreateFlags::empty())?;
-        let fence = Fence::new(device.handle(), false)?;
+        let pool = CommandPool::new("command_pool.immediate", device, queue.family_index(), vk::CommandPoolCreateFlags::empty())?;
+        let fence = Fence::new("fence.immediate", device, false)?;
 
         Ok(Self {
             device,
@@ -248,7 +277,7 @@ impl<'a> ImmediateCommandEncoder<'a> {
     {
         self.pool.reset()?;
 
-        let encoder = CommandEncoder::new(self.device, &self.pool)
+        let encoder = CommandEncoder::new("cmd.immediate", self.device, &self.pool)
             .map_err(|_| vk::Result::ERROR_UNKNOWN)?;
 
         encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
@@ -273,5 +302,3 @@ impl<'a> ImmediateCommandEncoder<'a> {
 
     pub fn queue(&self) -> Queue { self.queue }
 }
-
-// Fence handles destruction.

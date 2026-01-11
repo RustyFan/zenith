@@ -1,13 +1,14 @@
 //! Vulkan Descriptor - descriptor pool, layout, and resource binding.
 
-use ash::{vk, Device};
+use ash::{vk};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::default::Default;
 use zenith_core::collections::SmallVec;
 use zenith_rhi_derive::DeviceObject;
 use crate::buffer::BufferRange;
-use crate::{RenderDevice, Sampler};
+use crate::{GraphicPipeline, RenderDevice, Sampler};
+use crate::device::DebuggableObject;
+use crate::device::set_debug_name_handle;
 use crate::shader::{ShaderBinding, ShaderReflection};
 use crate::texture::TextureRange;
 
@@ -62,6 +63,7 @@ pub struct LayoutBinding {
 /// Descriptor set layout with binding metadata for validation.
 #[DeviceObject]
 pub struct DescriptorSetLayout {
+    name: String,
     layout: vk::DescriptorSetLayout,
     bindings: Vec<LayoutBinding>,
     binding_map: HashMap<u32, usize>,
@@ -69,7 +71,7 @@ pub struct DescriptorSetLayout {
 
 impl DescriptorSetLayout {
     /// Create a new descriptor set layout from binding descriptions.
-    pub fn new(device: &Device, bindings: &[LayoutBinding]) -> Result<Self, vk::Result> {
+    pub fn new(name: &str, device: &RenderDevice, bindings: &[LayoutBinding]) -> Result<Self, vk::Result> {
         let vk_bindings: Vec<vk::DescriptorSetLayoutBinding> = bindings
             .iter()
             .map(|b| {
@@ -83,7 +85,7 @@ impl DescriptorSetLayout {
 
         let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&vk_bindings);
 
-        let layout = unsafe { device.create_descriptor_set_layout(&create_info, None)? };
+        let layout = unsafe { device.handle().create_descriptor_set_layout(&create_info, None)? };
 
         let binding_map: HashMap<u32, usize> = bindings
             .iter()
@@ -91,17 +93,20 @@ impl DescriptorSetLayout {
             .map(|(i, b)| (b.binding, i))
             .collect();
 
-        Ok(Self {
+        let layout = Self {
+            name: name.to_owned(),
             layout,
             bindings: bindings.to_vec(),
             binding_map,
-            device: device.clone(),
-        })
+            device: device.handle().clone(),
+        };
+        Ok(layout)
     }
 
     /// Create a descriptor set layout from shader reflection for a specific set index.
     pub fn from_reflection(
-        device: &Device,
+        name: &str,
+        device: &RenderDevice,
         shader_bindings: &[ShaderBinding],
         set_index: u32,
     ) -> Result<Self, vk::Result> {
@@ -116,8 +121,13 @@ impl DescriptorSetLayout {
             })
             .collect();
 
-        Self::new(device, &bindings)
+        let layout = Self::new(name, device, &bindings)?;
+        device.set_debug_name(&layout);
+        Ok(layout)
     }
+
+    #[inline]
+    pub fn name(&self) -> &str { &self.name }
 
     /// Get the raw Vulkan descriptor set layout handle.
     pub fn handle(&self) -> vk::DescriptorSetLayout {
@@ -143,10 +153,21 @@ impl Drop for DescriptorSetLayout {
     }
 }
 
+impl DebuggableObject for DescriptorSetLayout {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(
+            device,
+            self.layout,
+            vk::ObjectType::DESCRIPTOR_SET_LAYOUT,
+            self.name(),
+        );
+    }
+}
+
 /// Descriptor pool for allocating descriptor sets.
 #[DeviceObject]
 pub struct DescriptorPool {
-    pub(crate) name: String,
+    name: String,
     pool: vk::DescriptorPool,
     max_sets: u32,
 }
@@ -154,29 +175,25 @@ pub struct DescriptorPool {
 impl DescriptorPool {
     /// Create a new descriptor pool.
     pub fn new(
-        device: &Device,
+        name: &str,
+        device: &RenderDevice,
         max_sets: u32,
         pool_sizes: &[vk::DescriptorPoolSize],
     ) -> Result<Self, vk::Result> {
         let create_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(max_sets)
-            .pool_sizes(pool_sizes)
-            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
+            .pool_sizes(pool_sizes);
 
-        let pool = unsafe { device.create_descriptor_pool(&create_info, None)? };
+        let pool = unsafe { device.handle().create_descriptor_pool(&create_info, None)? };
 
-        Ok(Self {
-            name: String::new(),
+        let pool = Self {
+            name: name.to_owned(),
             pool,
             max_sets,
-            device: device.clone(),
-        })
-    }
-
-    #[inline]
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
-        self
+            device: device.handle().clone(),
+        };
+        device.set_debug_name(&pool);
+        Ok(pool)
     }
 
     #[inline]
@@ -209,10 +226,10 @@ impl DescriptorPool {
         unsafe { self.device.allocate_descriptor_sets(&alloc_info) }
     }
 
-    /// Free a descriptor set back to the pool.
-    pub fn free(&self, set: vk::DescriptorSet) -> Result<(), vk::Result> {
-        unsafe { self.device.free_descriptor_sets(self.pool, &[set]) }
-    }
+    // /// Free a descriptor set back to the pool.
+    // pub fn free(&self, set: vk::DescriptorSet) -> Result<(), vk::Result> {
+    //     unsafe { self.device.free_descriptor_sets(self.pool, &[set]) }
+    // }
 
     /// Reset the pool, freeing all allocated descriptor sets.
     pub fn reset(&self) -> Result<(), vk::Result> {
@@ -238,6 +255,12 @@ impl Drop for DescriptorPool {
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
         }
+    }
+}
+
+impl DebuggableObject for DescriptorPool {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(device, self.pool, vk::ObjectType::DESCRIPTOR_POOL, self.name());
     }
 }
 
@@ -274,6 +297,7 @@ struct PendingWrite {
 /// Shader resource binder that binds resources by name using shader reflection.
 pub struct DescriptorSetBinder<'a> {
     device: &'a RenderDevice,
+    pipeline: &'a GraphicPipeline,
     reflection: &'a ShaderReflection,
     resource_ty_sizes: HashMap<vk::DescriptorType, u32>,
     pending_writes: Vec<PendingWrite>,
@@ -283,10 +307,12 @@ impl<'a> DescriptorSetBinder<'a> {
     /// Create a new shader resource binder.
     pub fn new(
         device: &'a RenderDevice,
+        pipeline: &'a GraphicPipeline,
         reflection: &'a ShaderReflection,
     ) -> Result<Self, ShaderBindingError> {
         Ok(Self {
             device,
+            pipeline,
             reflection,
             resource_ty_sizes: Default::default(),
             pending_writes: Vec::new(),
@@ -369,7 +395,7 @@ impl<'a> DescriptorSetBinder<'a> {
     }
 
     /// Finish binding and return the descriptor sets for binding to the pipeline.
-    pub fn finish(self, layouts: &[Arc<DescriptorSetLayout>]) -> (DescriptorPool, Vec<vk::DescriptorSet>) {
+    pub fn finish(self) -> (DescriptorPool, Vec<vk::DescriptorSet>) {
         let pool_sizes = self.resource_ty_sizes.into_iter()
             .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
                 ty,
@@ -377,8 +403,8 @@ impl<'a> DescriptorSetBinder<'a> {
             })
             .collect::<Vec<_>>();
 
-        let pool = DescriptorPool::new(self.device.handle(), layouts.len() as _, &pool_sizes).unwrap();
-        let descriptor_sets = layouts.iter()
+        let pool = DescriptorPool::new("descriptor_pool", self.device, self.pipeline.descriptor_layouts.len() as _, &pool_sizes).unwrap();
+        let descriptor_sets = self.pipeline.descriptor_layouts.iter()
             .map(|layout| {
                 pool.allocate(layout).map_err(ShaderBindingError::AllocationFailed).unwrap()
             })

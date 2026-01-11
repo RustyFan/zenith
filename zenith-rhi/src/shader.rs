@@ -5,10 +5,10 @@ use hassle_rs::{Dxc, HassleError};
 use rspirv_reflect::{Reflection, DescriptorType, BindingCount};
 use std::ffi::CString;
 use std::collections::HashMap;
-use std::sync::Arc;
 use zenith_rhi_derive::DeviceObject;
-use crate::descriptor::DescriptorSetLayout;
 use crate::RenderDevice;
+use crate::device::DebuggableObject;
+use crate::device::set_debug_name_handle;
 
 pub enum ShaderModel {
     SM6,
@@ -25,6 +25,7 @@ impl ShaderModel {
 /// Compiled shader with Vulkan shader module and reflection data.
 #[DeviceObject]
 pub struct Shader {
+    name: String,
     module: vk::ShaderModule,
     stage: ShaderStage,
     entry_point: CString,
@@ -34,6 +35,7 @@ pub struct Shader {
 impl Shader {
     /// Create a shader from an HLSL file.
     pub fn from_hlsl_file(
+        name: &str,
         device: &RenderDevice,
         path: impl AsRef<std::path::Path>,
         entry_point: &str,
@@ -41,11 +43,12 @@ impl Shader {
         shader_model: ShaderModel,
     ) -> Result<Self, ShaderError> {
         let source = std::fs::read_to_string(path)?;
-        Self::from_hlsl(device, &source, entry_point, stage, shader_model)
+        Self::from_hlsl(name, device, &source, entry_point, stage, shader_model)
     }
 
     /// Create a shader from HLSL source code.
     pub fn from_hlsl(
+        name: &str,
         device: &RenderDevice,
         source: &str,
         entry_point: &str,
@@ -53,11 +56,12 @@ impl Shader {
         shader_model: ShaderModel,
     ) -> Result<Self, ShaderError> {
         let spirv = compile_hlsl(source, entry_point, stage, shader_model.as_str())?;
-        Self::from_spirv(device, &spirv, entry_point, stage)
+        Self::from_spirv(name, device, &spirv, entry_point, stage)
     }
 
     /// Create a shader from pre-compiled SPIR-V bytecode.
     pub fn from_spirv(
+        name: &str,
         device: &RenderDevice,
         spirv: &[u8],
         entry_point: &str,
@@ -69,23 +73,28 @@ impl Shader {
         // Create shader module
         let module = create_shader_module(device.handle(), spirv)?;
 
-        Ok(Self {
+        let shader = Self {
+            name: name.to_owned(),
             module,
             stage,
             entry_point: CString::new(entry_point).unwrap(),
             reflection,
             // descriptor_set_layouts,
             device: device.handle().clone(),
-        })
+        };
+        device.set_debug_name(&shader);
+        Ok(shader)
     }
+
+    #[inline]
+    pub fn name(&self) -> &str { &self.name }
+
+    #[inline]
+    pub fn handle(&self) -> vk::ShaderModule { self.module }
 
     /// Get the Vulkan shader module handle.
     pub fn module(&self) -> vk::ShaderModule {
         self.module
-    }
-
-    pub(crate) fn device(&self) -> &Device {
-        &self.device
     }
 
     /// Get the shader stage.
@@ -106,6 +115,12 @@ impl Shader {
     /// Get Vulkan shader stage flags.
     pub fn vk_stage(&self) -> vk::ShaderStageFlags {
         self.stage.to_vk_stage()
+    }
+}
+
+impl DebuggableObject for Shader {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(device, self.module, vk::ObjectType::SHADER_MODULE, self.name());
     }
 }
 
@@ -718,18 +733,19 @@ fn create_shader_module(device: &Device, spirv: &[u8]) -> Result<vk::ShaderModul
     Ok(module)
 }
 
-/// Create all descriptor set layouts from shader reflection.
-pub(crate) fn create_layouts_from_reflection(
-    device: &Device,
-    reflection: &ShaderReflection,
-) -> Result<Vec<Arc<DescriptorSetLayout>>, vk::Result> {
-    let max_set = reflection.max_set().unwrap_or(0);
-    let mut layouts = Vec::with_capacity((max_set + 1) as usize);
-
-    for set_index in 0..=max_set {
-        let layout = DescriptorSetLayout::from_reflection(device, &reflection.bindings, set_index)?;
-        layouts.push(Arc::new(layout));
-    }
-
-    Ok(layouts)
-}
+// /// Create all descriptor set layouts from shader reflection.
+// pub(crate) fn create_layouts_from_reflection(
+//     device: &Device,
+//     reflection: &ShaderReflection,
+// ) -> Result<Vec<Arc<DescriptorSetLayout>>, vk::Result> {
+//     let max_set = reflection.max_set().unwrap_or(0);
+//     let mut layouts = Vec::with_capacity((max_set + 1) as usize);
+//
+//     for set_index in 0..=max_set {
+//         let name = format!("descriptor_set_layout[{set_index}]");
+//         let layout = DescriptorSetLayout::from_reflection(&name, device, &reflection.bindings, set_index)?;
+//         layouts.push(Arc::new(layout));
+//     }
+//
+//     Ok(layouts)
+// }

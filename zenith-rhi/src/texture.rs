@@ -1,13 +1,15 @@
 //! Vulkan Texture - GPU texture resource management.
 
-use ash::{vk, Device};
+use ash::{vk};
 use std::default::Default;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::ops::RangeBounds;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_rhi_derive::DeviceObject;
-use crate::{Sampler};
+use crate::{RenderDevice, Sampler};
+use crate::device::DebuggableObject;
+use crate::device::set_debug_name_handle;
 use crate::utility::{find_memory_type, normalize_range_u32};
 
 /// Texture descriptor for creating GPU textures.
@@ -303,11 +305,10 @@ pub struct Texture {
 impl Texture {
     /// Create a new texture from a descriptor (view is not created).
     pub fn new(
-        device: &crate::RenderDevice,
+        device: &RenderDevice,
         desc: &TextureDesc,
     ) -> Result<Self, vk::Result> {
         let memory_properties = device.memory_properties();
-        let device = device.handle();
         // Create image
         let image_info = vk::ImageCreateInfo::default()
             .image_type(desc.image_type)
@@ -321,10 +322,10 @@ impl Texture {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let image = unsafe { device.create_image(&image_info, None)? };
+        let image = unsafe { device.handle().create_image(&image_info, None)? };
 
         // Get memory requirements
-        let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
+        let mem_requirements = unsafe { device.handle().get_image_memory_requirements(image) };
 
         // Find suitable memory type
         let memory_type_index = find_memory_type(memory_properties, mem_requirements.memory_type_bits, desc.memory_flags)
@@ -335,30 +336,32 @@ impl Texture {
             .allocation_size(mem_requirements.size)
             .memory_type_index(memory_type_index);
 
-        let memory = unsafe { device.allocate_memory(&alloc_info, None)? };
+        let memory = unsafe { device.handle().allocate_memory(&alloc_info, None)? };
 
         // Bind memory to image
-        unsafe { device.bind_image_memory(image, memory, 0)? };
+        unsafe { device.handle().bind_image_memory(image, memory, 0)? };
 
         let texture = Self {
             desc: desc.clone(),
             image,
             memory,
             views: RefCell::new(Default::default()),
-            device: device.clone(),
+            device: device.handle().clone(),
         };
+        device.set_debug_name(&texture);
         Ok(texture)
     }
 
     /// Create a texture wrapper for a swapchain image (does not own the image or memory).
     pub(crate) fn from_swapchain_image(
-        device: &Device,
+        device: &RenderDevice,
+        name: String,
         image: vk::Image,
         format: vk::Format,
         extent: vk::Extent2D,
     ) -> Self {
         let desc = TextureDesc {
-            name: "swapchain_back_buffer".to_owned(),
+            name,
             format,
             extent: vk::Extent3D {
                 width: extent.width,
@@ -374,13 +377,15 @@ impl Texture {
             samples: Default::default(),
             tiling: Default::default(),
         };
+
         let texture = Self {
             desc,
             image,
             memory: vk::DeviceMemory::null(),
             views: RefCell::new(Default::default()),
-            device: device.clone(),
+            device: device.handle().clone(),
         };
+        device.set_debug_name(&texture);
         texture
     }
 
@@ -470,6 +475,21 @@ impl Drop for Texture {
     }
 }
 
+impl DebuggableObject for Texture {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(device, self.image, vk::ObjectType::IMAGE, self.name());
+
+        if self.memory != vk::DeviceMemory::null() {
+            set_debug_name_handle(
+                device,
+                self.memory,
+                vk::ObjectType::DEVICE_MEMORY,
+                &format!("{}.memory", self.name()),
+            );
+        }
+    }
+}
+
 /// Get the appropriate aspect mask for an image format.
 fn format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
     match format {
@@ -533,6 +553,7 @@ impl<'a> TextureRange<'a> {
             .subresource_range(self.subresource.to_vk(aspect_mask));
 
         let view = unsafe { self.texture.device.create_image_view(&view_info, None)? };
+        // TODO: debug name for view
         self.texture.views.borrow_mut().insert(self.subresource, view);
         Ok(view)
     }

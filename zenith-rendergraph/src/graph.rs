@@ -143,7 +143,7 @@ impl RenderGraph {
                     };
 
                     let pipeline = pipeline_cache
-                        .get_or_create(pipeline_desc)
+                        .get_or_create(&format!("pipeline.{}", node.name), device, pipeline_desc)
                         .expect("Failed to create graphics pipeline");
 
                     graphic_pipelines.push(Some(pipeline));
@@ -202,7 +202,7 @@ pub struct CompiledRenderGraph {
 impl CompiledRenderGraph {
     #[profiling::function]
     pub fn execute(&mut self, device: &RenderDevice, cmd_pool: &CommandPool) -> anyhow::Result<()>  {
-        let encoder = CommandEncoder::new(device, cmd_pool)?;
+        let encoder = CommandEncoder::new("cmd.rendergraph.execute", device, cmd_pool)?;
         
         encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
 
@@ -240,7 +240,7 @@ impl CompiledRenderGraph {
             }
         }
 
-        let encoder = CommandEncoder::new(device, cmd_pool)?;
+        let encoder = CommandEncoder::new("cmd.rendergraph.present", device, cmd_pool)?;
         encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
 
         let nodes = std::mem::take(&mut self.present_nodes);
@@ -526,7 +526,7 @@ impl<'node> GraphicNodeExecutionContext<'node> {
 
     pub fn bind_pipeline(&self) {
         if let Some(pipeline) = self.pipeline {
-            self.encoder.bind_graphics_pipeline(pipeline.pipeline());
+            self.encoder.bind_graphics_pipeline(pipeline.handle());
         }
     }
 
@@ -607,12 +607,16 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     /// Create a shader resource binder for this node's pipeline.
     /// Returns None if the pipeline has no descriptor bindings.
     pub fn create_binder(&self) -> DescriptorSetBinder<'_> {
-        DescriptorSetBinder::new(self.device, &self.pipeline_desc.shader.merged_reflection).unwrap()
+        DescriptorSetBinder::new(
+            self.device,
+            self.pipeline.unwrap(),
+            &self.pipeline_desc.shader.merged_reflection
+        ).unwrap()
     }
 
     /// Bind descriptor sets to the pipeline.
     pub fn bind_descriptor_sets(&self, binder: DescriptorSetBinder) {
-        let (pool, sets) = binder.finish(&self.pipeline_desc.shader.descriptor_set_layouts);
+        let (pool, sets) = binder.finish();
         if let Some(pipeline) = self.pipeline {
             if !sets.is_empty() {
                 self.encoder.bind_descriptor_sets(

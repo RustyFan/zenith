@@ -51,6 +51,7 @@ impl TriangleRenderer {
 
         // Load HLSL shaders from files
         let vertex_shader = Shader::from_hlsl_file(
+            "shader.triangle.vs",
             &device,
             "content/shaders/triangle.vs.hlsl",
             "main",
@@ -59,6 +60,7 @@ impl TriangleRenderer {
         )?;
 
         let fragment_shader = Shader::from_hlsl_file(
+            "shader.triangle.ps",
             &device,
             "content/shaders/triangle.ps.hlsl",
             "main",

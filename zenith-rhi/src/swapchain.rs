@@ -6,9 +6,10 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 use zenith_core::log::info;
 use anyhow::{anyhow, Result};
-use ash::vk::{Handle};
 use zenith_rhi_derive::DeviceObject;
 use crate::{RhiCore, RenderDevice, Texture, Queue, Fence, Semaphore, NUM_BACK_BUFFERS};
+use crate::device::DebuggableObject;
+use crate::device::set_debug_name_handle;
 
 #[derive(Clone)]
 pub struct SwapchainWindow {
@@ -86,6 +87,7 @@ pub struct FrameSync<'a> {
 /// Vulkan swapchain management.
 #[DeviceObject]
 pub struct Swapchain {
+    name: String,
     physical_device: vk::PhysicalDevice,
     window: SwapchainWindow,
 
@@ -119,6 +121,7 @@ impl Drop for Swapchain {
 impl Swapchain {
     #[profiling::function]
     pub fn new(
+        name: &str,
         core: &RhiCore,
         device: &RenderDevice,
         window: SwapchainWindow,
@@ -164,9 +167,10 @@ impl Swapchain {
         let images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
         let mut textures = Vec::with_capacity(images.len());
 
-        for image in images.iter() {
+        for (idx, image) in images.iter().enumerate() {
             let texture = Texture::from_swapchain_image(
-                device.handle(),
+                device,
+                format!("swapchain.backbuffer.f{idx}"),
                 image.clone(),
                 format.format,
                 extent.clone(),
@@ -175,9 +179,11 @@ impl Swapchain {
         }
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) =
-            create_sync_objects(device.handle(), images.len())?;
+            create_sync_objects(device, images.len())?;
 
+        set_debug_name_handle(device, swapchain, vk::ObjectType::SWAPCHAIN_KHR, name);
         Ok(Swapchain {
+            name: name.to_owned(),
             physical_device: physical_device.handle(),
             window,
             swapchain_loader,
@@ -193,6 +199,12 @@ impl Swapchain {
             device: device.handle().clone(),
         })
     }
+
+    #[inline]
+    pub fn name(&self) -> &str { &self.name }
+
+    #[inline]
+    pub fn handle(&self) -> vk::SwapchainKHR { self.swapchain }
 
     #[profiling::function]
     pub fn acquire_next_image(&mut self, device: &Device) -> Result<(u32, bool), vk::Result> {
@@ -260,8 +272,8 @@ impl Swapchain {
         }
     }
 
-    pub fn resize(&mut self, extent: vk::Extent2D) -> Result<()> {
-        unsafe { self.device.device_wait_idle()?; }
+    pub fn resize(&mut self, device: &RenderDevice, extent: vk::Extent2D) -> Result<()> {
+        device.wait_until_idle()?;
 
         // re-query surface capabilities as they may have changed
         let capabilities = unsafe {
@@ -286,9 +298,10 @@ impl Swapchain {
         let images = unsafe { self.swapchain_loader.get_swapchain_images(swapchain)? };
         let mut textures = Vec::with_capacity(images.len());
 
-        for image in images.iter() {
+        for (idx, image) in images.iter().enumerate() {
             let texture = Texture::from_swapchain_image(
-                &self.device,
+                &device,
+                format!("swapchain.backbuffer.f{idx}"),
                 image.clone(),
                 self.format.format,
                 extent.clone(),
@@ -297,7 +310,7 @@ impl Swapchain {
         }
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) =
-            create_sync_objects(&self.device, images.len())?;
+            create_sync_objects(&device, images.len())?;
 
         self.textures = textures;
         self.image_available_semaphores = image_available_semaphores;
@@ -356,7 +369,7 @@ impl Swapchain {
 
         let swapchain = unsafe { swapchain_loader.create_swapchain(&create_info, None)? };
 
-        if !old_swapchain.is_null() {
+        if old_swapchain != vk::SwapchainKHR::null() {
             unsafe {
                 swapchain_loader.destroy_swapchain(old_swapchain, None);
             }
@@ -388,6 +401,12 @@ impl Swapchain {
 
     pub fn window(&self) -> &SwapchainWindow {
         &self.window
+    }
+}
+
+impl DebuggableObject for Swapchain {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(device, self.swapchain, vk::ObjectType::SWAPCHAIN_KHR, self.name());
     }
 }
 
@@ -440,7 +459,7 @@ fn get_swapchain_extent(
 }
 
 fn create_sync_objects(
-    device: &Device,
+    device: &RenderDevice,
     count: usize,
 ) -> Result<(Vec<Semaphore>, Vec<Semaphore>, Vec<Fence>), vk::Result> {
     let mut image_available = Vec::with_capacity(count);
@@ -448,9 +467,9 @@ fn create_sync_objects(
     let mut in_flight = Vec::with_capacity(count);
 
     for _ in 0..count {
-        image_available.push(Semaphore::new(device)?);
-        render_finished.push(Semaphore::new(device)?);
-        in_flight.push(Fence::new(device, true)?);
+        image_available.push(Semaphore::new("semaphore.image_available", device)?);
+        render_finished.push(Semaphore::new("semaphore.render_finish", device)?);
+        in_flight.push(Fence::new("fence.swapchain", device, true)?);
     }
 
     Ok((image_available, render_finished, in_flight))

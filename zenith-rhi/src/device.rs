@@ -7,8 +7,65 @@ use crate::queue::Queue;
 use crate::synchronization::{Fence, Semaphore};
 use ash::{vk, Device, Instance};
 use std::cell::RefCell;
+#[cfg(feature = "validation")]
+use std::ffi::CString;
+use std::default::Default;
 use zenith_core::collections::{SmallVec, hashset::HashSet};
 use crate::CommandEncoder;
+
+#[cfg(feature = "validation")]
+fn set_debug_name_raw(
+    debug_utils: &ash::ext::debug_utils::Device,
+    object_handle: u64,
+    object_type: vk::ObjectType,
+    name: &str,
+) {
+    if name.is_empty() {
+        return;
+    }
+
+    let Ok(c_name) = CString::new(name) else {
+        return;
+    };
+
+    let info = vk::DebugUtilsObjectNameInfoEXT {
+        object_type,
+        object_handle,
+        p_object_name: c_name.as_ptr(),
+        ..Default::default()
+    };
+
+    unsafe {
+        debug_utils.set_debug_utils_object_name(&info).unwrap();
+    }
+}
+
+#[cfg(not(feature = "validation"))]
+#[inline]
+fn set_debug_name_raw(
+    _debug_utils: &ash::ext::debug_utils::Device,
+    _object_handle: u64,
+    _object_type: vk::ObjectType,
+    _name: &str,
+) {
+}
+
+/// Set debug name for a raw Vulkan handle (best-effort, no-op without validation).
+pub(crate) fn set_debug_name_handle<T: vk::Handle>(
+    device: &RenderDevice,
+    object: T,
+    object_type: vk::ObjectType,
+    name: &str,
+) {
+    #[cfg(feature = "validation")]
+    {
+        set_debug_name_raw(&device.debug_utils, object.as_raw(), object_type, name);
+    }
+    #[cfg(not(feature = "validation"))]
+    {
+        let _ = (device, object, object_type, name);
+    }
+}
 
 /// Get required device extensions.
 fn get_required_device_extensions() -> Vec<*const i8> {
@@ -19,6 +76,8 @@ fn get_required_device_extensions() -> Vec<*const i8> {
 pub struct RenderDevice {
     parent_physical_device: PhysicalDevice,
     device: Device,
+    #[cfg(feature = "validation")]
+    debug_utils: ash::ext::debug_utils::Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
@@ -78,38 +137,49 @@ impl RenderDevice {
             .push_next(&mut vulkan_13_features);
 
         let device = unsafe { instance.create_device(physical_device.handle(), &create_info, None)? };
+        #[cfg(feature = "validation")]
+        let debug_utils = ash::ext::debug_utils::Device::new(instance, &device);
 
         let graphics_queue = unsafe { device.get_device_queue(physical_device.graphics_queue_family(), 0) };
         let present_queue = unsafe { device.get_device_queue(physical_device.present_queue_family(), 0) };
-
-        let mut frame_resource_fences = Vec::with_capacity(num_frames as usize);
-        let mut defer_release_queues = Vec::with_capacity(num_frames as usize);
-
-        for _ in 0..num_frames {
-            frame_resource_fences.push(Fence::new(&device, true)?);
-            defer_release_queues.push(
-                DeferReleaseQueue::new()
-            );
-        }
+        
         let resource_caches: Vec<ResourceCache> =
             (0..num_frames as usize).map(|_| ResourceCache::default()).collect();
 
-        Ok(Self {
+        let mut device = Self {
             parent_physical_device: physical_device.clone(),
             device,
+            #[cfg(feature = "validation")]
+            debug_utils,
             graphics_queue,
             present_queue,
-            frame_resource_fences,
-            defer_release_queues: RefCell::new(defer_release_queues),
+            frame_resource_fences: Vec::with_capacity(num_frames as usize),
+            defer_release_queues: RefCell::new(Vec::with_capacity(num_frames as usize)),
             resource_caches,
             current_frame: 0,
-        })
+        };
+
+        for _ in 0..num_frames {
+            device.frame_resource_fences.push(Fence::new("fence.execution", &device, true)?);
+            device.defer_release_queues.borrow_mut().push(
+                DeferReleaseQueue::new()
+            );
+        }
+
+        set_debug_name_handle(&device, device.handle().handle(), vk::ObjectType::DEVICE, "device.main");
+        Ok(device)
     }
 
     /// Get a reference to the logical device.
     #[inline]
     pub fn handle(&self) -> &Device {
         &self.device
+    }
+
+    /// Set debug name for a zenith-rhi wrapper object (best-effort, no-op without validation).
+    #[inline]
+    pub(crate) fn set_debug_name<T: DebuggableObject>(&self, obj: &T) {
+        obj.set_debug_name(self)
     }
 
     pub fn begin_frame(&mut self) -> usize {
@@ -288,7 +358,6 @@ impl Drop for RenderDevice {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) mod sealed {
     pub trait Sealed {}
 }
@@ -296,8 +365,14 @@ pub(crate) mod sealed {
 /// Crate-only trait for objects that own an `ash::Device` used for destruction and device calls.
 ///
 /// This trait is sealed and not visible to users of `zenith-rhi`.
-#[allow(dead_code)]
-pub(crate) trait DeviceObject: sealed::Sealed {
+pub trait DeviceObject: sealed::Sealed {
     fn device(&self) -> &Device;
-    fn set_device(&mut self, device: Device);
+}
+
+/// Crate-only trait for objects that can name their Vulkan resources.
+///
+/// This is used by `RenderDevice::set_debug_name(&T)` to delegate debug-name work to the object
+/// itself (so it can also name sub-resources like `vk::DeviceMemory`).
+pub(crate) trait DebuggableObject {
+    fn set_debug_name(&self, device: &RenderDevice);
 }

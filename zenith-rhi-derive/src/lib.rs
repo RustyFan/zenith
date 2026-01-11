@@ -51,9 +51,6 @@ pub fn DeviceObject(_attr: TokenStream, item: TokenStream) -> TokenStream {
         impl #impl_generics crate::device::DeviceObject for #ident #ty_generics #where_clause {
             #[inline]
             fn device(&self) -> &::ash::Device { &self.device }
-
-            #[inline]
-            fn set_device(&mut self, device: ::ash::Device) { self.device = device; }
         }
     };
 

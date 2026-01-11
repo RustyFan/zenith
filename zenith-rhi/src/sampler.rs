@@ -2,6 +2,9 @@
 
 use ash::{vk};
 use zenith_rhi_derive::DeviceObject;
+use crate::{RenderDevice};
+use crate::device::DebuggableObject;
+use crate::device::set_debug_name_handle;
 
 /// Sampler configuration.
 #[derive(Debug, Clone)]
@@ -82,12 +85,13 @@ impl SamplerConfig {
 /// Vulkan sampler for texture sampling.
 #[DeviceObject]
 pub struct Sampler {
+    name: String,
     sampler: vk::Sampler,
 }
 
 impl Sampler {
     /// Create a new sampler with the given configuration.
-    pub fn new(device: &ash::Device, config: &SamplerConfig) -> Result<Self, vk::Result> {
+    pub fn new(name: &str, device: &ash::Device, config: &SamplerConfig) -> Result<Self, vk::Result> {
         let create_info = vk::SamplerCreateInfo::default()
             .mag_filter(config.mag_filter)
             .min_filter(config.min_filter)
@@ -108,10 +112,14 @@ impl Sampler {
         let sampler = unsafe { device.create_sampler(&create_info, None)? };
 
         Ok(Self {
+            name: name.to_owned(),
             sampler,
             device: device.clone(),
         })
     }
+
+    #[inline]
+    pub fn name(&self) -> &str { &self.name }
 
     /// Get the raw Vulkan sampler handle.
     pub fn handle(&self) -> vk::Sampler {
@@ -124,5 +132,11 @@ impl Drop for Sampler {
         unsafe {
             self.device.destroy_sampler(self.sampler, None);
         }
+    }
+}
+
+impl DebuggableObject for Sampler {
+    fn set_debug_name(&self, device: &RenderDevice) {
+        set_debug_name_handle(device, self.sampler, vk::ObjectType::SAMPLER, self.name());
     }
 }
