@@ -2,7 +2,7 @@
 
 use crate::core::PhysicalDevice;
 use crate::defer_release::{DeferRelease, DeferReleaseQueue};
-use crate::resource_cache::ResourceCache;
+use crate::resource_cache::TransientResourceCache;
 use crate::queue::Queue;
 use crate::synchronization::{Fence, Semaphore};
 use ash::{vk, Device, Instance};
@@ -12,6 +12,8 @@ use std::ffi::CString;
 use std::default::Default;
 use zenith_core::collections::{SmallVec, hashset::HashSet};
 use crate::CommandEncoder;
+use crate::bindless::BindlessCaps;
+use crate::bindless::BindlessPool;
 
 #[cfg(feature = "validation")]
 fn set_debug_name_raw(
@@ -74,18 +76,20 @@ fn get_required_device_extensions() -> Vec<*const i8> {
 
 /// Vulkan logical device with queues.
 pub struct RenderDevice {
-    parent_physical_device: PhysicalDevice,
+    resource_caches: Vec<TransientResourceCache>,
+    defer_release_queues: RefCell<Vec<DeferReleaseQueue>>,
+    frame_resource_fences: Vec<Fence>,
+    bindless_pool: Option<BindlessPool>,
+
     device: Device,
+    parent_physical_device: PhysicalDevice,
     #[cfg(feature = "validation")]
     debug_utils: ash::ext::debug_utils::Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
-    frame_resource_fences: Vec<Fence>,
-    defer_release_queues: RefCell<Vec<DeferReleaseQueue>>,
-    resource_caches: Vec<ResourceCache>,
-
     current_frame: u8,
+    bindless_caps: BindlessCaps,
 }
 
 impl RenderDevice {
@@ -113,16 +117,62 @@ impl RenderDevice {
 
         let extensions = get_required_device_extensions();
 
+        // --- Bindless / descriptor indexing capability checks (fail-fast) ---
+        let mut desc_index_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+        let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut desc_index_features);
+        unsafe {
+            instance.get_physical_device_features2(physical_device.handle(), &mut features2);
+        }
+
+        let has_bindless =
+            desc_index_features.runtime_descriptor_array == vk::TRUE
+                && desc_index_features.descriptor_binding_partially_bound == vk::TRUE
+                && desc_index_features.descriptor_binding_sampled_image_update_after_bind == vk::TRUE
+                && desc_index_features.descriptor_binding_uniform_buffer_update_after_bind == vk::TRUE
+                && desc_index_features.descriptor_binding_storage_buffer_update_after_bind == vk::TRUE;
+
+        if !has_bindless {
+            return Err(vk::Result::ERROR_FEATURE_NOT_PRESENT);
+        }
+
+        let mut desc_index_props = vk::PhysicalDeviceDescriptorIndexingProperties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut desc_index_props);
+        unsafe {
+            instance.get_physical_device_properties2(physical_device.handle(), &mut props2);
+        }
+
+        // Clamp to the 29-bit index range used by BindlessResourceHandle.
+        const MAX_INDEX_29: u32 = (1u32 << 29) - 1;
+        let clamp29 = |v: u32| v.min(MAX_INDEX_29);
+
+        let bindless_caps = BindlessCaps {
+            max_textures: clamp29(desc_index_props.max_descriptor_set_update_after_bind_sampled_images),
+            max_uniform_buffers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_uniform_buffers),
+            max_storage_buffers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_storage_buffers),
+            max_samplers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_samplers),
+        };
+
+        if bindless_caps.max_textures == 0
+            || bindless_caps.max_uniform_buffers == 0
+            || bindless_caps.max_storage_buffers == 0
+            || bindless_caps.max_samplers == 0
+        {
+            return Err(vk::Result::ERROR_FEATURE_NOT_PRESENT);
+        }
+
         // Enable features
         let features = vk::PhysicalDeviceFeatures::default();
             // .sampler_anisotropy(true)
             // .fill_mode_non_solid(true);
 
-        // Vulkan 1.2 features
-        // let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
-        //     .descriptor_indexing(true)
-        //     .buffer_device_address(true)
-        //     .timeline_semaphore(true);
+        // Vulkan 1.2 features (descriptor indexing is core in 1.2+, but still needs enabling here)
+        let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
+            .descriptor_indexing(true)
+            .runtime_descriptor_array(true)
+            .descriptor_binding_partially_bound(true)
+            .descriptor_binding_sampled_image_update_after_bind(true)
+            .descriptor_binding_uniform_buffer_update_after_bind(true)
+            .descriptor_binding_storage_buffer_update_after_bind(true);
 
         // Vulkan 1.3 features
         let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
@@ -133,7 +183,7 @@ impl RenderDevice {
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extensions)
             .enabled_features(&features)
-            // .push_next(&mut vulkan_12_features)
+            .push_next(&mut vulkan_12_features)
             .push_next(&mut vulkan_13_features);
 
         let device = unsafe { instance.create_device(physical_device.handle(), &create_info, None)? };
@@ -143,8 +193,8 @@ impl RenderDevice {
         let graphics_queue = unsafe { device.get_device_queue(physical_device.graphics_queue_family(), 0) };
         let present_queue = unsafe { device.get_device_queue(physical_device.present_queue_family(), 0) };
         
-        let resource_caches: Vec<ResourceCache> =
-            (0..num_frames as usize).map(|_| ResourceCache::default()).collect();
+        let resource_caches: Vec<TransientResourceCache> =
+            (0..num_frames as usize).map(|_| TransientResourceCache::default()).collect();
 
         let mut device = Self {
             parent_physical_device: physical_device.clone(),
@@ -157,6 +207,8 @@ impl RenderDevice {
             defer_release_queues: RefCell::new(Vec::with_capacity(num_frames as usize)),
             resource_caches,
             current_frame: 0,
+            bindless_caps,
+            bindless_pool: None,
         };
 
         for _ in 0..num_frames {
@@ -165,6 +217,8 @@ impl RenderDevice {
                 DeferReleaseQueue::new()
             );
         }
+
+        device.bindless_pool = Some(BindlessPool::new(&device)?);
 
         set_debug_name_handle(&device, device.handle().handle(), vk::ObjectType::DEVICE, "device.main");
         Ok(device)
@@ -255,12 +309,12 @@ impl RenderDevice {
     }
 
     #[inline]
-    pub fn resource_cache(&self) -> &ResourceCache {
+    pub fn resource_cache(&self) -> &TransientResourceCache {
         &self.resource_caches[self.current_frame as usize]
     }
 
     #[inline]
-    pub fn resource_cache_mut(&mut self) -> &mut ResourceCache {
+    pub fn resource_cache_mut(&mut self) -> &mut TransientResourceCache {
         &mut self.resource_caches[self.current_frame as usize]
     }
 
@@ -276,6 +330,16 @@ impl RenderDevice {
     /// Get the physical device memory properties.
     pub fn memory_properties(&self) -> &vk::PhysicalDeviceMemoryProperties {
         &self.parent_physical_device.memory_properties()
+    }
+
+    #[inline]
+    pub fn bindless_caps(&self) -> &BindlessCaps {
+        &self.bindless_caps
+    }
+
+    #[inline]
+    pub fn bindless_pool(&self) -> &BindlessPool {
+        self.bindless_pool.as_ref().expect("bindless_pool not initialized")
     }
 
     pub fn graphics_queue(&self) -> Queue {
@@ -341,6 +405,8 @@ impl RenderDevice {
 impl Drop for RenderDevice {
     fn drop(&mut self) {
         unsafe { self.device.device_wait_idle().unwrap(); }
+
+        self.bindless_pool = None;
 
         for queue in self.defer_release_queues.get_mut() {
             queue.release_all();

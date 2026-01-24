@@ -159,8 +159,8 @@ impl Hash for BufferDesc {
 /// GPU buffer with memory allocation.
 #[DeviceObject]
 pub struct Buffer {
-    buffer: vk::Buffer,
     desc: BufferDesc,
+    buffer: vk::Buffer,
     memory: vk::DeviceMemory,
 }
 
@@ -199,8 +199,8 @@ impl Buffer {
         log::trace!("new buffer created.");
 
         let buf = Self {
-            buffer,
             desc: desc.clone(),
+            buffer,
             memory,
             device: device.handle().clone(),
         };

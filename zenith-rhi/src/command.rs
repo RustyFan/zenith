@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use ash::{vk};
+use bytemuck::NoUninit;
 use zenith_rhi_derive::DeviceObject;
 use crate::barrier::{BufferBarrier, TextureBarrier, MemoryBarrier};
 use crate::{Queue, RenderDevice};
@@ -177,10 +178,8 @@ impl<'a> CommandEncoder<'a> {
     }
 
     // Push constants
-    pub fn push_constants<T: Copy>(&self, layout: vk::PipelineLayout, stages: vk::ShaderStageFlags, offset: u32, data: &T) {
-        let bytes = unsafe {
-            std::slice::from_raw_parts(data as *const T as *const u8, std::mem::size_of::<T>())
-        };
+    pub fn push_constants<T: NoUninit>(&self, layout: vk::PipelineLayout, stages: vk::ShaderStageFlags, offset: u32, data: &T) {
+        let bytes = bytemuck::cast_slice(std::slice::from_ref(data));
         unsafe { self.device.handle().cmd_push_constants(self.cmd, layout, stages, offset, bytes) }
     }
 

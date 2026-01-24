@@ -1,13 +1,9 @@
-module triangle;
+#include "bindless.slang"
 
 struct VSInput {
     [[vk::location(0)]]
     float3 position : POSITION;
     [[vk::location(1)]]
-    float3 color : COLOR;
-};
-
-struct PSInput {
     float3 color : COLOR;
 };
 
@@ -24,15 +20,30 @@ VSOutput vsmain(VSInput input) {
     return output;
 }
 
+struct PSInput {
+    float3 color : COLOR;
+};
+
+struct PSOutput {
+    float4 output : SV_Target;
+};
+
 struct TimeData {
     float time;
 };
 
-[[vk::binding(0, 0)]]
-ConstantBuffer<TimeData> Time;
+struct PushConstants {
+    uint time;
+};
+
+[[vk::push_constant]]
+ConstantBuffer<PushConstants> constant;
 
 [shader("fragment")]
-float4 psmain(PSInput input) : SV_Target {
-    float3 animated = input.color * (0.5 + 0.5 * sin(Time.time * 3.0 + input.color * 6.28));
-    return float4(animated, 1.0);
+PSOutput psmain(PSInput input) {
+    float time_value = get_bindless_buffer<TimeData>(constant.time).time;
+    float3 animated = input.color * (0.5 + 0.5 * sin(time_value * 3.0 + input.color * 6.28));
+    PSOutput output;
+    output.output = float4(animated, 1.0);
+    return output;
 }

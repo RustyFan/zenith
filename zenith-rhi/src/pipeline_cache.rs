@@ -5,7 +5,7 @@ use ash::{vk};
 use std::sync::Arc;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_rhi_derive::DeviceObject;
-use crate::RenderDevice;
+use crate::{DescriptorSetLayout, RenderDevice};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 
@@ -65,7 +65,23 @@ impl PipelineCache {
             return Ok(cached.clone());
         }
 
-        let pipeline = Arc::new(GraphicPipeline::with_cache(name, device, desc, self.cache)?);
+        let mut descriptor_layouts = Vec::with_capacity(1);
+        descriptor_layouts.push(device.bindless_pool().set_layout().clone());
+
+        let max_set = desc.shader.merged_reflection.max_set().unwrap_or(0);
+        for idx in 1..=max_set {
+            let name = format!("descriptor_layout.s{idx}");
+            let layout = DescriptorSetLayout::from_reflection(&name, device, &desc.shader.merged_reflection.bindings, idx)?;
+            descriptor_layouts.push(Arc::new(layout));
+        }
+
+        let pipeline = Arc::new(GraphicPipeline::with_cache(
+            name,
+            device,
+            desc,
+            self.cache,
+            &descriptor_layouts,
+        )?);
         self.pipelines.insert(desc.clone(), pipeline.clone());
         Ok(pipeline)
     }

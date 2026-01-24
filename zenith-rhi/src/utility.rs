@@ -2,7 +2,7 @@
 use std::ops::RangeBounds;
 use ash::vk;
 
-macro_rules! normalize_range_function {
+macro_rules! gen_normalize_range_func {
     ($unsigned:ty) => {
         $crate::paste! {
             pub(crate) fn [<normalize_range_ $unsigned>]<R: RangeBounds<$unsigned>>(
@@ -33,8 +33,8 @@ macro_rules! normalize_range_function {
     };
 }
 
-normalize_range_function!(u64);
-normalize_range_function!(u32);
+gen_normalize_range_func!(u64);
+gen_normalize_range_func!(u32);
 
 /// Find a suitable memory type index.
 pub(crate) fn find_memory_type(

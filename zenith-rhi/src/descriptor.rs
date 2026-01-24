@@ -103,6 +103,60 @@ impl DescriptorSetLayout {
         Ok(layout)
     }
 
+    /// Create a new descriptor set layout with explicit Vulkan flags and per-binding flags.
+    ///
+    /// This is required for bindless layouts (descriptor indexing) such as UPDATE_AFTER_BIND.
+    pub fn new_with_flags(
+        name: &str,
+        device: &RenderDevice,
+        bindings: &[LayoutBinding],
+        layout_flags: vk::DescriptorSetLayoutCreateFlags,
+        binding_flags: &[vk::DescriptorBindingFlags],
+    ) -> Result<Self, vk::Result> {
+        assert_eq!(
+            bindings.len(),
+            binding_flags.len(),
+            "binding_flags must match bindings length"
+        );
+
+        let vk_bindings: Vec<vk::DescriptorSetLayoutBinding> = bindings
+            .iter()
+            .map(|b| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(b.binding)
+                    .descriptor_type(b.descriptor_type)
+                    .descriptor_count(b.count)
+                    .stage_flags(b.stage_flags)
+            })
+            .collect();
+
+        let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
+            .binding_flags(binding_flags);
+
+        let create_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&vk_bindings)
+            .flags(layout_flags)
+            .push_next(&mut flags_info);
+
+        let layout = unsafe { device.handle().create_descriptor_set_layout(&create_info, None)? };
+
+        let binding_map: HashMap<u32, usize> = bindings
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.binding, i))
+            .collect();
+
+        let layout = Self {
+            name: name.to_owned(),
+            layout,
+            bindings: bindings.to_vec(),
+            binding_map,
+            device: device.handle().clone(),
+        };
+        device.set_debug_name(&layout);
+        Ok(layout)
+    }
+
     /// Create a descriptor set layout from shader reflection for a specific set index.
     pub fn from_reflection(
         name: &str,
@@ -196,6 +250,31 @@ impl DescriptorPool {
         Ok(pool)
     }
 
+    /// Create a new descriptor pool with explicit Vulkan flags (e.g. UPDATE_AFTER_BIND).
+    pub fn new_with_flags(
+        name: &str,
+        device: &RenderDevice,
+        max_sets: u32,
+        pool_sizes: &[vk::DescriptorPoolSize],
+        pool_flags: vk::DescriptorPoolCreateFlags,
+    ) -> Result<Self, vk::Result> {
+        let create_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(pool_flags)
+            .max_sets(max_sets)
+            .pool_sizes(pool_sizes);
+
+        let pool = unsafe { device.handle().create_descriptor_pool(&create_info, None)? };
+
+        let pool = Self {
+            name: name.to_owned(),
+            pool,
+            max_sets,
+            device: device.handle().clone(),
+        };
+        device.set_debug_name(&pool);
+        Ok(pool)
+    }
+
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
@@ -211,25 +290,6 @@ impl DescriptorPool {
         let sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info)? };
         Ok(sets[0])
     }
-
-    /// Allocate multiple descriptor sets with the same layout.
-    pub fn allocate_many(
-        &self,
-        layout: &DescriptorSetLayout,
-        count: u32,
-    ) -> Result<Vec<vk::DescriptorSet>, vk::Result> {
-        let layouts: Vec<vk::DescriptorSetLayout> = (0..count).map(|_| layout.handle()).collect();
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(self.pool)
-            .set_layouts(&layouts);
-
-        unsafe { self.device.allocate_descriptor_sets(&alloc_info) }
-    }
-
-    // /// Free a descriptor set back to the pool.
-    // pub fn free(&self, set: vk::DescriptorSet) -> Result<(), vk::Result> {
-    //     unsafe { self.device.free_descriptor_sets(self.pool, &[set]) }
-    // }
 
     /// Reset the pool, freeing all allocated descriptor sets.
     pub fn reset(&self) -> Result<(), vk::Result> {
@@ -395,8 +455,8 @@ impl<'a> DescriptorSetBinder<'a> {
     }
 
     /// Finish binding and return the descriptor sets for binding to the pipeline.
-    pub fn finish(self) -> (DescriptorPool, Vec<vk::DescriptorSet>) {
-        let pool_sizes = self.resource_ty_sizes.into_iter()
+    pub fn finish(self, device: &RenderDevice) -> Vec<vk::DescriptorSet> {
+         let pool_sizes = self.resource_ty_sizes.into_iter()
             .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
                 ty,
                 descriptor_count,
@@ -409,6 +469,7 @@ impl<'a> DescriptorSetBinder<'a> {
                 pool.allocate(layout).map_err(ShaderBindingError::AllocationFailed).unwrap()
             })
             .collect::<Vec<_>>();
+        device.defer_release(pool);
 
         let mut buffer_infos: SmallVec<[vk::DescriptorBufferInfo; 8]> = SmallVec::new();
         let mut image_infos: SmallVec<[vk::DescriptorImageInfo; 8]> = SmallVec::new();
@@ -451,6 +512,6 @@ impl<'a> DescriptorSetBinder<'a> {
             }
         }
 
-        (pool, descriptor_sets)
+        descriptor_sets
     }
 }

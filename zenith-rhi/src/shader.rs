@@ -1,7 +1,6 @@
 //! Vulkan Shader - HLSL compilation and SPIR-V reflection.
 
 use ash::{vk, Device};
-// use hassle_rs::HassleError;
 use rspirv_reflect::{Reflection, DescriptorType, BindingCount};
 use std::ffi::CString;
 use std::collections::HashMap;
@@ -35,7 +34,37 @@ pub struct Shader {
 }
 
 impl Shader {
+    /// Create a shader from an HLSL file.
     pub fn from_file(
+        name: &str,
+        device: &RenderDevice,
+        path: impl AsRef<std::path::Path>,
+        entry_point: &str,
+        stage: ShaderStage,
+        shader_model: ShaderModel,
+    ) -> Result<Self, ShaderError> {
+        let _ = shader_model;
+        let path = path.as_ref();
+        Self::from_slang_file(name, device, path, entry_point, stage)
+    }
+
+    /// Create a shader from HLSL source code.
+    pub fn from_hlsl(
+        name: &str,
+        _device: &RenderDevice,
+        source: &str,
+        _entry_point: &str,
+        _stage: ShaderStage,
+        shader_model: ShaderModel,
+    ) -> Result<Self, ShaderError> {
+        let _ = (source, shader_model);
+        Err(ShaderError::CompilationFailed(format!(
+            "[{name}] HLSL source compilation is disabled; use Slang files"
+        )))
+    }
+
+    /// Create a shader from a Slang `.slang` file.
+    pub fn from_slang_file(
         name: &str,
         device: &RenderDevice,
         path: &Path,
@@ -334,7 +363,7 @@ fn compile_slang_file_to_spirv_cli(
     cmd.arg(path)
         .arg("-target")
         .arg("spirv")
-        .arg("-profile")
+        .arg("-capability")
         .arg("spirv_1_6")
         .arg("-fvk-use-entrypoint-name")
         .arg("-entry")
@@ -764,20 +793,3 @@ fn create_shader_module(device: &Device, spirv: &[u8]) -> Result<vk::ShaderModul
 
     Ok(module)
 }
-
-// /// Create all descriptor set layouts from shader reflection.
-// pub(crate) fn create_layouts_from_reflection(
-//     device: &Device,
-//     reflection: &ShaderReflection,
-// ) -> Result<Vec<Arc<DescriptorSetLayout>>, vk::Result> {
-//     let max_set = reflection.max_set().unwrap_or(0);
-//     let mut layouts = Vec::with_capacity((max_set + 1) as usize);
-//
-//     for set_index in 0..=max_set {
-//         let name = format!("descriptor_set_layout[{set_index}]");
-//         let layout = DescriptorSetLayout::from_reflection(&name, device, &reflection.bindings, set_index)?;
-//         layouts.push(Arc::new(layout));
-//     }
-//
-//     Ok(layouts)
-// }

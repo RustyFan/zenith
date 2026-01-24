@@ -108,7 +108,7 @@ impl GraphicShaderInput {
         })
     }
 
-    pub fn create_pipeline_layout(&self, device: &RenderDevice, layouts: &[DescriptorSetLayout]) -> Result<vk::PipelineLayout, vk::Result> {
+    pub fn create_pipeline_layout(&self, device: &RenderDevice, layouts: &[vk::DescriptorSetLayout]) -> Result<vk::PipelineLayout, vk::Result> {
         let push_constant_ranges = if self.push_constant_size > 0 {
             vec![vk::PushConstantRange {
                 stage_flags: vk::ShaderStageFlags::ALL_GRAPHICS,
@@ -119,9 +119,7 @@ impl GraphicShaderInput {
             vec![]
         };
 
-        let layouts = layouts.iter()
-            .map(|layout| layout.handle())
-            .collect::<SmallVec<[_; 3]>>();
+        let layouts = layouts.iter().copied().collect::<SmallVec<[_; 3]>>();
 
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
@@ -933,17 +931,14 @@ impl CommonPipeline {
         device: &RenderDevice,
         desc: &GraphicPipelineDesc,
         cache: vk::PipelineCache,
-    ) -> Result<(Vec<DescriptorSetLayout>, Self), vk::Result> {
-        let max_set = desc.shader.merged_reflection.max_set().unwrap_or(0);
+        descriptor_layouts: &[&DescriptorSetLayout],
+    ) -> Result<Self, vk::Result> {
+        let layout_handles = descriptor_layouts
+            .iter()
+            .map(|l| l.handle())
+            .collect::<SmallVec<[_; 3]>>();
 
-        let layouts = (0..=max_set).into_iter()
-            .map(|idx| {
-                let name = format!("descriptor_layout.s{idx}");
-                DescriptorSetLayout::from_reflection(&name, device, &desc.shader.merged_reflection.bindings, idx)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let layout = desc.shader.create_pipeline_layout(device, &layouts)?;
+        let layout = desc.shader.create_pipeline_layout(device, &layout_handles)?;
 
         // Build shader stages (fragment shader is optional)
         let mut shader_stages = Vec::with_capacity(if desc.shader.fragment_shader.is_some() { 2 } else { 1 });
@@ -1048,7 +1043,7 @@ impl CommonPipeline {
             device: device.handle().clone(),
         };
         device.set_debug_name(&pipeline);
-        Ok((layouts, pipeline))
+        Ok(pipeline)
     }
 
     #[inline]
@@ -1085,7 +1080,7 @@ impl DebuggableObject for CommonPipeline {
 /// Graphics pipeline using dynamic rendering (Vulkan 1.3+).
 pub struct GraphicPipeline {
     pipeline: CommonPipeline,
-    pub(crate) descriptor_layouts: Vec<DescriptorSetLayout>,
+    pub(crate) descriptor_layouts: Vec<Arc<DescriptorSetLayout>>,
 }
 
 impl GraphicPipeline {
@@ -1094,8 +1089,9 @@ impl GraphicPipeline {
         name: &str,
         device: &RenderDevice,
         desc: &GraphicPipelineDesc,
+        descriptor_layouts: &[Arc<DescriptorSetLayout>],
     ) -> Result<Self, vk::Result> {
-        Self::with_cache(name, device, desc, vk::PipelineCache::null())
+        Self::with_cache(name, device, desc, vk::PipelineCache::null(), descriptor_layouts)
     }
 
     /// Create a new graphics pipeline with a pipeline cache.
@@ -1104,10 +1100,12 @@ impl GraphicPipeline {
         device: &RenderDevice,
         desc: &GraphicPipelineDesc,
         cache: vk::PipelineCache,
+        descriptor_layouts: &[Arc<DescriptorSetLayout>],
     ) -> Result<Self, vk::Result> {
-        let (layouts, pipeline) = CommonPipeline::new_graphic(name, device, desc, cache)?;
+        let descriptor_layout_refs = descriptor_layouts.iter().map(|l| l.as_ref()).collect::<Vec<_>>();
+        let pipeline = CommonPipeline::new_graphic(name, device, desc, cache, &descriptor_layout_refs)?;
         Ok(Self {
-            descriptor_layouts: layouts,
+            descriptor_layouts: descriptor_layouts.into(),
             pipeline
         })
     }

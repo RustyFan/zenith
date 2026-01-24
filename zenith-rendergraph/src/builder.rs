@@ -18,7 +18,6 @@ pub(crate) struct ResourceAccessStorage {
     pub(crate) stage_hint: Option<vk::PipelineStageFlags2>,
 }
 
-#[derive(Default)]
 pub struct RenderGraphBuilder {
     nodes: Vec<RenderGraphNode>,
     pub(crate) initial_resources: Vec<InitialResourceStorage>,
@@ -28,7 +27,11 @@ pub struct RenderGraphBuilder {
 
 impl RenderGraphBuilder {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            nodes: Vec::new(),
+            initial_resources: Vec::new(),
+            export_resources: Vec::new(),
+        }
     }
 
     #[must_use]

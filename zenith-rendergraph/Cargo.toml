@@ -9,6 +9,7 @@ derive_more.workspace = true
 log.workspace = true
 derive_builder.workspace = true
 profiling.workspace = true
+bytemuck.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-rhi = { path = "../zenith-rhi" }

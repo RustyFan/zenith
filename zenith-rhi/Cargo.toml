@@ -18,6 +18,7 @@ paste.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-rhi-derive = { path = "../zenith-rhi-derive" }
+bytemuck.workspace = true
 
 [features]
 default = ["validation"]

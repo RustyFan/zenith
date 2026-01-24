@@ -2,12 +2,12 @@ use crate::{vk, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc};
 use std::collections::HashMap;
 
 #[derive(Default)]
-pub struct ResourceCache {
+pub struct TransientResourceCache {
     available_buffers: HashMap<BufferDesc, Vec<Buffer>>,
     available_textures: HashMap<TextureDesc, Vec<Texture>>,
 }
 
-impl ResourceCache {
+impl TransientResourceCache {
     pub(crate) fn pop_buffer(&mut self, desc: &BufferDesc) -> Option<Buffer> {
         self.available_buffers.get_mut(desc).and_then(|list| list.pop())
     }

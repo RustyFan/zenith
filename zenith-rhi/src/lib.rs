@@ -20,6 +20,7 @@ mod defer_release;
 mod barrier;
 mod synchronization;
 mod utility;
+pub mod bindless;
 
 pub(crate) use paste::paste;
 
@@ -48,7 +49,7 @@ pub use pipeline::{
     VertexAttribute, VertexBinding, VertexLayout,
 };
 pub use pipeline_cache::{PipelineCache, PipelineCacheStats};
-pub use resource_cache::ResourceCache;
+pub use resource_cache::TransientResourceCache;
 pub use sampler::{Sampler, SamplerConfig};
 pub use shader::{
     reflect_spirv, Shader, ShaderBinding, ShaderError, ShaderReflection, ShaderStage,
@@ -65,3 +66,7 @@ pub use synchronization::{Semaphore, Fence};
 pub use upload::UploadPool;
 
 pub use defer_release::{DeferRelease, LastFreedStats};
+
+pub use bindless::{
+    BindlessCaps, BindlessPool, BindlessResourceHandle, ResourceType,
+};
