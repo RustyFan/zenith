@@ -7,7 +7,6 @@ use zenith_rendergraph::{
     GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
 };
 use zenith_rhi::pipeline::RasterizationStateBuilder;
-use zenith_rhi::shader::ShaderModel;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
@@ -49,14 +48,12 @@ impl TriangleRenderer {
             upload_pool.flush(&immediate, device)?;
         }
 
-        // Load Slang shaders from files
         let vertex_shader = Shader::from_file(
             "shader.triangle.vs",
             &device,
             "content/shaders/triangle.slang",
             "vsmain",
             zenith_rhi::ShaderStage::Vertex,
-            ShaderModel::SM6,
         )?;
 
         let fragment_shader = Shader::from_file(
@@ -65,7 +62,6 @@ impl TriangleRenderer {
             "content/shaders/triangle.slang",
             "psmain",
             zenith_rhi::ShaderStage::Fragment,
-            ShaderModel::SM6,
         )?;
 
         Ok(Self {
@@ -131,7 +127,7 @@ impl TriangleRenderer {
             let extent = vk::Extent2D { width, height };
             let encoder = ctx.encoder();
 
-            // Update time buffer
+            // update time buffer
             let elapsed_bytes = bytemuck::bytes_of(&elapsed);
             let time_buffer = ctx.get(&tb)
                 .as_range(0..(elapsed_bytes.len() as u64))
@@ -140,6 +136,7 @@ impl TriangleRenderer {
             time_buffer.write(elapsed_bytes)
                 .map_err(|e| anyhow::anyhow!("failed to write time buffer: {:?}", e))?;
 
+            // upload to bindless pool
             let mut binder = ctx.create_bindless_binder();
             let time_handle = binder.bind(time_buffer)?;
             binder.finish();

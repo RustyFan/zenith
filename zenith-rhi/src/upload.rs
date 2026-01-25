@@ -28,7 +28,7 @@ pub struct UploadPool<'a> {
 
 impl<'a> UploadPool<'a> {
     pub fn new(device: &RenderDevice, staging_size: vk::DeviceSize) -> Result<Self, vk::Result> {
-        let staging = Buffer::new(device, &BufferDesc::staging("upload_pool_staging", staging_size))?;
+        let staging = Buffer::new(device, &BufferDesc::staging("upload_pool.staging", staging_size))?;
         Ok(Self {
             staging,
             staging_size,
@@ -37,22 +37,10 @@ impl<'a> UploadPool<'a> {
         })
     }
 
+    #[inline]
     pub fn staging_size(&self) -> vk::DeviceSize { self.staging_size }
 
-    /// Enqueue an upload into `dst` at `dst_offset`.
-    ///
-    /// If the staging buffer doesn't have enough remaining space, the upload is rejected;
-    /// call `flush()` first and retry.
     pub fn enqueue_copy(
-        &mut self,
-        dst: BufferRange<'a>,
-        data: &[u8],
-        final_state: BufferState,
-    ) -> Result<(), vk::Result> {
-        self.enqueue_buffer_ex(dst, data, final_state)
-    }
-
-    pub fn enqueue_buffer_ex(
         &mut self,
         dst: BufferRange<'a>,
         data: &[u8],
@@ -86,6 +74,7 @@ impl<'a> UploadPool<'a> {
         Ok(())
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool { self.pending.is_empty() }
 
     /// Flush all pending uploads using an immediate submit, blocking until completion.
@@ -188,5 +177,3 @@ impl<'a> UploadPool<'a> {
         self.flush(immediate, device)
     }
 }
-
-

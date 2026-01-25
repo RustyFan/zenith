@@ -19,32 +19,22 @@ use crate::utility::{find_memory_type, normalize_range_u32};
 #[derive(Debug, Clone)]
 pub struct TextureDesc {
     pub name: String,
-    /// Image format.
     pub format: vk::Format,
-    /// Image extent (width, height, depth).
     pub extent: vk::Extent3D,
-    /// Image usage flags.
     pub usage: vk::ImageUsageFlags,
-    /// Memory property flags for allocation.
     pub memory_flags: vk::MemoryPropertyFlags,
-    /// Image type (1D, 2D, 3D).
     pub image_type: vk::ImageType,
-    /// Image view type.
     pub view_type: vk::ImageViewType,
-    /// Number of mip levels.
     pub mip_levels: u32,
-    /// Number of array layers.
     pub array_layers: u32,
-    /// Sample count for multisampling.
     pub samples: vk::SampleCountFlags,
-    /// Image tiling mode.
     pub tiling: vk::ImageTiling,
 }
 
 impl Default for TextureDesc {
     fn default() -> Self {
         Self {
-            name: "Unnamed texture".to_owned(),
+            name: "unnamed_texture".to_owned(),
             format: vk::Format::R8G8B8A8_UNORM,
             extent: vk::Extent3D {
                 width: 1,
@@ -408,7 +398,7 @@ impl Texture {
         })
     }
 
-    /// Get the raw Vulkan image handle.
+    #[inline]
     pub fn handle(&self) -> vk::Image {
         self.image
     }
@@ -423,42 +413,37 @@ impl Texture {
         &self.desc
     }
 
-    /// Get the texture format.
     #[inline]
     pub fn format(&self) -> vk::Format {
         self.desc.format
     }
 
-    /// Get the texture extent.
     #[inline]
     pub fn extent(&self) -> vk::Extent3D {
         self.desc.extent
     }
 
-    /// Get the texture width.
     #[inline]
     pub fn width(&self) -> u32 {
         self.desc.extent.width
     }
 
-    /// Get the texture height.
     #[inline]
     pub fn height(&self) -> u32 {
         self.desc.extent.height
     }
 
-    /// Get the texture usage flags.
     #[inline]
     pub fn usage(&self) -> vk::ImageUsageFlags {
         self.desc.usage
     }
 
-    /// Get the aspect flags for this texture based on its format.
     #[inline]
     pub fn aspect(&self) -> vk::ImageAspectFlags {
         format_to_aspect_mask(self.desc.format)
     }
-    
+
+    #[inline]
     pub fn is_swapchain_texture(&self) -> bool {
         self.memory == vk::DeviceMemory::null() 
     }

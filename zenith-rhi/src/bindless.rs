@@ -176,33 +176,29 @@ impl BindlessPool {
                 descriptor_type: vk::DescriptorType::SAMPLED_IMAGE,
                 count: caps.max_textures,
                 stage_flags: vk::ShaderStageFlags::ALL,
+                binding_flags: vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
             },
             LayoutBinding {
                 binding: ResourceType::Buffer as u32,
                 descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                 count: caps.max_storage_buffers,
                 stage_flags: vk::ShaderStageFlags::ALL,
+                binding_flags: vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
             },
             LayoutBinding {
                 binding: ResourceType::Sampler as u32,
                 descriptor_type: vk::DescriptorType::SAMPLER,
                 count: caps.max_samplers,
                 stage_flags: vk::ShaderStageFlags::ALL,
+                binding_flags: vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
             },
         ];
 
-        let binding_flags = [
-            vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
-            vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
-            vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
-        ];
-
-        let set_layout = DescriptorSetLayout::new_with_flags(
+        let set_layout = DescriptorSetLayout::new(
             "layout.bindless",
             device,
             &bindings,
             vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
-            &binding_flags,
         )?;
         let set_layout = Arc::new(set_layout);
 
@@ -212,7 +208,7 @@ impl BindlessPool {
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: caps.max_samplers },
         ];
 
-        let pool = DescriptorPool::new_with_flags(
+        let pool = DescriptorPool::new(
             "pool.bindless",
             device,
             1,

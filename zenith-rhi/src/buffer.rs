@@ -199,7 +199,7 @@ impl Buffer {
         // Bind memory to buffer
         unsafe { device.handle().bind_buffer_memory(buffer, memory, 0)? };
 
-        log::trace!("new buffer created.");
+        log::trace!("Buffer [{}] created.", desc.name);
 
         let buf = Self {
             desc: desc.clone(),
@@ -259,7 +259,7 @@ impl Drop for Buffer {
             self.device.free_memory(self.memory, None);
         }
 
-        log::trace!("buffer destroyed.");
+        log::trace!("Buffer [{}] destroyed.", self.desc.name);
     }
 }
 

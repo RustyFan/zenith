@@ -8,10 +8,12 @@ pub struct TransientResourceCache {
 }
 
 impl TransientResourceCache {
+    #[inline]
     pub(crate) fn pop_buffer(&mut self, desc: &BufferDesc) -> Option<Buffer> {
         self.available_buffers.get_mut(desc).and_then(|list| list.pop())
     }
 
+    #[inline]
     pub(crate) fn pop_texture(&mut self, desc: &TextureDesc) -> Option<Texture> {
         self.available_textures.get_mut(desc).and_then(|list| list.pop())
     }
@@ -46,10 +48,12 @@ impl TransientResourceCache {
         self.available_textures.entry(desc).or_default().push(texture);
     }
 
+    #[inline]
     pub fn clear_buffers(&mut self) {
         self.available_buffers.clear();
     }
 
+    #[inline]
     pub fn clear_textures(&mut self) {
         self.available_textures.clear();
     }

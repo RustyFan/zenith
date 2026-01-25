@@ -50,7 +50,7 @@ pub use pipeline::{
 };
 pub use pipeline_cache::{PipelineCache, PipelineCacheStats};
 pub use resource_cache::TransientResourceCache;
-pub use sampler::{Sampler, SamplerConfig};
+pub use sampler::{Sampler, SamplerDesc};
 pub use shader::{
     reflect_spirv, Shader, ShaderBinding, ShaderError, ShaderReflection, ShaderStage,
 };

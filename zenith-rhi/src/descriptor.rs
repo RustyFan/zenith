@@ -16,6 +16,7 @@ pub struct LayoutBinding {
     pub descriptor_type: vk::DescriptorType,
     pub count: u32,
     pub stage_flags: vk::ShaderStageFlags,
+    pub binding_flags: vk::DescriptorBindingFlags,
 }
 
 /// Descriptor set layout with binding metadata for validation.
@@ -28,68 +29,28 @@ pub struct DescriptorSetLayout {
 }
 
 impl DescriptorSetLayout {
-    /// Create a new descriptor set layout from binding descriptions.
-    pub fn new(name: &str, device: &RenderDevice, bindings: &[LayoutBinding]) -> Result<Self, vk::Result> {
-        let vk_bindings: Vec<vk::DescriptorSetLayoutBinding> = bindings
-            .iter()
-            .map(|b| {
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(b.binding)
-                    .descriptor_type(b.descriptor_type)
-                    .descriptor_count(b.count)
-                    .stage_flags(b.stage_flags)
-            })
-            .collect();
-
-        let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&vk_bindings);
-
-        let layout = unsafe { device.handle().create_descriptor_set_layout(&create_info, None)? };
-
-        let binding_map: HashMap<u32, usize> = bindings
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.binding, i))
-            .collect();
-
-        let layout = Self {
-            name: name.to_owned(),
-            layout,
-            bindings: bindings.to_vec(),
-            binding_map,
-            device: device.handle().clone(),
-        };
-        Ok(layout)
-    }
-
-    /// Create a new descriptor set layout with explicit Vulkan flags and per-binding flags.
-    ///
-    /// This is required for bindless layouts (descriptor indexing) such as UPDATE_AFTER_BIND.
-    pub fn new_with_flags(
+    pub fn new(
         name: &str,
         device: &RenderDevice,
         bindings: &[LayoutBinding],
         layout_flags: vk::DescriptorSetLayoutCreateFlags,
-        binding_flags: &[vk::DescriptorBindingFlags],
     ) -> Result<Self, vk::Result> {
-        assert_eq!(
-            bindings.len(),
-            binding_flags.len(),
-            "binding_flags must match bindings length"
-        );
-
-        let vk_bindings: Vec<vk::DescriptorSetLayoutBinding> = bindings
+        let (vk_bindings, binding_flags) = bindings
             .iter()
             .map(|b| {
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(b.binding)
-                    .descriptor_type(b.descriptor_type)
-                    .descriptor_count(b.count)
-                    .stage_flags(b.stage_flags)
+                (
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(b.binding)
+                        .descriptor_type(b.descriptor_type)
+                        .descriptor_count(b.count)
+                        .stage_flags(b.stage_flags),
+                    b.binding_flags
+                )
             })
-            .collect();
+            .unzip::<_, _, Vec<_>, Vec<_>>();
 
         let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
-            .binding_flags(binding_flags);
+            .binding_flags(&binding_flags);
 
         let create_info = vk::DescriptorSetLayoutCreateInfo::default()
             .bindings(&vk_bindings)
@@ -130,10 +91,11 @@ impl DescriptorSetLayout {
                 descriptor_type: b.descriptor_type,
                 count: b.count,
                 stage_flags: b.stage_flags,
+                binding_flags: vk::DescriptorBindingFlags::empty(),
             })
             .collect();
 
-        let layout = Self::new(name, device, &bindings)?;
+        let layout = Self::new(name, device, &bindings, vk::DescriptorSetLayoutCreateFlags::empty())?;
         device.set_debug_name(&layout);
         Ok(layout)
     }
@@ -141,17 +103,13 @@ impl DescriptorSetLayout {
     #[inline]
     pub fn name(&self) -> &str { &self.name }
 
-    /// Get the raw Vulkan descriptor set layout handle.
-    pub fn handle(&self) -> vk::DescriptorSetLayout {
-        self.layout
-    }
+    #[inline]
+    pub fn handle(&self) -> vk::DescriptorSetLayout { self.layout }
 
-    /// Get binding information by binding index.
     pub fn get_binding(&self, binding: u32) -> Option<&LayoutBinding> {
         self.binding_map.get(&binding).map(|&i| &self.bindings[i])
     }
 
-    /// Get all bindings.
     pub fn bindings(&self) -> &[LayoutBinding] {
         &self.bindings
     }
@@ -185,41 +143,17 @@ pub struct DescriptorPool {
 }
 
 impl DescriptorPool {
-    /// Create a new descriptor pool.
     pub fn new(
         name: &str,
         device: &RenderDevice,
         max_sets: u32,
-        pool_sizes: &[vk::DescriptorPoolSize],
+        sizes: &[vk::DescriptorPoolSize],
+        flags: vk::DescriptorPoolCreateFlags,
     ) -> Result<Self, vk::Result> {
         let create_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(flags)
             .max_sets(max_sets)
-            .pool_sizes(pool_sizes);
-
-        let pool = unsafe { device.handle().create_descriptor_pool(&create_info, None)? };
-
-        let pool = Self {
-            name: name.to_owned(),
-            pool,
-            max_sets,
-            device: device.handle().clone(),
-        };
-        device.set_debug_name(&pool);
-        Ok(pool)
-    }
-
-    /// Create a new descriptor pool with explicit Vulkan flags (e.g. UPDATE_AFTER_BIND).
-    pub fn new_with_flags(
-        name: &str,
-        device: &RenderDevice,
-        max_sets: u32,
-        pool_sizes: &[vk::DescriptorPoolSize],
-        pool_flags: vk::DescriptorPoolCreateFlags,
-    ) -> Result<Self, vk::Result> {
-        let create_info = vk::DescriptorPoolCreateInfo::default()
-            .flags(pool_flags)
-            .max_sets(max_sets)
-            .pool_sizes(pool_sizes);
+            .pool_sizes(sizes);
 
         let pool = unsafe { device.handle().create_descriptor_pool(&create_info, None)? };
 
@@ -234,11 +168,8 @@ impl DescriptorPool {
     }
 
     #[inline]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
+    pub fn name(&self) -> &str { &self.name }
 
-    /// Allocate a single descriptor set.
     pub fn allocate(&self, layout: &DescriptorSetLayout) -> Result<vk::DescriptorSet, vk::Result> {
         let layouts = [layout.handle()];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
@@ -249,7 +180,6 @@ impl DescriptorPool {
         Ok(sets[0])
     }
 
-    /// Reset the pool, freeing all allocated descriptor sets.
     pub fn reset(&self) -> Result<(), vk::Result> {
         unsafe {
             self.device
@@ -257,15 +187,11 @@ impl DescriptorPool {
         }
     }
 
-    /// Get the raw Vulkan descriptor pool handle.
-    pub fn handle(&self) -> vk::DescriptorPool {
-        self.pool
-    }
+    #[inline]
+    pub fn handle(&self) -> vk::DescriptorPool { self.pool }
 
-    /// Get the maximum number of sets this pool can allocate.
-    pub fn max_sets(&self) -> u32 {
-        self.max_sets
-    }
+    #[inline]
+    pub fn max_sets(&self) -> u32 { self.max_sets }
 }
 
 impl Drop for DescriptorPool {
@@ -316,7 +242,6 @@ pub struct DescriptorSetBinder<'a> {
 }
 
 impl<'a> DescriptorSetBinder<'a> {
-    /// Create a new shader resource binder.
     pub fn new(
         device: &'a RenderDevice,
         pipeline: &'a GraphicPipeline,
@@ -354,7 +279,6 @@ impl<'a> DescriptorSetBinder<'a> {
         Ok(self)
     }
 
-    /// Finish binding and return the descriptor sets for binding to the pipeline.
     pub fn finish(self, device: &RenderDevice) -> anyhow::Result<Vec<vk::DescriptorSet>, DescriptorBindingError> {
          let pool_sizes = self.resource_ty_sizes.into_iter()
             .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
@@ -367,7 +291,7 @@ impl<'a> DescriptorSetBinder<'a> {
         // every other descriptor set should start at set 1
         let base_set_index = BindlessPool::SET_INDEX + 1;
 
-        let pool = DescriptorPool::new("descriptor_pool", self.device, self.pipeline.descriptor_layouts.len() as u32 - 1, &pool_sizes)
+        let pool = DescriptorPool::new("descriptor_pool", self.device, self.pipeline.descriptor_layouts.len() as u32 - 1, &pool_sizes, vk::DescriptorPoolCreateFlags::empty())
             .map_err(|e| DescriptorBindingError::AllocationFailed(e))?;
         let descriptor_sets: Result<Vec<_>, _> = self.pipeline.descriptor_layouts.iter().skip(base_set_index as usize)
             .map(|layout| {

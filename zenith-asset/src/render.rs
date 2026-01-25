@@ -93,7 +93,7 @@ impl TextureFormat {
         }
     }
 
-    pub fn to_vk_format(&self) -> ash::vk::Format {
+    pub fn to_vk(&self) -> ash::vk::Format {
         match self {
             TextureFormat::R8 => ash::vk::Format::R8_UNORM,
             TextureFormat::R8G8 => ash::vk::Format::R8G8_UNORM,

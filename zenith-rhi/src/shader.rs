@@ -11,19 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use crate::device::set_debug_name_handle;
 
-pub enum ShaderModel {
-    SM6,
-}
-
-impl ShaderModel {
-    pub fn as_str(&self) -> &str {
-        match self {
-            ShaderModel::SM6 => { "6_0" }
-        }
-    }
-}
-
-/// Compiled shader with Vulkan shader module and reflection data.
 #[DeviceObject]
 pub struct Shader {
     name: String,
@@ -34,36 +21,17 @@ pub struct Shader {
 }
 
 impl Shader {
-    /// Create a shader from an HLSL file.
     pub fn from_file(
         name: &str,
         device: &RenderDevice,
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         entry_point: &str,
         stage: ShaderStage,
-        shader_model: ShaderModel,
     ) -> Result<Self, ShaderError> {
-        let _ = shader_model;
         let path = path.as_ref();
         Self::from_slang_file(name, device, path, entry_point, stage)
     }
 
-    /// Create a shader from HLSL source code.
-    pub fn from_hlsl(
-        name: &str,
-        _device: &RenderDevice,
-        source: &str,
-        _entry_point: &str,
-        _stage: ShaderStage,
-        shader_model: ShaderModel,
-    ) -> Result<Self, ShaderError> {
-        let _ = (source, shader_model);
-        Err(ShaderError::CompilationFailed(format!(
-            "[{name}] HLSL source compilation is disabled; use Slang files"
-        )))
-    }
-
-    /// Create a shader from a Slang `.slang` file.
     pub fn from_slang_file(
         name: &str,
         device: &RenderDevice,
@@ -92,7 +60,6 @@ impl Shader {
         Ok(shader)
     }
 
-    /// Create a shader from pre-compiled SPIR-V bytecode.
     pub fn from_spirv(
         name: &str,
         device: &RenderDevice,
@@ -125,29 +92,29 @@ impl Shader {
     #[inline]
     pub fn handle(&self) -> vk::ShaderModule { self.module }
 
-    /// Get the Vulkan shader module handle.
+    #[inline]
     pub fn module(&self) -> vk::ShaderModule {
         self.module
     }
 
-    /// Get the shader stage.
+    #[inline]
     pub fn stage(&self) -> ShaderStage {
         self.stage
     }
 
-    /// Get the entry point name.
+    #[inline]
     pub fn entry_point(&self) -> &CString {
         &self.entry_point
     }
 
-    /// Get the shader reflection data.
+    #[inline]
     pub fn reflection(&self) -> &ShaderReflection {
         &self.reflection
     }
 
-    /// Get Vulkan shader stage flags.
+    #[inline]
     pub fn vk_stage(&self) -> vk::ShaderStageFlags {
-        self.stage.to_vk_stage()
+        self.stage.to_vk()
     }
 }
 
@@ -165,7 +132,6 @@ impl Drop for Shader {
     }
 }
 
-/// Shader compilation and reflection errors.
 #[derive(Debug)]
 pub enum ShaderError {
     CompilationFailed(String),
@@ -199,7 +165,6 @@ impl std::fmt::Display for ShaderError {
 
 impl std::error::Error for ShaderError {}
 
-/// Shader stage type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShaderStage {
     Vertex,
@@ -208,8 +173,7 @@ pub enum ShaderStage {
 }
 
 impl ShaderStage {
-    /// Convert to Vulkan shader stage flags.
-    pub fn to_vk_stage(&self) -> vk::ShaderStageFlags {
+    pub fn to_vk(&self) -> vk::ShaderStageFlags {
         match self {
             ShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
             ShaderStage::Fragment => vk::ShaderStageFlags::FRAGMENT,
@@ -218,7 +182,6 @@ impl ShaderStage {
     }
 }
 
-/// A single shader resource binding.
 #[derive(Debug, Clone)]
 pub struct ShaderBinding {
     pub name: String,
@@ -229,25 +192,20 @@ pub struct ShaderBinding {
     pub count: u32,
 }
 
-/// Vertex shader input attribute reflected from SPIR-V.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VertexInputAttr {
+pub struct VertexInputAttribute {
     pub location: u32,
     pub format: vk::Format,
 }
 
-/// Shader reflection data.
 #[derive(Debug, Clone, Default)]
 pub struct ShaderReflection {
     pub bindings: Vec<ShaderBinding>,
     pub push_constant_size: u32,
-    /// Vertex inputs (only populated for vertex stage).
-    pub vertex_inputs: Vec<VertexInputAttr>,
+    pub vertex_inputs: Vec<VertexInputAttribute>,
 }
 
 impl ShaderReflection {
-    /// Merge multiple shader reflections into one.
-    /// Combines stage_flags for bindings at the same (set, binding).
     pub fn merge(reflections: &[&ShaderReflection]) -> Self {
         let mut binding_map: HashMap<(u32, u32), ShaderBinding> = HashMap::new();
         let mut push_constant_size = 0u32;
@@ -274,9 +232,9 @@ impl ShaderReflection {
         let mut bindings: Vec<ShaderBinding> = binding_map.into_values().collect();
         bindings.sort_by_key(|b| (b.set, b.binding));
 
-        let mut vertex_inputs: Vec<VertexInputAttr> = vertex_inputs_map
+        let mut vertex_inputs: Vec<VertexInputAttribute> = vertex_inputs_map
             .into_iter()
-            .map(|(location, format)| VertexInputAttr { location, format })
+            .map(|(location, format)| VertexInputAttribute { location, format })
             .collect();
         vertex_inputs.sort_by_key(|v| v.location);
 
@@ -287,12 +245,10 @@ impl ShaderReflection {
         }
     }
 
-    /// Find a binding by name.
     pub fn find_binding(&self, name: &str) -> Option<&ShaderBinding> {
         self.bindings.iter().find(|b| b.name == name)
     }
 
-    /// Get the maximum set index used.
     pub fn max_set(&self) -> Option<u32> {
         self.bindings.iter().map(|b| b.set).max()
     }
@@ -407,7 +363,7 @@ pub fn reflect_spirv(spirv: &[u8], stage: ShaderStage) -> Result<ShaderReflectio
     };
 
     let mut bindings = Vec::new();
-    let stage_flags = stage.to_vk_stage();
+    let stage_flags = stage.to_vk();
 
     // Get descriptor bindings
     let descriptor_sets = reflection.get_descriptor_sets();
@@ -472,7 +428,7 @@ struct MemberDecos {
     builtin: Option<u32>,
 }
 
-fn reflect_vertex_inputs_from_spirv(spirv: &[u8]) -> Result<Vec<VertexInputAttr>, ShaderError> {
+fn reflect_vertex_inputs_from_spirv(spirv: &[u8]) -> Result<Vec<VertexInputAttribute>, ShaderError> {
     // Minimal SPIR-V parser for stage inputs:
     // - OpVariable (Input)
     // - OpDecorate / OpMemberDecorate (Location/BuiltIn)
@@ -662,7 +618,7 @@ fn reflect_vertex_inputs_from_spirv(spirv: &[u8]) -> Result<Vec<VertexInputAttr>
         i += wc;
     }
 
-    let mut out: Vec<VertexInputAttr> = Vec::new();
+    let mut out: Vec<VertexInputAttribute> = Vec::new();
 
     for (&var_id, &storage_class) in &var_storage_class {
         if storage_class != STORAGE_CLASS_INPUT {
@@ -711,15 +667,15 @@ fn expand_type_to_vertex_attrs(
     const_u32: &HashMap<u32, u32>,
     ty_id: u32,
     base_location: u32,
-    out: &mut Vec<VertexInputAttr>,
+    out: &mut Vec<VertexInputAttribute>,
 ) -> Result<(), ShaderError> {
     match types.get(&ty_id) {
         Some(SpirvType::Float { width: 32 }) => {
-            out.push(VertexInputAttr { location: base_location, format: vk::Format::R32_SFLOAT });
+            out.push(VertexInputAttribute { location: base_location, format: vk::Format::R32_SFLOAT });
             Ok(())
         }
         Some(SpirvType::Int { width: 32, signed }) => {
-            out.push(VertexInputAttr {
+            out.push(VertexInputAttribute {
                 location: base_location,
                 format: if *signed { vk::Format::R32_SINT } else { vk::Format::R32_UINT },
             });
@@ -749,7 +705,7 @@ fn expand_type_to_vertex_attrs(
                 _ => return Err(ShaderError::ReflectionFailed("unsupported vertex vector width/count".into())),
             };
 
-            out.push(VertexInputAttr { location: base_location, format: fmt });
+            out.push(VertexInputAttribute { location: base_location, format: fmt });
             Ok(())
         }
         Some(SpirvType::Matrix { column_type, count }) => {

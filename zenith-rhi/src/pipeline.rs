@@ -1110,10 +1110,11 @@ impl GraphicPipeline {
         })
     }
 
-    /// Get the raw Vulkan pipeline handle.
+    #[inline]
     pub fn handle(&self) -> vk::Pipeline {
         self.pipeline.pipeline
     }
 
+    #[inline]
     pub fn layout(&self) -> vk::PipelineLayout { self.pipeline.layout }
 }

@@ -4,7 +4,6 @@ use crate::{RenderDevice};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 
-/// An owning Vulkan fence.
 #[DeviceObject]
 pub struct Fence {
     name: String,
@@ -20,13 +19,13 @@ impl Fence {
         });
         let fence = unsafe { device.handle().create_fence(&fence_info, None)? };
 
-        let f = Self {
+        let fence = Self {
             name: name.to_string(),
             fence,
             device: device.handle().clone(),
         };
-        device.set_debug_name(&f);
-        Ok(f)
+        device.set_debug_name(&fence);
+        Ok(fence)
     }
 
     #[inline]
@@ -49,10 +48,9 @@ impl Drop for Fence {
         unsafe {
             self.device.destroy_fence(self.fence, None);
         }
-}
+    }
 }
 
-/// An owning Vulkan semaphore.
 #[DeviceObject]
 pub struct Semaphore {
     name: String,
@@ -65,13 +63,13 @@ impl Semaphore {
             device.handle().create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?
         };
 
-        let s = Self {
+        let semaphore = Self {
             name: name.to_string(),
             semaphore,
             device: device.handle().clone(),
         };
-        device.set_debug_name(&s);
-        Ok(s)
+        device.set_debug_name(&semaphore);
+        Ok(semaphore)
     }
 
     #[inline]

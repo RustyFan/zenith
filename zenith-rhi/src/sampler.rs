@@ -6,9 +6,9 @@ use crate::{RenderDevice};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 
-/// Sampler configuration.
 #[derive(Debug, Clone)]
-pub struct SamplerConfig {
+pub struct SamplerDesc {
+    pub name: String,
     pub mag_filter: vk::Filter,
     pub min_filter: vk::Filter,
     pub mipmap_mode: vk::SamplerMipmapMode,
@@ -26,9 +26,10 @@ pub struct SamplerConfig {
     pub unnormalized_coordinates: bool,
 }
 
-impl Default for SamplerConfig {
+impl Default for SamplerDesc {
     fn default() -> Self {
         Self {
+            name: "unnamed_sampler".to_owned(),
             mag_filter: vk::Filter::LINEAR,
             min_filter: vk::Filter::LINEAR,
             mipmap_mode: vk::SamplerMipmapMode::LINEAR,
@@ -48,13 +49,12 @@ impl Default for SamplerConfig {
     }
 }
 
-impl SamplerConfig {
-    /// Create a linear filtering sampler config.
+impl SamplerDesc {
+    #[inline]
     pub fn linear() -> Self {
         Self::default()
     }
 
-    /// Create a nearest (point) filtering sampler config.
     pub fn nearest() -> Self {
         Self {
             mag_filter: vk::Filter::NEAREST,
@@ -64,7 +64,6 @@ impl SamplerConfig {
         }
     }
 
-    /// Create a sampler config with anisotropic filtering.
     pub fn anisotropic(max_anisotropy: f32) -> Self {
         Self {
             anisotropy_enable: true,
@@ -73,7 +72,6 @@ impl SamplerConfig {
         }
     }
 
-    /// Set address mode for all axes.
     pub fn with_address_mode(mut self, mode: vk::SamplerAddressMode) -> Self {
         self.address_mode_u = mode;
         self.address_mode_v = mode;
@@ -85,45 +83,50 @@ impl SamplerConfig {
 /// Vulkan sampler for texture sampling.
 #[DeviceObject]
 pub struct Sampler {
-    name: String,
+    desc: SamplerDesc,
     sampler: vk::Sampler,
 }
 
 impl Sampler {
     /// Create a new sampler with the given configuration.
-    pub fn new(name: &str, device: &ash::Device, config: &SamplerConfig) -> Result<Self, vk::Result> {
+    pub fn new(device: &RenderDevice, desc: &SamplerDesc) -> Result<Self, vk::Result> {
         let create_info = vk::SamplerCreateInfo::default()
-            .mag_filter(config.mag_filter)
-            .min_filter(config.min_filter)
-            .mipmap_mode(config.mipmap_mode)
-            .address_mode_u(config.address_mode_u)
-            .address_mode_v(config.address_mode_v)
-            .address_mode_w(config.address_mode_w)
-            .mip_lod_bias(config.mip_lod_bias)
-            .anisotropy_enable(config.anisotropy_enable)
-            .max_anisotropy(config.max_anisotropy)
-            .compare_enable(config.compare_enable)
-            .compare_op(config.compare_op)
-            .min_lod(config.min_lod)
-            .max_lod(config.max_lod)
-            .border_color(config.border_color)
-            .unnormalized_coordinates(config.unnormalized_coordinates);
+            .mag_filter(desc.mag_filter)
+            .min_filter(desc.min_filter)
+            .mipmap_mode(desc.mipmap_mode)
+            .address_mode_u(desc.address_mode_u)
+            .address_mode_v(desc.address_mode_v)
+            .address_mode_w(desc.address_mode_w)
+            .mip_lod_bias(desc.mip_lod_bias)
+            .anisotropy_enable(desc.anisotropy_enable)
+            .max_anisotropy(desc.max_anisotropy)
+            .compare_enable(desc.compare_enable)
+            .compare_op(desc.compare_op)
+            .min_lod(desc.min_lod)
+            .max_lod(desc.max_lod)
+            .border_color(desc.border_color)
+            .unnormalized_coordinates(desc.unnormalized_coordinates);
 
-        let sampler = unsafe { device.create_sampler(&create_info, None)? };
+        let sampler = unsafe { device.handle().create_sampler(&create_info, None)? };
 
         Ok(Self {
-            name: name.to_owned(),
+            desc: desc.clone(),
             sampler,
-            device: device.clone(),
+            device: device.handle().clone(),
         })
     }
 
     #[inline]
-    pub fn name(&self) -> &str { &self.name }
+    pub fn name(&self) -> &str { &self.desc.name }
 
-    /// Get the raw Vulkan sampler handle.
+    #[inline]
     pub fn handle(&self) -> vk::Sampler {
         self.sampler
+    }
+
+    #[inline]
+    pub fn desc(&self) -> &SamplerDesc {
+        &self.desc
     }
 }
 

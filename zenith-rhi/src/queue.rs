@@ -1,6 +1,5 @@
 use ash::vk;
 
-/// A queue wrapper that carries its family index.
 #[derive(Clone, Copy, Debug)]
 pub struct Queue {
     handle: vk::Queue,
@@ -12,7 +11,9 @@ impl Queue {
         Self { handle, family_index }
     }
 
+    #[inline]
     pub fn handle(&self) -> vk::Queue { self.handle }
 
+    #[inline]
     pub fn family_index(&self) -> u32 { self.family_index }
 }

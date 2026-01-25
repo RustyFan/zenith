@@ -34,20 +34,15 @@ pub struct PhysicalDevice {
 }
 
 impl PhysicalDevice {
-    /// Get the physical device.
     pub fn handle(&self) -> vk::PhysicalDevice {
         self.handle
     }
 
-    /// Get the physical device properties.
     pub fn properties(&self) -> &vk::PhysicalDeviceProperties {
         &self.properties
     }
 
-    /// Get the physical device memory properties.
-    pub fn memory_properties(&self) -> &vk::PhysicalDeviceMemoryProperties {
-        &self.memory_properties
-    }
+    pub fn memory_properties(&self) -> &vk::PhysicalDeviceMemoryProperties { &self.memory_properties }
 
     pub fn graphics_queue_family(&self) -> u32 { self.graphics_queue_family }
 
@@ -70,16 +65,12 @@ impl RhiCore {
     /// Create a new Vulkan core with instance and physical device.
     #[profiling::function]
     pub fn new(window: &Window) -> Result<Self, anyhow::Error> {
-        // Load Vulkan dynamically
         let entry = unsafe { Entry::load()? };
 
-        // Get display handle for platform-specific extensions
         let display_handle = window.display_handle()?.as_raw();
 
-        // Create instance
         let instance = create_instance(&entry, display_handle)?;
 
-        // Setup debug messenger (validation only)
         #[cfg(feature = "validation")]
         let (debug_utils, debug_messenger) = setup_debug_messenger(&entry, &instance)?;
 
@@ -245,7 +236,7 @@ unsafe extern "system" fn vulkan_debug_callback(
     match message_severity {
         vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => {
             log::error!("Vulkan {}: {}", type_str, message);
-            // TODO: break point
+            std::process::abort();
         }
         vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => {
             log::warn!("Vulkan {}: {}", type_str, message);
@@ -253,9 +244,10 @@ unsafe extern "system" fn vulkan_debug_callback(
         vk::DebugUtilsMessageSeverityFlagsEXT::INFO => {
             log::info!("Vulkan {}: {}", type_str, message);
         }
-        _ => {
-            log::debug!("Vulkan {}: {}", type_str, message);
+        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => {
+            log::trace!("Vulkan {}: {}", type_str, message);
         }
+        _ => {}
     }
 
     vk::FALSE

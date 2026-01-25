@@ -47,18 +47,20 @@ impl SwapchainWindow {
         })
     }
 
+    #[inline]
     pub fn window(&self) -> &Weak<Window> { &self.window }
 
+    #[inline]
     pub fn surface_loader(&self) -> &ash::khr::surface::Instance {
         &self.surface_loader
     }
 
+    #[inline]
     pub fn surface(&self) -> vk::SurfaceKHR {
         self.surface
     }
 }
 
-/// Swapchain configuration parameters.
 pub struct SwapchainConfig {
     pub preferred_format: vk::Format,
     pub preferred_color_space: vk::ColorSpaceKHR,
@@ -77,14 +79,12 @@ impl Default for SwapchainConfig {
     }
 }
 
-/// Synchronization objects for a single frame.
 pub struct FrameSync<'a> {
     pub image_available: &'a Semaphore,
     pub render_finished: &'a Semaphore,
     pub in_flight_fence: &'a Fence,
 }
 
-/// Vulkan swapchain management.
 #[DeviceObject]
 pub struct Swapchain {
     name: String,
@@ -230,7 +230,6 @@ impl Swapchain {
         Ok((image_index, suboptimal))
     }
 
-    /// Reset the fence for the current frame before submitting work.
     pub fn reset_current_fence(&self, device: &Device) -> Result<(), vk::Result> {
         unsafe {
             device.reset_fences(&[self.in_flight_fences[self.current_frame].handle()])?;
@@ -238,8 +237,6 @@ impl Swapchain {
         Ok(())
     }
 
-    /// Present the rendered image.
-    /// Returns whether the swapchain is suboptimal.
     #[profiling::function]
     pub fn present(&mut self, present_queue: Queue, image_index: u32) -> Result<bool, vk::Result> {
         let swapchains = [self.swapchain];
@@ -263,7 +260,6 @@ impl Swapchain {
         }
     }
 
-    /// Get current frame synchronization objects.
     pub fn current_frame_sync(&self) -> FrameSync<'_> {
         FrameSync {
             image_available: &self.image_available_semaphores[self.current_frame],
@@ -384,21 +380,26 @@ impl Swapchain {
         self.render_finished_semaphores.clear();
         self.in_flight_fences.clear();
     }
-    
+
+    #[inline]
     pub fn extent(&self) -> vk::Extent2D {
         self.extent
     }
-    
+
+    #[inline]
     pub fn format(&self) -> vk::Format {
         self.format.format
     }
-    
+
+    #[inline]
     pub fn num_back_buffers(&self) -> u32 { self.textures.len() as u32 }
 
+    #[inline]
     pub fn swapchain_texture(&self, frame_index: usize) -> Arc<Texture> {
         self.textures[frame_index].clone()
     }
 
+    #[inline]
     pub fn window(&self) -> &SwapchainWindow {
         &self.window
     }
