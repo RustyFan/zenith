@@ -4,20 +4,16 @@ use crate::interface::{Buffer, BufferState, ResourceState, Texture, TextureState
 use crate::node::{NodePipelineState, RenderGraphNode};
 use crate::resource::{GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess};
 use std::cell::Cell;
-use std::sync::Arc;
+use std::sync::{Arc};
+use parking_lot::Mutex;
 use zenith_core::collections::SmallVec;
-use zenith_rhi::{
-    BindlessPool, BindlessResource,
-    CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages,
-    ShaderReflection, CommandPool,
-};
-use zenith_rhi::buffer::BufferRange;
-use zenith_rhi::texture::TextureRange;
+use zenith_rhi::{BindlessPool, BindlessHandle, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout};
 use zenith_rhi::{
     vk, GraphicPipeline, GraphicPipelineDesc, PipelineCache, RenderDevice,
     DescriptorSetBinder, Swapchain,
 };
 use bytemuck::NoUninit;
+use zenith_rhi::descriptor::BindableResource;
 
 pub enum ResourceStorage {
     ManagedBuffer {
@@ -88,6 +84,7 @@ impl<S: GraphResourceState> ResourceStateTracker<S> {
 pub struct RenderGraph {
     pub(crate) nodes: Vec<RenderGraphNode>,
     pub(crate) initial_resources: Vec<InitialResourceStorage>,
+    pub(crate) bindless_pool: Arc<Mutex<BindlessPool>>,
 }
 
 impl RenderGraph {
@@ -150,7 +147,7 @@ impl RenderGraph {
                     };
 
                     let pipeline = pipeline_cache
-                        .get_or_create(&format!("pipeline.{}", node.name), device, pipeline_desc)
+                        .get_or_create(&format!("pipeline.{}", node.name), Some(&self.bindless_pool.lock()), device, pipeline_desc)
                         .expect("Failed to create graphics pipeline");
 
                     graphic_pipelines.push(Some(pipeline));
@@ -193,6 +190,7 @@ impl RenderGraph {
             graphic_pipe_index: 0,
             graphic_pipelines,
             swapchain_tex_id,
+            bindless_pool: self.bindless_pool,
         }
     }
 }
@@ -204,6 +202,7 @@ pub struct CompiledRenderGraph {
     graphic_pipe_index: u32,
     graphic_pipelines: Vec<Option<Arc<GraphicPipeline>>>,
     swapchain_tex_id: GraphResourceId,
+    bindless_pool: Arc<Mutex<BindlessPool>>,
 }
 
 impl CompiledRenderGraph {
@@ -330,7 +329,7 @@ impl CompiledRenderGraph {
                             encoder,
                             color_attachment_ids,
                             depth_attachment_id,
-                            bindless_pool: device.bindless_pool(),
+                            bindless_pool: &self.bindless_pool,
                         };
                         record(&mut ctx).expect("Failed to record graphic node.");
                     } else {
@@ -439,7 +438,7 @@ impl CompiledRenderGraph {
                     }
 
                     image_barriers.push(TextureBarrier::new(
-                        resource.as_range(.., ..).unwrap(),
+                        resource.as_range(TextureLayout::from(prev_state), .., ..).unwrap(),
                         prev_state,
                         next_state,
                         src_stage,
@@ -463,7 +462,7 @@ impl CompiledRenderGraph {
                     }
 
                     image_barriers.push(TextureBarrier::new(
-                        resource.as_range(.., ..).unwrap(),
+                        resource.as_range(TextureLayout::from(prev_state), .., ..).unwrap(),
                         prev_state,
                         next_state,
                         src_stage,
@@ -518,7 +517,7 @@ pub struct GraphicNodeExecutionContext<'node> {
     encoder: &'node CommandEncoder<'node>,
     color_attachment_ids: SmallVec<[GraphResourceId; 8]>,
     depth_attachment_id: Option<GraphResourceId>,
-    bindless_pool: &'node BindlessPool,
+    bindless_pool: &'node Arc<Mutex<BindlessPool>>,
 }
 
 impl<'node> GraphicNodeExecutionContext<'node> {
@@ -569,8 +568,8 @@ impl<'node> GraphicNodeExecutionContext<'node> {
             .map(|(id, info)| {
                 let texture = utility::resource_storage_ref(self.resources, *id).as_texture();
                 vk::RenderingAttachmentInfo::default()
-                    .image_view(texture.as_range(.., ..).unwrap().view().expect("Texture view not created"))
-                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .image_view(texture.as_range(TextureLayout::Color, .., ..).unwrap().view().expect("Texture view not created"))
+                    .image_layout(TextureLayout::Color.to_vk())
                     .load_op(info.load_op)
                     .store_op(info.store_op)
                     .clear_value(vk::ClearValue {
@@ -589,8 +588,8 @@ impl<'node> GraphicNodeExecutionContext<'node> {
                 let texture = utility::resource_storage_ref(self.resources, id).as_texture();
                 Some(
                     vk::RenderingAttachmentInfo::default()
-                        .image_view(texture.as_range(.., ..).unwrap().view().expect("Texture view not created"))
-                        .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                        .image_view(texture.as_range(TextureLayout::DepthStencil, .., ..).unwrap().view().expect("Texture view not created"))
+                        .image_layout(TextureLayout::DepthStencil.to_vk())
                         .load_op(info.depth_load_op)
                         .store_op(info.depth_store_op)
                         .clear_value(vk::ClearValue {
@@ -641,13 +640,15 @@ impl<'node> GraphicNodeExecutionContext<'node> {
 
     /// Bind descriptor sets to the pipeline.
     pub fn bind_descriptor_sets(&self, binder: DescriptorSetBinder) {
-        let sets = binder.finish(self.device);
+        let sets = binder.finish(self.device).unwrap();
+
         if let Some(pipeline) = self.pipeline {
             if !sets.is_empty() {
                 self.encoder.bind_descriptor_sets(
                     vk::PipelineBindPoint::GRAPHICS,
                     pipeline.layout(),
-                    0,
+                    // starts after the bindless pool
+                    BindlessPool::SET_INDEX + 1,
                     &sets,
                     &[],
                 );
@@ -657,33 +658,29 @@ impl<'node> GraphicNodeExecutionContext<'node> {
 }
 
 pub struct BindlessBinder<'node> {
-    pool: &'node BindlessPool,
+    pool: &'node Arc<Mutex<BindlessPool>>,
     encoder: &'node CommandEncoder<'node>,
     pipeline_layout: Option<vk::PipelineLayout>,
 }
 
 impl<'node> BindlessBinder<'node> {
     #[inline]
-    pub fn bind_texture(&self, texture: TextureRange<'_>) -> BindlessResource {
-        self.pool.bind_texture(texture)
+    pub fn bind<T: BindableResource>(&mut self, res: T) -> anyhow::Result<BindlessHandle> {
+        Ok(self.pool.lock().bind(res)?)
     }
 
     #[inline]
-    pub fn bind_buffer(&self, buffer: BufferRange<'_>) -> BindlessResource {
-        self.pool.bind_buffer(buffer)
-    }
+    pub fn finish(&mut self) {
+        let mut pool = self.pool.lock();
+        pool.update(self.encoder);
 
-    #[inline]
-    pub fn finish(&self) {
-        self.pool.update(self.encoder);
         // TODO: if we make all resources bindless, these is no need to bind descriptor sets every time
         if let Some(layout) = self.pipeline_layout {
-            let set = self.pool.set();
             self.encoder.bind_descriptor_sets(
                 vk::PipelineBindPoint::GRAPHICS,
                 layout,
                 0,
-                std::slice::from_ref(&set),
+                &[pool.set()],
                 &[],
             );
         }

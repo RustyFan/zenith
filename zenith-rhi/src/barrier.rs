@@ -141,7 +141,7 @@ impl core::ops::BitOrAssign for PipelineStages {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextureLayout {
     Undefined,
     General,
@@ -371,12 +371,12 @@ impl TextureState {
     pub fn is_write(&self) -> bool {
         match self {
             TextureState::Undefined |
-            TextureState::TransferSrc | 
+            TextureState::TransferSrc |
             TextureState::StorageRead |
             TextureState::Sampled |
             TextureState::GeneralRead |
             TextureState::Present => false,
-            
+
             TextureState::TransferDst |
             TextureState::StorageWrite |
             TextureState::GeneralWrite |
@@ -452,7 +452,7 @@ impl<'a> TextureBarrier<'a> {
 
     pub fn to_vk(&self) -> vk::ImageMemoryBarrier2<'a> {
         let mut old_layout = self.old_layout.to_vk();
-        
+
         if self.discard {
             old_layout = vk::ImageLayout::UNDEFINED;
         }
@@ -462,7 +462,7 @@ impl<'a> TextureBarrier<'a> {
 
         let mut src_access_mask = vk::AccessFlags2::NONE;
         let mut dst_access_mask = vk::AccessFlags2::NONE;
-        
+
         // WAW or RAW
         if self.src_state.is_write() {
             // add availability operations for source memory
@@ -478,7 +478,7 @@ impl<'a> TextureBarrier<'a> {
         if dst_stage_vk == vk::PipelineStageFlags2::empty() {
             dst_stage_vk = vk::PipelineStageFlags2::BOTTOM_OF_PIPE;
         }
-        
+
         vk::ImageMemoryBarrier2::default()
             .src_stage_mask(src_stage_vk)
             .src_access_mask(src_access_mask)

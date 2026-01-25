@@ -11,6 +11,7 @@ paste.workspace = true
 pollster.workspace = true
 profiling.workspace = true
 puffin_http.workspace = true
+parking_lot.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-asset = { path = "../zenith-asset" }

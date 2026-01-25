@@ -4,8 +4,11 @@ use ash::{vk};
 use zenith_core::log;
 use std::hash::{Hash, Hasher};
 use std::ops::RangeBounds;
+use ash::vk::Handle;
+use zenith_core::collections::DefaultHasher;
 use zenith_rhi_derive::DeviceObject;
-use crate::RenderDevice;
+use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindingCollector};
+use crate::{RenderDevice, DescriptorBindingError};
 use crate::device::{DebuggableObject};
 use crate::utility::{find_memory_type, normalize_range_u64};
 use crate::device::set_debug_name_handle;
@@ -289,13 +292,6 @@ impl<'a> BufferRange<'a> {
     #[inline]
     pub fn size(&self) -> u64 { self.size }
 
-    pub fn to_binding(&self) -> vk::DescriptorBufferInfo {
-        vk::DescriptorBufferInfo::default()
-            .buffer(self.buffer.handle())
-            .offset(self.offset)
-            .range(self.size)
-    }
-
     pub fn write(&self, data: &[u8]) -> Result<(), vk::Result>  {
         let len = data.len() as u64;
         if len == 0 {
@@ -318,5 +314,45 @@ impl<'a> BufferRange<'a> {
         }
 
         Ok(())
+    }
+}
+
+impl PartialEq for BufferRange<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.buffer.buffer.as_raw() == other.buffer.buffer.as_raw() &&
+            self.offset == other.offset &&
+            self.size == other.size
+    }
+}
+impl Eq for BufferRange<'_> {}
+
+impl<'a> Hash for BufferRange<'a> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.buffer.handle().as_raw());
+        state.write_u64(self.offset);
+        state.write_u64(self.size);
+    }
+}
+
+impl BindableResource for BufferRange<'_> {
+    fn bind_to(&self, collector: &mut DescriptorBindingCollector) -> anyhow::Result<(), DescriptorBindingError> {
+        collector.bind_buffer(
+            vk::DescriptorBufferInfo::default()
+                .buffer(self.buffer.handle())
+                .offset(self.offset)
+                .range(self.size)
+        )?;
+
+        Ok(())
+    }
+
+    fn bind_key(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        self.hash(&mut hash);
+        hash.finish()
+    }
+
+    fn ty(&self) -> BindableResourceType {
+        BindableResourceType::Buffer
     }
 }

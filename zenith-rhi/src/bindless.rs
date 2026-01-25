@@ -4,17 +4,13 @@
 //! raw Vulkan handle (as `u64`) -> bindless index mapping. The caller is responsible for keeping
 //! the resources alive while GPU work may reference them.
 
-use std::cell::RefCell;
 use ash::vk;
-use ash::vk::Handle as _;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::buffer::BufferRange;
-use crate::descriptor::LayoutBinding;
-use crate::texture::TextureRange;
-use crate::{CommandEncoder, DescriptorPool, DescriptorSetLayout, RenderDevice};
+use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindLocation, DescriptorBindingCollector, LayoutBinding};
+use crate::{CommandEncoder, DescriptorBindingError, DescriptorPool, DescriptorSetLayout, RenderDevice};
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone)]
@@ -24,13 +20,19 @@ pub enum ResourceType {
     Sampler,   // binding 2
 }
 
+impl ResourceType {
+    pub fn binding_index(&self) -> u32 {
+        *self as u32
+    }
+}
+
 // Used to index the resource in shader using bindless pattern
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BindlessResource {
+pub struct BindlessHandle {
     packed: u32,
 }
 
-impl Deref for BindlessResource {
+impl Deref for BindlessHandle {
     type Target = u32;
 
     fn deref(&self) -> &Self::Target {
@@ -38,7 +40,7 @@ impl Deref for BindlessResource {
     }
 }
 
-impl BindlessResource {
+impl BindlessHandle {
     const TY_BITS: u32 = 3;
     const INDEX_BITS: u32 = 32 - Self::TY_BITS;
     const INDEX_MASK: u32 = (1u32 << Self::INDEX_BITS) - 1;
@@ -61,7 +63,7 @@ impl BindlessResource {
             0 => ResourceType::Texture2D,
             1 => ResourceType::Buffer,
             2 => ResourceType::Sampler,
-            _ => ResourceType::Texture2D, // unreachable with proper construction
+            _ => unimplemented!(),
         }
     }
 
@@ -144,22 +146,23 @@ struct BindlessPoolState {
     textures: SlotMap,
     buffers: SlotMap,
     _samplers: SlotMap,
-    pending: Vec<PendingWrite>,
 }
 
 // TODO: support texture 2d and buffers for now; sampler API can be added later.
 pub struct BindlessPool {
     device: ash::Device,
+    collector: DescriptorBindingCollector,
     _pool: DescriptorPool,
     set_layout: Arc<DescriptorSetLayout>,
     set: vk::DescriptorSet,
 
+    state: BindlessPoolState,
     caps: BindlessCaps,
-
-    state: RefCell<BindlessPoolState>,
 }
 
 impl BindlessPool {
+    pub const SET_INDEX: u32 = 0;
+
     pub fn new(device: &RenderDevice) -> Result<Self, vk::Result> {
         let caps = device.bindless_caps();
 
@@ -195,7 +198,7 @@ impl BindlessPool {
         ];
 
         let set_layout = DescriptorSetLayout::new_with_flags(
-            "bindless.set_layout",
+            "layout.bindless",
             device,
             &bindings,
             vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
@@ -210,7 +213,7 @@ impl BindlessPool {
         ];
 
         let pool = DescriptorPool::new_with_flags(
-            "bindless.pool",
+            "pool.bindless",
             device,
             1,
             &pool_sizes,
@@ -221,11 +224,12 @@ impl BindlessPool {
 
         Ok(Self {
             device: device.handle().clone(),
+            collector: Default::default(),
             _pool: pool,
             set_layout,
             set,
             caps: *caps,
-            state: RefCell::new(BindlessPoolState::default()),
+            state: Default::default(),
         })
     }
     
@@ -238,137 +242,72 @@ impl BindlessPool {
     #[inline]
     pub fn caps(&self) -> BindlessCaps { self.caps }
 
-    pub fn bind_texture(&self, texture: TextureRange<'_>) -> BindlessResource {
-        // add a pending upload
-        let key = texture.texture().handle().as_raw();
-        let mut state = self.state.borrow_mut();
-        let Some((index, is_new)) = state.textures.get_or_alloc(key, self.caps.max_textures) else {
-            panic!("bindless texture capacity exceeded (max={})", self.caps.max_textures);
+    pub fn bind<T: BindableResource>(&mut self, res: T) -> anyhow::Result<BindlessHandle, DescriptorBindingError> {
+        let key = res.bind_key();
+
+        let (index, ty) = match res.ty() {
+            BindableResourceType::Buffer => {
+                let Some((index, is_new)) = self.state.buffers.get_or_alloc(key, self.caps.max_storage_buffers) else {
+                    panic!("bindless buffer capacity exceeded (max={})", self.caps.max_storage_buffers);
+                };
+
+                if is_new {
+                    self.collector.begin_binding("__bindless_buffers".to_string(), DescriptorBindLocation {
+                        set: 0,
+                        binding: ResourceType::Buffer.binding_index(),
+                        array_index: index,
+                        ty: vk::DescriptorType::STORAGE_BUFFER,
+                    });
+                    res.bind_to(&mut self.collector)?;
+                    self.collector.end_binding();
+                }
+
+                (index, ResourceType::Buffer)
+            }
+            BindableResourceType::Texture => {
+                let Some((index, is_new)) = self.state.textures.get_or_alloc(key, self.caps.max_textures) else {
+                    panic!("bindless texture capacity exceeded (max={})", self.caps.max_textures);
+                };
+
+                if is_new {
+                    self.collector.begin_binding("__bindless_textures".to_string(), DescriptorBindLocation {
+                        set: 0,
+                        binding: ResourceType::Texture2D.binding_index(),
+                        array_index: index,
+                        ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    });
+                    res.bind_to(&mut self.collector)?;
+                    self.collector.end_binding();
+                }
+
+                (index, ResourceType::Texture2D)
+            }
         };
-        if is_new {
-            let view = texture.view().expect("Invalid texture view creation");
-            state.pending.push(PendingWrite::Texture2D { index, view });
-        }
-        BindlessResource::new(ResourceType::Texture2D, index)
+
+        Ok(BindlessHandle::new(ty, index))
     }
 
-    pub fn free_texture(&self, handle: BindlessResource) {
-        // Restore the index of current resources.
-        debug_assert_eq!(handle.ty() as u8, ResourceType::Texture2D as u8);
-        let mut state = self.state.borrow_mut();
-        let _ = state.textures.free_by_index(handle.index());
-    }
-
-    pub fn bind_buffer(&self, buffer: BufferRange<'_>) -> BindlessResource {
-        let key = buffer.buffer().handle().as_raw();
-        let mut state = self.state.borrow_mut();
-        let Some((index, is_new)) = state.buffers.get_or_alloc(key, self.caps.max_storage_buffers) else {
-            panic!("bindless buffer capacity exceeded (max={})", self.caps.max_storage_buffers);
-        };
-        if is_new {
-            let info = buffer.to_binding();
-            state.pending.push(PendingWrite::Buffer {
-                index,
-                buffer: info.buffer,
-                offset: info.offset,
-                range: info.range,
-            });
-        }
-
-        BindlessResource::new(ResourceType::Buffer, index)
-    }
-
-    pub fn free_buffer(&self, handle: BindlessResource) {
-        // Restore the index of current resources.
-        let mut state = self.state.borrow_mut();
+    pub fn unbind(&mut self, handle: BindlessHandle) {
         match handle.ty() {
-            ResourceType::Buffer => { let _ = state.buffers.free_by_index(handle.index()); }
-            _ => {}
+            ResourceType::Texture2D => {
+                let _ = self.state.textures.free_by_index(handle.index());
+            }
+            ResourceType::Buffer => {
+                let _ = self.state.buffers.free_by_index(handle.index());
+            }
+            ResourceType::Sampler => unimplemented!(),
         }
     }
 
-    pub fn update(&self, _encoder: &CommandEncoder<'_>) {
-        // update all pending uploads by vkWriteDescriptorSet.
-        let mut state = self.state.borrow_mut();
-        if state.pending.is_empty() {
+    pub fn update(&mut self, _encoder: &CommandEncoder<'_>) {
+        if self.collector.num_bindings() == 0 {
             return;
         }
 
-        enum Kind { Tex, Buf, Samp }
-        struct Resolved { kind: Kind, index: u32, info_index: usize }
-
-        let mut resolved: Vec<Resolved> = Vec::new();
-        let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
-        let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
-        let mut sampler_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
-
-        for p in state.pending.drain(..) {
-            match p {
-                PendingWrite::Texture2D { index, view } => {
-                    image_infos.push(
-                        vk::DescriptorImageInfo::default()
-                            .image_view(view)
-                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    );
-                    resolved.push(Resolved { kind: Kind::Tex, index, info_index: image_infos.len() - 1 });
-                }
-                PendingWrite::Buffer { index, buffer, offset, range } => {
-                    buffer_infos.push(
-                        vk::DescriptorBufferInfo::default()
-                            .buffer(buffer)
-                            .offset(offset)
-                            .range(range)
-                    );
-                    resolved.push(Resolved { kind: Kind::Buf, index, info_index: buffer_infos.len() - 1 });
-                }
-                PendingWrite::Sampler { index, sampler } => {
-                    sampler_infos.push(vk::DescriptorImageInfo::default().sampler(sampler));
-                    resolved.push(Resolved { kind: Kind::Samp, index, info_index: sampler_infos.len() - 1 });
-                }
-            }
-        }
-
-        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::with_capacity(resolved.len());
-        for r in resolved {
-            match r.kind {
-                Kind::Tex => {
-                    let info_ref = &image_infos[r.info_index];
-                    writes.push(
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(self.set)
-                            .dst_binding(ResourceType::Texture2D as u32)
-                            .dst_array_element(r.index)
-                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                            .image_info(std::slice::from_ref(info_ref))
-                    );
-                }
-                Kind::Buf => {
-                    let info_ref = &buffer_infos[r.info_index];
-                    writes.push(
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(self.set)
-                            .dst_binding(ResourceType::Buffer as u32)
-                            .dst_array_element(r.index)
-                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                            .buffer_info(std::slice::from_ref(info_ref))
-                    );
-                }
-                Kind::Samp => {
-                    let info_ref = &sampler_infos[r.info_index];
-                    writes.push(
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(self.set)
-                            .dst_binding(ResourceType::Sampler as u32)
-                            .dst_array_element(r.index)
-                            .descriptor_type(vk::DescriptorType::SAMPLER)
-                            .image_info(std::slice::from_ref(info_ref))
-                    );
-                }
-            }
-        }
-
+        let writes = self.collector.write_to(0, std::slice::from_ref(&self.set));
         unsafe {
             self.device.update_descriptor_sets(&writes, &[]);
         }
+        self.collector.clear();
     }
 }

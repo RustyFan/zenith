@@ -10,6 +10,7 @@ log.workspace = true
 derive_builder.workspace = true
 profiling.workspace = true
 bytemuck.workspace = true
+parking_lot.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-rhi = { path = "../zenith-rhi" }

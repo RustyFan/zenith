@@ -5,9 +5,12 @@ use std::default::Default;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::ops::RangeBounds;
+use ash::vk::Handle;
+use zenith_core::collections::DefaultHasher;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_rhi_derive::DeviceObject;
-use crate::{RenderDevice, Sampler};
+use crate::{DescriptorBindingError, RenderDevice, TextureLayout};
+use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindingCollector};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 use crate::utility::{find_memory_type, normalize_range_u32};
@@ -389,12 +392,13 @@ impl Texture {
         texture
     }
 
-    pub fn as_range<R: RangeBounds<u32>>(&self, mipmaps: R, levels: R) -> Result<TextureRange<'_>, vk::Result> {
+    pub fn as_range<R: RangeBounds<u32>>(&self, layout: TextureLayout, mipmaps: R, levels: R) -> Result<TextureRange<'_>, vk::Result> {
         let (base_mip, num_mips) = normalize_range_u32(mipmaps, self.desc.mip_levels)?;
         let (base_layer, num_layers) = normalize_range_u32(levels, self.desc.array_layers)?;
 
         Ok(TextureRange {
             texture: self,
+            layout,
             subresource: TextureSubresource {
                 base_mip,
                 num_mips,
@@ -506,10 +510,11 @@ fn format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
 
 pub struct TextureRange<'a> {
     texture: &'a Texture,
+    layout: TextureLayout,
     subresource: TextureSubresource
 }
 
-#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 struct TextureSubresource {
     base_mip: u32,
     num_mips: u32,
@@ -557,11 +562,43 @@ impl<'a> TextureRange<'a> {
         self.texture.views.borrow_mut().insert(self.subresource, view);
         Ok(view)
     }
+}
 
-    pub fn to_binding(&self, sampler: &Sampler, layout: vk::ImageLayout) -> vk::DescriptorImageInfo {
-        vk::DescriptorImageInfo::default()
-            .image_view(self.view().expect("Invalid texture view creation."))
-            .sampler(sampler.handle())
-            .image_layout(layout)
+impl<'a> PartialEq for TextureRange<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.view().unwrap().as_raw() == other.view().unwrap().as_raw() &&
+            self.layout == other.layout &&
+            self.subresource == other.subresource
+    }
+}
+impl Eq for TextureRange<'_> { }
+
+impl<'a> Hash for TextureRange<'a> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.view().unwrap().as_raw());
+        self.layout.hash(state);
+        self.subresource.hash(state);
+    }
+}
+
+impl BindableResource for TextureRange<'_> {
+    fn bind_to(&self, collector: &mut DescriptorBindingCollector) -> anyhow::Result<(), DescriptorBindingError> {
+        collector.bind_texture(
+            vk::DescriptorImageInfo::default()
+                .image_view(self.view().map_err(|err| DescriptorBindingError::MissingTextureView(err, self.texture.desc.name.to_owned()))?)
+                .sampler(vk::Sampler::null())
+                .image_layout(self.layout.to_vk())
+        )?;
+        Ok(())
+    }
+
+    fn bind_key(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        self.hash(&mut hash);
+        hash.finish()
+    }
+
+    fn ty(&self) -> BindableResourceType {
+        BindableResourceType::Texture
     }
 }

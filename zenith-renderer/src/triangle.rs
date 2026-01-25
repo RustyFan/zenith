@@ -140,9 +140,8 @@ impl TriangleRenderer {
             time_buffer.write(elapsed_bytes)
                 .map_err(|e| anyhow::anyhow!("failed to write time buffer: {:?}", e))?;
 
-            // Bind uniform buffer using bindless binder and push handle as push constants.
-            let binder = ctx.create_bindless_binder();
-            let time_handle = binder.bind_buffer(time_buffer);
+            let mut binder = ctx.create_bindless_binder();
+            let time_handle = binder.bind(time_buffer)?;
             binder.finish();
 
             ctx.begin_rendering(extent);

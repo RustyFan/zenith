@@ -9,7 +9,8 @@ use crate::resource::{
 use log::warn;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use zenith_rhi::{vk, ColorAttachmentDesc, DepthStencilDesc, GraphicPipelineDesc, GraphicPipelineState, GraphicShaderInput, GraphicPipelineAttachments};
+use parking_lot::Mutex;
+use zenith_rhi::{vk, ColorAttachmentDesc, DepthStencilDesc, GraphicPipelineDesc, GraphicPipelineState, GraphicShaderInput, GraphicPipelineAttachments, BindlessPool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResourceAccessStorage {
@@ -23,14 +24,16 @@ pub struct RenderGraphBuilder {
     pub(crate) initial_resources: Vec<InitialResourceStorage>,
     #[allow(dead_code)]
     pub(crate) export_resources: Vec<ExportResourceStorage>,
+    bindless_pool: Arc<Mutex<BindlessPool>>,
 }
 
 impl RenderGraphBuilder {
-    pub fn new() -> Self {
+    pub fn new(bindless_pool: Arc<Mutex<BindlessPool>>) -> Self {
         Self {
             nodes: Vec::new(),
             initial_resources: Vec::new(),
             export_resources: Vec::new(),
+            bindless_pool,
         }
     }
 
@@ -138,6 +141,7 @@ impl RenderGraphBuilder {
         RenderGraph {
             nodes: self.nodes,
             initial_resources: self.initial_resources,
+            bindless_pool: self.bindless_pool,
         }
     }
 }

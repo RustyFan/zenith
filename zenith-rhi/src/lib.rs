@@ -35,8 +35,8 @@ pub use command::{CommandPool, CommandEncoder, ImmediateCommandEncoder};
 pub use core::RhiCore;
 pub use queue::Queue;
 pub use descriptor::{
-    BindingError, DescriptorPool, DescriptorSetLayout, LayoutBinding,
-    ShaderBindingError, DescriptorSetBinder,
+    DescriptorPool, DescriptorSetLayout, LayoutBinding,
+    DescriptorBindingError, DescriptorSetBinder,
 };
 pub use device::RenderDevice;
 pub use pipeline::{
@@ -68,5 +68,5 @@ pub use upload::UploadPool;
 pub use defer_release::{DeferRelease, LastFreedStats};
 
 pub use bindless::{
-    BindlessCaps, BindlessPool, BindlessResource, ResourceType,
+    BindlessCaps, BindlessPool, BindlessHandle, ResourceType,
 };

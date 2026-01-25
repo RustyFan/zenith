@@ -13,7 +13,6 @@ use std::default::Default;
 use zenith_core::collections::{SmallVec, hashset::HashSet};
 use crate::CommandEncoder;
 use crate::bindless::BindlessCaps;
-use crate::bindless::BindlessPool;
 
 #[cfg(feature = "validation")]
 fn set_debug_name_raw(
@@ -79,7 +78,6 @@ pub struct RenderDevice {
     resource_caches: Vec<TransientResourceCache>,
     defer_release_queues: RefCell<Vec<DeferReleaseQueue>>,
     frame_resource_fences: Vec<Fence>,
-    bindless_pool: Option<BindlessPool>,
 
     device: Device,
     parent_physical_device: PhysicalDevice,
@@ -208,7 +206,6 @@ impl RenderDevice {
             resource_caches,
             current_frame: 0,
             bindless_caps,
-            bindless_pool: None,
         };
 
         for _ in 0..num_frames {
@@ -217,8 +214,6 @@ impl RenderDevice {
                 DeferReleaseQueue::new()
             );
         }
-
-        device.bindless_pool = Some(BindlessPool::new(&device)?);
 
         set_debug_name_handle(&device, device.handle().handle(), vk::ObjectType::DEVICE, "device.main");
         Ok(device)
@@ -337,11 +332,6 @@ impl RenderDevice {
         &self.bindless_caps
     }
 
-    #[inline]
-    pub fn bindless_pool(&self) -> &BindlessPool {
-        self.bindless_pool.as_ref().expect("bindless_pool not initialized")
-    }
-
     pub fn graphics_queue(&self) -> Queue {
         Queue::new(self.graphics_queue, self.parent_physical_device.graphics_queue_family())
     }
@@ -405,8 +395,6 @@ impl RenderDevice {
 impl Drop for RenderDevice {
     fn drop(&mut self) {
         unsafe { self.device.device_wait_idle().unwrap(); }
-
-        self.bindless_pool = None;
 
         for queue in self.defer_release_queues.get_mut() {
             queue.release_all();
