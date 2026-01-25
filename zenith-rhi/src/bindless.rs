@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use ash::vk;
 use ash::vk::Handle as _;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::buffer::BufferRange;
@@ -25,11 +26,19 @@ pub enum ResourceType {
 
 // Used to index the resource in shader using bindless pattern
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BindlessResourceHandle {
+pub struct BindlessResource {
     packed: u32,
 }
 
-impl BindlessResourceHandle {
+impl Deref for BindlessResource {
+    type Target = u32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.packed
+    }
+}
+
+impl BindlessResource {
     const TY_BITS: u32 = 3;
     const INDEX_BITS: u32 = 32 - Self::TY_BITS;
     const INDEX_MASK: u32 = (1u32 << Self::INDEX_BITS) - 1;
@@ -229,7 +238,7 @@ impl BindlessPool {
     #[inline]
     pub fn caps(&self) -> BindlessCaps { self.caps }
 
-    pub fn bind_texture(&self, texture: TextureRange<'_>) -> BindlessResourceHandle {
+    pub fn bind_texture(&self, texture: TextureRange<'_>) -> BindlessResource {
         // add a pending upload
         let key = texture.texture().handle().as_raw();
         let mut state = self.state.borrow_mut();
@@ -240,17 +249,17 @@ impl BindlessPool {
             let view = texture.view().expect("Invalid texture view creation");
             state.pending.push(PendingWrite::Texture2D { index, view });
         }
-        BindlessResourceHandle::new(ResourceType::Texture2D, index)
+        BindlessResource::new(ResourceType::Texture2D, index)
     }
 
-    pub fn free_texture(&self, handle: BindlessResourceHandle) {
+    pub fn free_texture(&self, handle: BindlessResource) {
         // Restore the index of current resources.
         debug_assert_eq!(handle.ty() as u8, ResourceType::Texture2D as u8);
         let mut state = self.state.borrow_mut();
         let _ = state.textures.free_by_index(handle.index());
     }
 
-    pub fn bind_buffer(&self, buffer: BufferRange<'_>) -> BindlessResourceHandle {
+    pub fn bind_buffer(&self, buffer: BufferRange<'_>) -> BindlessResource {
         let key = buffer.buffer().handle().as_raw();
         let mut state = self.state.borrow_mut();
         let Some((index, is_new)) = state.buffers.get_or_alloc(key, self.caps.max_storage_buffers) else {
@@ -266,10 +275,10 @@ impl BindlessPool {
             });
         }
 
-        BindlessResourceHandle::new(ResourceType::Buffer, index)
+        BindlessResource::new(ResourceType::Buffer, index)
     }
 
-    pub fn free_buffer(&self, handle: BindlessResourceHandle) {
+    pub fn free_buffer(&self, handle: BindlessResource) {
         // Restore the index of current resources.
         let mut state = self.state.borrow_mut();
         match handle.ty() {

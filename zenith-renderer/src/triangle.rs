@@ -148,7 +148,7 @@ impl TriangleRenderer {
             ctx.begin_rendering(extent);
             ctx.bind_pipeline();
 
-            ctx.push_constants(0, &time_handle.raw());
+            ctx.push_constants(0, &*time_handle);
 
             let viewport = vk::Viewport {
                 x: 0.0,

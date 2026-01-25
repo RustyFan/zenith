@@ -68,5 +68,5 @@ pub use upload::UploadPool;
 pub use defer_release::{DeferRelease, LastFreedStats};
 
 pub use bindless::{
-    BindlessCaps, BindlessPool, BindlessResourceHandle, ResourceType,
+    BindlessCaps, BindlessPool, BindlessResource, ResourceType,
 };

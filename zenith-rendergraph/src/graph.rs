@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 use zenith_core::collections::SmallVec;
 use zenith_rhi::{
-    BindlessPool, BindlessResourceHandle,
+    BindlessPool, BindlessResource,
     CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages,
     ShaderReflection, CommandPool,
 };
@@ -664,12 +664,12 @@ pub struct BindlessBinder<'node> {
 
 impl<'node> BindlessBinder<'node> {
     #[inline]
-    pub fn bind_texture(&self, texture: TextureRange<'_>) -> BindlessResourceHandle {
+    pub fn bind_texture(&self, texture: TextureRange<'_>) -> BindlessResource {
         self.pool.bind_texture(texture)
     }
 
     #[inline]
-    pub fn bind_buffer(&self, buffer: BufferRange<'_>) -> BindlessResourceHandle {
+    pub fn bind_buffer(&self, buffer: BufferRange<'_>) -> BindlessResource {
         self.pool.bind_buffer(buffer)
     }
 
