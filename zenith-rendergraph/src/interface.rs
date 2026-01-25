@@ -159,17 +159,3 @@ pub enum ResourceState {
     Buffer(BufferState),
     Texture(TextureState),
 }
-
-// render_graph_resource_interface!(
-//     Buffer => Arc<zenith_rhi::Buffer>, BufferDesc => zenith_rhi::BufferDesc, BufferState => zenith_rhi::BufferState,
-//     Texture => Arc<zenith_rhi::Texture>, TextureDesc => zenith_rhi::TextureDesc, TextureState => zenith_rhi::TextureState
-// );
-
-// #[derive(Deref, DerefMut, From, Clone, Debug)]
-// pub struct RenderResource<T: GraphResource>(T);
-//
-// impl<T: GraphResource> RenderResource<T> {
-//     pub fn new(resource: T) -> Self {
-//         Self(resource)
-//     }
-// }

@@ -400,7 +400,6 @@ impl CompiledRenderGraph {
                         dst_stage,
                         queue,
                         queue,
-                        false,
                     ));
                     state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
@@ -424,7 +423,6 @@ impl CompiledRenderGraph {
                         dst_stage,
                         queue,
                         queue,
-                        false,
                     ));
                     state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
@@ -448,7 +446,6 @@ impl CompiledRenderGraph {
                         dst_stage,
                         queue,
                         queue,
-                        false,
                         prev_state == TextureState::Undefined,
                     ));
                     state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
@@ -473,7 +470,6 @@ impl CompiledRenderGraph {
                         dst_stage,
                         queue,
                         queue,
-                        false,
                         prev_state == TextureState::Undefined,
                     ));
                     state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
@@ -556,15 +552,6 @@ impl<'node> GraphicNodeExecutionContext<'node> {
         }
     }
 
-    #[inline]
-    pub fn create_bindless_binder(&self) -> BindlessBinder<'node> {
-        BindlessBinder {
-            pool: self.bindless_pool,
-            encoder: self.encoder,
-            pipeline_layout: self.pipeline.map(|pipe| pipe.layout()),
-        }
-    }
-
     pub fn begin_rendering(&self, extent: vk::Extent2D) {
         let color_infos = &self.pipeline_desc.state.color_blend.attachments;
         if self.color_attachment_ids.len() != color_infos.len() {
@@ -643,6 +630,15 @@ impl<'node> GraphicNodeExecutionContext<'node> {
         ).unwrap()
     }
 
+    #[inline]
+    pub fn create_bindless_binder(&self) -> BindlessBinder<'node> {
+        BindlessBinder {
+            pool: self.bindless_pool,
+            encoder: self.encoder,
+            pipeline_layout: self.pipeline.map(|pipe| pipe.layout()),
+        }
+    }
+
     /// Bind descriptor sets to the pipeline.
     pub fn bind_descriptor_sets(&self, binder: DescriptorSetBinder) {
         let sets = binder.finish(self.device);
@@ -680,6 +676,7 @@ impl<'node> BindlessBinder<'node> {
     #[inline]
     pub fn finish(&self) {
         self.pool.update(self.encoder);
+        // TODO: if we make all resources bindless, these is no need to bind descriptor sets every time
         if let Some(layout) = self.pipeline_layout {
             let set = self.pool.set();
             self.encoder.bind_descriptor_sets(

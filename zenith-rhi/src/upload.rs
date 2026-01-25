@@ -97,7 +97,7 @@ impl<'a> UploadPool<'a> {
 
         let staging_handle = self.staging.handle();
         let staging_size = self.staging.size() as usize;
-        let q = device.graphics_queue();
+        let queue = device.graphics_queue();
 
         let pending = std::mem::take(&mut self.pending);
 
@@ -111,9 +111,8 @@ impl<'a> UploadPool<'a> {
                     BufferState::TransferSrc,
                     PipelineStage::Host.into(),
                     PipelineStage::Transfer.into(),
-                    q,
-                    q,
-                    true,
+                    queue,
+                    queue,
                 )
                 .with_range(0, staging_size),
             );
@@ -125,9 +124,8 @@ impl<'a> UploadPool<'a> {
                     BufferState::TransferDst,
                     PipelineStages::empty(),
                     PipelineStage::Transfer.into(),
-                    q,
-                    q,
-                    false,
+                    queue,
+                    queue,
                 ).with_range(p.dst.offset() as usize, p.size as usize));
             }
             encoder.buffer_barriers(&pre);
@@ -149,7 +147,7 @@ impl<'a> UploadPool<'a> {
                     BufferState::Index => PipelineStage::IndexInput.into(),
                     BufferState::TransferSrc | BufferState::TransferDst => PipelineStage::Transfer.into(),
                     BufferState::HostWrite => PipelineStage::Host.into(),
-                    BufferState::Uniform | BufferState::Storage | BufferState::Undefined => PipelineStage::AllCommands.into(),
+                    BufferState::Uniform | BufferState::StorageRead | BufferState::StorageWrite | BufferState::Undefined => PipelineStage::AllCommands.into(),
                 };
                 post.push(BufferBarrier::new(
                     p.dst.buffer().as_range(..).unwrap(),
@@ -157,9 +155,8 @@ impl<'a> UploadPool<'a> {
                     p.final_state,
                     PipelineStage::Transfer.into(),
                     dst_stage,
-                    q,
-                    q,
-                    true,
+                    queue,
+                    queue,
                 ).with_range(p.dst.offset() as usize, p.size as usize));
             }
             encoder.buffer_barriers(&post);

@@ -25,7 +25,7 @@ impl RenderableApp for SimpleApp {
 
         let mut node = builder.add_lambda_node("clear");
 
-        let output_access = node.write_hint(&mut output, TextureState::General, vk::PipelineStageFlags2::TRANSFER);
+        let output_access = node.write_hint(&mut output, TextureState::GeneralWrite, vk::PipelineStageFlags2::TRANSFER);
         node.execute(move |ctx| {
             let rt = ctx.get(&output_access);
             let encoder = ctx.command_encoder();

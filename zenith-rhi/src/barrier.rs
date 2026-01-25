@@ -175,36 +175,53 @@ pub enum BufferState {
     TransferSrc,
     TransferDst,
     Uniform,
-    Storage,
+    StorageRead,
+    StorageWrite,
     Vertex,
     Index,
 }
 
 impl BufferState {
-    pub fn into_pipeline_stage(self, shader_used_stage: vk::PipelineStageFlags2) -> vk::PipelineStageFlags2 {
+    pub fn into_pipeline_stage(self, used_stage: vk::PipelineStageFlags2) -> vk::PipelineStageFlags2 {
         match self {
             BufferState::Undefined => vk::PipelineStageFlags2::NONE,
             BufferState::HostWrite => vk::PipelineStageFlags2::HOST,
             BufferState::TransferSrc |
             BufferState::TransferDst => vk::PipelineStageFlags2::TRANSFER,
-            BufferState::Uniform => shader_used_stage,
-            BufferState::Storage => shader_used_stage,
+            BufferState::Uniform |
+            BufferState::StorageRead |
+            BufferState::StorageWrite => used_stage,
             BufferState::Vertex => vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
             BufferState::Index => vk::PipelineStageFlags2::INDEX_INPUT,
         }
     }
 
-    pub fn into_access_flag(self, is_readonly: bool) -> vk::AccessFlags2 {
+    pub fn into_access_flag(self) -> vk::AccessFlags2 {
         match self {
             BufferState::Undefined => vk::AccessFlags2::NONE,
             BufferState::HostWrite => vk::AccessFlags2::HOST_WRITE,
             BufferState::TransferSrc => vk::AccessFlags2::TRANSFER_READ,
             BufferState::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
             BufferState::Uniform => vk::AccessFlags2::UNIFORM_READ,
-            // TODO: Is it better to identify the write-only case?
-            BufferState::Storage => if is_readonly { vk::AccessFlags2::SHADER_STORAGE_READ } else { vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE },
+            BufferState::StorageRead => vk::AccessFlags2::SHADER_STORAGE_READ,
+            BufferState::StorageWrite => vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
             BufferState::Vertex => vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
             BufferState::Index => vk::AccessFlags2::INDEX_READ,
+        }
+    }
+
+    pub fn is_write(&self) -> bool {
+        match self {
+            BufferState::Undefined |
+            BufferState::TransferSrc |
+            BufferState::Uniform |
+            BufferState::StorageRead |
+            BufferState::Vertex |
+            BufferState::Index => false,
+
+            BufferState::HostWrite |
+            BufferState::TransferDst |
+            BufferState::StorageWrite => true,
         }
     }
 }
@@ -217,7 +234,6 @@ pub struct BufferBarrier<'a> {
     pub dst_stage: PipelineStages,
     pub src_queue: Queue,
     pub dst_queue: Queue,
-    pub readonly: bool,
     pub offset: usize,
     pub size: usize,
 }
@@ -231,7 +247,6 @@ impl<'a> BufferBarrier<'a> {
         dst_stage: PipelineStages,
         src_queue: Queue,
         dst_queue: Queue,
-        readonly: bool,
     ) -> Self {
         Self {
             buffer,
@@ -241,7 +256,6 @@ impl<'a> BufferBarrier<'a> {
             dst_stage,
             src_queue,
             dst_queue,
-            readonly,
             offset: 0,
             size: buffer.buffer().size() as usize,
         }
@@ -254,15 +268,33 @@ impl<'a> BufferBarrier<'a> {
     }
 
     pub fn to_vk(&self) -> vk::BufferMemoryBarrier2<'a> {
-        // Ensure stage mask matches access mask expectations derived from BufferState.
-        // This mirrors the old behavior of `buffer_barrier()` which derives stage from state.
-        let src_stage_vk = self.src_state.into_pipeline_stage(self.src_stage.to_vk());
-        let dst_stage_vk = self.dst_state.into_pipeline_stage(self.dst_stage.to_vk());
+        let mut src_stage_vk = self.src_state.into_pipeline_stage(self.src_stage.to_vk());
+        let mut dst_stage_vk = self.dst_state.into_pipeline_stage(self.dst_stage.to_vk());
+
+        let mut src_access_mask = vk::AccessFlags2::NONE;
+        let mut dst_access_mask = vk::AccessFlags2::NONE;
+
+        // WAW or RAW
+        if self.src_state.is_write() {
+            // add availability operations for source memory
+            src_access_mask = self.src_state.into_access_flag();
+            // make dst memory visible
+            dst_access_mask = self.dst_state.into_access_flag();
+        }
+
+        if src_stage_vk == vk::PipelineStageFlags2::empty() {
+            src_stage_vk = vk::PipelineStageFlags2::TOP_OF_PIPE;
+        }
+
+        if dst_stage_vk == vk::PipelineStageFlags2::empty() {
+            dst_stage_vk = vk::PipelineStageFlags2::BOTTOM_OF_PIPE;
+        }
+
         vk::BufferMemoryBarrier2::default()
             .src_stage_mask(src_stage_vk)
-            .src_access_mask(self.src_state.into_access_flag(self.readonly))
+            .src_access_mask(src_access_mask)
             .dst_stage_mask(dst_stage_vk)
-            .dst_access_mask(self.dst_state.into_access_flag(self.readonly))
+            .dst_access_mask(dst_access_mask)
             .src_queue_family_index(self.src_queue.family_index())
             .dst_queue_family_index(self.dst_queue.family_index())
             .buffer(self.buffer.buffer().handle())
@@ -277,8 +309,10 @@ pub enum TextureState {
     TransferSrc,
     TransferDst,
     Sampled,
-    Storage,
-    General,
+    StorageRead,
+    StorageWrite,
+    GeneralRead,
+    GeneralWrite,
     Color,
     DepthStencil,
     Present,
@@ -290,27 +324,31 @@ impl TextureState {
             TextureState::Undefined => vk::PipelineStageFlags2::NONE,
             TextureState::TransferSrc |
             TextureState::TransferDst => vk::PipelineStageFlags2::TRANSFER,
-            TextureState::Sampled => shader_used_stage,
-            TextureState::Storage => shader_used_stage,
-            TextureState::General => shader_used_stage,
+            TextureState::Sampled |
+            TextureState::StorageRead |
+            TextureState::StorageWrite |
+            TextureState::GeneralRead |
+            TextureState::GeneralWrite => shader_used_stage,
             TextureState::Color => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             TextureState::DepthStencil => vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
             TextureState::Present => vk::PipelineStageFlags2::NONE,
         }
     }
 
-    pub fn into_access_flag(self, is_readonly: bool) -> vk::AccessFlags2 {
+    pub fn into_access_flag(self) -> vk::AccessFlags2 {
         match self {
             TextureState::Undefined => vk::AccessFlags2::NONE,
             TextureState::TransferSrc => vk::AccessFlags2::TRANSFER_READ,
             TextureState::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
             TextureState::Sampled => vk::AccessFlags2::SHADER_SAMPLED_READ,
-            // TODO: Is it better to identify the write-only case?
-            TextureState::Storage => if is_readonly { vk::AccessFlags2::SHADER_STORAGE_READ } else { vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE },
-            TextureState::General => if is_readonly { vk::AccessFlags2::MEMORY_READ } else { vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE },
-            TextureState::Color => if is_readonly { vk::AccessFlags2::COLOR_ATTACHMENT_READ } else { vk::AccessFlags2::COLOR_ATTACHMENT_WRITE }
-            TextureState::DepthStencil => if is_readonly { vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ } else { vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE }
-            TextureState::Present => vk::AccessFlags2::NONE
+            TextureState::StorageRead => vk::AccessFlags2::SHADER_STORAGE_READ,
+            TextureState::StorageWrite => vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+            TextureState::GeneralRead => vk::AccessFlags2::MEMORY_READ,
+            TextureState::GeneralWrite => vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+            // TODO: color and depth/stencil read/write state can be determined by the pipeline state
+            TextureState::Color => vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            TextureState::DepthStencil => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            TextureState::Present => vk::AccessFlags2::NONE,
         }
     }
 
@@ -320,11 +358,30 @@ impl TextureState {
             TextureState::TransferSrc => vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             TextureState::TransferDst => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             TextureState::Sampled => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            TextureState::Storage => vk::ImageLayout::GENERAL,
-            TextureState::General => vk::ImageLayout::GENERAL,
+            TextureState::StorageRead |
+            TextureState::StorageWrite |
+            TextureState::GeneralRead |
+            TextureState::GeneralWrite => vk::ImageLayout::GENERAL,
             TextureState::Color => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             TextureState::DepthStencil => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             TextureState::Present => vk::ImageLayout::PRESENT_SRC_KHR,
+        }
+    }
+
+    pub fn is_write(&self) -> bool {
+        match self {
+            TextureState::Undefined |
+            TextureState::TransferSrc | 
+            TextureState::StorageRead |
+            TextureState::Sampled |
+            TextureState::GeneralRead |
+            TextureState::Present => false,
+            
+            TextureState::TransferDst |
+            TextureState::StorageWrite |
+            TextureState::GeneralWrite |
+            TextureState::Color |
+            TextureState::DepthStencil => true,
         }
     }
 }
@@ -336,8 +393,10 @@ impl From<TextureState> for TextureLayout {
             TextureState::TransferSrc => TextureLayout::TransferSrc,
             TextureState::TransferDst => TextureLayout::TransferDst,
             TextureState::Sampled => TextureLayout::ShaderReadOnly,
-            TextureState::Storage => TextureLayout::General,
-            TextureState::General => TextureLayout::General,
+            TextureState::StorageRead |
+            TextureState::StorageWrite |
+            TextureState::GeneralRead |
+            TextureState::GeneralWrite => TextureLayout::General,
             TextureState::Color => TextureLayout::Color,
             TextureState::DepthStencil => TextureLayout::DepthStencil,
             TextureState::Present => TextureLayout::Present,
@@ -353,7 +412,6 @@ pub struct TextureBarrier<'a> {
     pub dst_stage: PipelineStages,
     pub src_queue: Queue,
     pub dst_queue: Queue,
-    pub readonly: bool,
     pub discard: bool,
     pub old_layout: TextureLayout,
     pub new_layout: TextureLayout,
@@ -368,7 +426,6 @@ impl<'a> TextureBarrier<'a> {
         dst_stage: PipelineStages,
         src_queue: Queue,
         dst_queue: Queue,
-        readonly: bool,
         discard: bool,
     ) -> Self {
         let old_layout = TextureLayout::from(src_state);
@@ -381,7 +438,6 @@ impl<'a> TextureBarrier<'a> {
             dst_stage,
             src_queue,
             dst_queue,
-            readonly,
             discard,
             old_layout,
             new_layout,
@@ -396,19 +452,38 @@ impl<'a> TextureBarrier<'a> {
 
     pub fn to_vk(&self) -> vk::ImageMemoryBarrier2<'a> {
         let mut old_layout = self.old_layout.to_vk();
+        
         if self.discard {
             old_layout = vk::ImageLayout::UNDEFINED;
         }
-        // Ensure stage mask matches access mask expectations derived from TextureState.
-        // This mirrors the old behavior of `texture_barrier()` which derives stage from state.
-        let src_stage_vk = self.src_state.into_pipeline_stage(self.src_stage.to_vk());
-        let dst_stage_vk = self.dst_state.into_pipeline_stage(self.dst_stage.to_vk());
 
+        let mut src_stage_vk = self.src_state.into_pipeline_stage(self.src_stage.to_vk());
+        let mut dst_stage_vk = self.dst_state.into_pipeline_stage(self.dst_stage.to_vk());
+
+        let mut src_access_mask = vk::AccessFlags2::NONE;
+        let mut dst_access_mask = vk::AccessFlags2::NONE;
+        
+        // WAW or RAW
+        if self.src_state.is_write() {
+            // add availability operations for source memory
+            src_access_mask = self.src_state.into_access_flag();
+            // make dst memory visible
+            dst_access_mask = self.dst_state.into_access_flag();
+        }
+
+        if src_stage_vk == vk::PipelineStageFlags2::empty() {
+            src_stage_vk = vk::PipelineStageFlags2::TOP_OF_PIPE;
+        }
+
+        if dst_stage_vk == vk::PipelineStageFlags2::empty() {
+            dst_stage_vk = vk::PipelineStageFlags2::BOTTOM_OF_PIPE;
+        }
+        
         vk::ImageMemoryBarrier2::default()
             .src_stage_mask(src_stage_vk)
-            .src_access_mask(self.src_state.into_access_flag(self.readonly))
+            .src_access_mask(src_access_mask)
             .dst_stage_mask(dst_stage_vk)
-            .dst_access_mask(self.dst_state.into_access_flag(self.readonly))
+            .dst_access_mask(dst_access_mask)
             .src_queue_family_index(self.src_queue.family_index())
             .dst_queue_family_index(self.dst_queue.family_index())
             .old_layout(old_layout)

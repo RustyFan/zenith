@@ -101,7 +101,7 @@ impl TriangleRenderer {
 
         let vb = node.read(&vb, BufferState::Vertex);
         let ib = node.read(&ib, BufferState::Index);
-        let tb = node.read(&tb, BufferState::Storage);
+        let tb = node.read(&tb, BufferState::StorageRead);
         let output_rt = node.write(output, TextureState::Color);
 
         let shader = GraphicShaderInputBuilder::default()
