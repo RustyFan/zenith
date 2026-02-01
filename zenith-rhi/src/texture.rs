@@ -493,6 +493,7 @@ fn format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct TextureRange<'a> {
     texture: &'a Texture,
     layout: TextureLayout,

@@ -438,5 +438,6 @@ fn is_texture(ty: vk::DescriptorType) -> bool {
         vk::DescriptorType::COMBINED_IMAGE_SAMPLER
             | vk::DescriptorType::SAMPLED_IMAGE
             | vk::DescriptorType::STORAGE_IMAGE
+            | vk::DescriptorType::SAMPLER
     )
 }

@@ -1,5 +1,6 @@
-﻿use std::any::Any;
+use std::any::Any;
 use std::path::{Path, PathBuf};
+use anyhow::Result;
 use bincode::{Decode, Encode};
 use bytemuck::{NoUninit, Pod, Zeroable};
 use derive_builder::Builder;
@@ -212,6 +213,19 @@ impl MeshCollection {
     pub fn add_mesh(&mut self, mesh_url: AssetUrl, mat_url: AssetUrl) {
         self.meshes.push(mesh_url);
         self.materials.push(mat_url);
+    }
+
+    /// Iterate mesh/material pairs. This is fallible because the two lists may be mismatched.
+    pub fn iter(&self) -> Result<impl Iterator<Item = (&AssetUrl, &AssetUrl)>> {
+        if self.meshes.len() != self.materials.len() {
+            anyhow::bail!(
+                "MeshCollection meshes/materials length mismatch ({} vs {})",
+                self.meshes.len(),
+                self.materials.len()
+            );
+        }
+
+        Ok(self.meshes.iter().zip(self.materials.iter()))
     }
 
     // "mesh/cerberus/scene.gltf" -> "mesh/cerberus/scene.mscl"

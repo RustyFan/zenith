@@ -19,15 +19,29 @@ Texture2D texture_heap[];
 [[vk::binding(1, 0)]]
 ByteAddressBuffer buffer_heap[];
 
-[[vk::binding(3, 0)]]
+[[vk::binding(2, 0)]]
 SamplerState sampler_heap[];
 
 T get_bindless_buffer<T>(uint handle) {
-    uint index = bindless_index(handle);
+    const uint index = bindless_index(handle);
     return buffer_heap[NonUniformResourceIndex(index)].Load<T>(0);
 }
 
 T get_bindless_buffer_with_offset<T>(uint handle) {
-    uint index = bindless_index(handle);
+    const uint index = bindless_index(handle);
     return buffer_heap[NonUniformResourceIndex(index)].Load<T>(0);
+}
+
+enum SamplerKind : uint {
+    LinearRepeat = 0,
+    LinearClamp  = 1,
+    NearestRepeat = 2,
+    NearestClamp  = 3,
+};
+
+float4 sample_bindless_texture(uint handle, SamplerKind sampler_kind, float2 uv) {
+    const uint index = bindless_index(handle);
+    const Texture2D tex = texture_heap[NonUniformResourceIndex(index)];
+    const SamplerState samp = sampler_heap[NonUniformResourceIndex((uint)sampler_kind)];
+    return tex.Sample(samp, uv);
 }

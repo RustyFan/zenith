@@ -5,6 +5,7 @@
 //! the resources alive while GPU work may reference them.
 
 use ash::vk;
+use ash::vk::Handle;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -148,7 +149,6 @@ struct BindlessPoolState {
     _samplers: SlotMap,
 }
 
-// TODO: support texture 2d and buffers for now; sampler API can be added later.
 pub struct BindlessPool {
     device: ash::Device,
     collector: DescriptorBindingCollector,
@@ -169,7 +169,7 @@ impl BindlessPool {
         // Bindless descriptor set layout: set 0 with 3 bindings.
         // - binding 0: textures (sampled)
         // - binding 1: typeless buffers (ByteAddressBuffer) -> STORAGE_BUFFER
-        // - binding 3: samplers
+        // - binding 2: samplers
         let bindings = [
             LayoutBinding {
                 binding: ResourceType::Texture2D as u32,
@@ -281,6 +281,43 @@ impl BindlessPool {
         };
 
         Ok(BindlessHandle::new(ty, index))
+    }
+
+    /// Bind a sampler into the bindless sampler heap at a **fixed index**.
+    ///
+    /// Intended usage: define a small shader-side enum (e.g. LinearRepeat=0...) and
+    /// keep the mapping stable across the engine.
+    pub fn bind_sampler_at(&mut self, index: u32, sampler: vk::Sampler) -> anyhow::Result<(), DescriptorBindingError> {
+        if index >= self.caps.max_samplers {
+            panic!("bindless sampler index out of range (index={}, max={})", index, self.caps.max_samplers);
+        }
+
+        let key = sampler.as_raw() as u64;
+        // Track the last key written into this slot to avoid redundant descriptor writes.
+        if (index as usize) >= self.state._samplers.keys_by_index.len() {
+            self.state._samplers.keys_by_index.resize((index as usize) + 1, None);
+        }
+        if self.state._samplers.keys_by_index[index as usize] == Some(key) {
+            return Ok(());
+        }
+        self.state._samplers.keys_by_index[index as usize] = Some(key);
+
+        self.collector.begin_binding("__bindless_samplers".to_string(), DescriptorBindLocation {
+            set: 0,
+            binding: ResourceType::Sampler.binding_index(),
+            array_index: index,
+            ty: vk::DescriptorType::SAMPLER,
+        });
+        // Note: a SAMPLER descriptor uses only `sampler`; image_view/layout are ignored.
+        self.collector.bind_texture(
+            vk::DescriptorImageInfo::default()
+                .sampler(sampler)
+                .image_view(vk::ImageView::null())
+                .image_layout(vk::ImageLayout::UNDEFINED)
+        )?;
+        self.collector.end_binding();
+
+        Ok(())
     }
 
     pub fn unbind(&mut self, handle: BindlessHandle) {

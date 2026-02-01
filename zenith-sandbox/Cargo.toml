@@ -8,5 +8,6 @@ license = "MIT"
 [dependencies]
 winit.workspace = true
 anyhow.workspace = true
+glam.workspace = true
 
 zenith = { path = "../zenith" }

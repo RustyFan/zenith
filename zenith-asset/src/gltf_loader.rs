@@ -351,6 +351,9 @@ impl RawResourceBaker for RawGltfProcessor {
         let asset_serialize_path = base_directory.join(&mesh_collection_url);
         serialize_asset(&mesh_collection, &asset_serialize_path)?;
 
+        // Also register the collection so users can immediately get it via AssetHandle<MeshCollection>.
+        registry.register(mesh_collection_url.clone(), mesh_collection.clone());
+
         info!("[{}] is loaded and serialized.", asset_url);
         info!("{:?}", mesh_collection);
 

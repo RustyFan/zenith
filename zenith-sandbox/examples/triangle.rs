@@ -33,7 +33,7 @@ impl RenderableApp for TriangleApp {
 
         let mut output = builder.import(output, TextureState::Undefined);
 
-        self.triangle_renderer.as_ref().unwrap().render_to(
+        self.triangle_renderer.as_ref().unwrap().render(
             builder,
             &mut output,
             extent.width,

@@ -20,6 +20,16 @@ impl PartialOrd<f32> for Degree {
 
 impl Degree {
     #[inline]
+    pub fn new(val: f32) -> Self {
+        Self(val)
+    }
+
+    #[inline]
+    pub fn to_radians(self) -> Radians {
+        self.into()
+    }
+
+    #[inline]
     pub fn clamp(&self, min: Degree, max: Degree) -> Degree {
         self.0.clamp(min.0, max.0).into()
     }
@@ -46,6 +56,16 @@ impl PartialOrd<f32> for Radians {
 }
 
 impl Radians {
+    #[inline]
+    pub fn new(val: f32) -> Self {
+        Self(val)
+    }
+
+    #[inline]
+    pub fn to_degree(self) -> Degree {
+        self.into()
+    }
+
     #[inline]
     pub fn clamp(&self, min: Radians, max: Radians) -> Radians {
         self.0.clamp(min.0, max.0).into()

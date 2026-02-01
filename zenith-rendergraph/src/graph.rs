@@ -670,6 +670,11 @@ impl<'node> BindlessBinder<'node> {
     }
 
     #[inline]
+    pub fn bind_sampler_at(&mut self, index: u32, sampler: vk::Sampler) -> anyhow::Result<()> {
+        Ok(self.pool.lock().bind_sampler_at(index, sampler)?)
+    }
+
+    #[inline]
     pub fn finish(&mut self) {
         let mut pool = self.pool.lock();
         pool.update(self.encoder);

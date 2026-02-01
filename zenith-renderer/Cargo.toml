@@ -7,6 +7,9 @@ edition = "2021"
 bytemuck.workspace  = true
 log.workspace = true
 anyhow.workspace = true
+glam.workspace = true
 
+zenith-core = { path = "../zenith-core" }
 zenith-rhi = { path = "../zenith-rhi" }
 zenith-rendergraph = { path = "../zenith-rendergraph" }
+zenith-asset = { path = "../zenith-asset" }

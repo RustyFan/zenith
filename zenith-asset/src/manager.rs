@@ -1,4 +1,4 @@
-﻿use std::ffi::OsStr;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use anyhow::Result;
 use zenith_core::log::info;
@@ -143,6 +143,12 @@ impl AssetManager {
         // TODO: notice a 1-to-1 mapping between AssetType and static asset type, further abstract the deserialize logic
         if asset_type == AssetType::MeshCollection {
             let asset: MeshCollection = deserialize_asset(&cache_asset_path)?;
+
+            // Register MeshCollection itself so AssetHandle<MeshCollection>::get() works.
+            ASSET_REGISTRY
+                .get()
+                .unwrap()
+                .register(load_request.url.clone(), asset.clone());
 
             for mesh_url in &asset.meshes {
                 self.request_load_asset(AssetLoadRequestBuilder::default()

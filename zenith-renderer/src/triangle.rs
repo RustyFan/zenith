@@ -9,7 +9,7 @@ use zenith_rendergraph::{
 use zenith_rhi::pipeline::RasterizationStateBuilder;
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable, VertexLayout)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 3],
@@ -74,7 +74,7 @@ impl TriangleRenderer {
     }
 
     /// Render the triangle directly to the provided output texture.
-    pub fn render_to(
+    pub fn render(
         &self,
         builder: &mut RenderGraphBuilder,
         output: &mut RenderGraphResource<Texture>,

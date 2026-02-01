@@ -5,14 +5,25 @@ use ash::vk;
 use crate::{
     Buffer, BufferDesc, BufferState, ImmediateCommandEncoder, RenderDevice,
     BufferBarrier, PipelineStage, PipelineStages,
+    TextureBarrier, TextureLayout, TextureState,
 };
 use crate::buffer::BufferRange;
+use crate::texture::TextureRange;
 
 struct PendingBufferCopy<'a> {
     dst: BufferRange<'a>,
     src_offset: vk::DeviceSize,
     size: vk::DeviceSize,
     final_state: BufferState,
+}
+
+struct PendingTextureCopy<'a> {
+    dst: TextureRange<'a>,
+    src_offset: vk::DeviceSize,
+    extent: vk::Extent3D,
+    mip_level: u32,
+    array_layer: u32,
+    final_state: TextureState,
 }
 
 /// A simple upload pool backed by a single reusable staging buffer.
@@ -24,6 +35,7 @@ pub struct UploadPool<'a> {
     staging_size: vk::DeviceSize,
     write_head: vk::DeviceSize,
     pending: Vec<PendingBufferCopy<'a>>,
+    pending_textures: Vec<PendingTextureCopy<'a>>,
 }
 
 impl<'a> UploadPool<'a> {
@@ -34,6 +46,7 @@ impl<'a> UploadPool<'a> {
             staging_size,
             write_head: 0,
             pending: Vec::new(),
+            pending_textures: Vec::new(),
         })
     }
 
@@ -74,12 +87,50 @@ impl<'a> UploadPool<'a> {
         Ok(())
     }
 
+    pub fn enqueue_upload_texture(
+        &mut self,
+        dst: TextureRange<'a>,
+        data: &[u8],
+        extent: vk::Extent3D,
+        mip_level: u32,
+        array_layer: u32,
+        final_state: TextureState,
+    ) -> Result<(), vk::Result> {
+        let size = data.len() as vk::DeviceSize;
+        if size == 0 {
+            return Ok(());
+        }
+        if size > self.staging_size {
+            return Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        }
+        if self.write_head + size > self.staging_size {
+            return Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        }
+
+        let src_offset = self.write_head;
+        self.staging
+            .as_range((src_offset as u64)..((src_offset + size) as u64))?
+            .write(data)?;
+        self.write_head += size;
+
+        self.pending_textures.push(PendingTextureCopy {
+            dst,
+            src_offset,
+            extent,
+            mip_level,
+            array_layer,
+            final_state,
+        });
+
+        Ok(())
+    }
+
     #[inline]
-    pub fn is_empty(&self) -> bool { self.pending.is_empty() }
+    pub fn is_empty(&self) -> bool { self.pending.is_empty() && self.pending_textures.is_empty() }
 
     /// Flush all pending uploads using an immediate submit, blocking until completion.
     pub fn flush(&mut self, immediate: &ImmediateCommandEncoder, device: &RenderDevice) -> Result<(), vk::Result> {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() && self.pending_textures.is_empty() {
             self.write_head = 0;
             return Ok(());
         }
@@ -89,6 +140,7 @@ impl<'a> UploadPool<'a> {
         let queue = device.graphics_queue();
 
         let pending = std::mem::take(&mut self.pending);
+        let pending_textures = std::mem::take(&mut self.pending_textures);
 
         let result = immediate.submit_and_wait(|encoder| {
             let mut pre: Vec<BufferBarrier> = Vec::with_capacity(1 + pending.len());
@@ -119,6 +171,26 @@ impl<'a> UploadPool<'a> {
             }
             encoder.buffer_barriers(&pre);
 
+            // Dst textures: Undefined -> TransferDst
+            if !pending_textures.is_empty() {
+                let mut pre_img: Vec<TextureBarrier> = Vec::with_capacity(pending_textures.len());
+                for p in pending_textures.iter() {
+                    pre_img.push(TextureBarrier::new(
+                        p.dst.texture()
+                            .as_range(TextureLayout::Undefined, .., ..)
+                            .unwrap(),
+                        TextureState::Undefined,
+                        TextureState::TransferDst,
+                        PipelineStages::empty(),
+                        PipelineStage::Transfer.into(),
+                        queue,
+                        queue,
+                        true,
+                    ));
+                }
+                encoder.texture_barriers(&pre_img);
+            }
+
             // Copies
             for p in pending.iter() {
                 let region = vk::BufferCopy::default()
@@ -126,6 +198,29 @@ impl<'a> UploadPool<'a> {
                     .dst_offset(p.dst.offset() as vk::DeviceSize)
                     .size(p.size);
                 encoder.copy_buffer(staging_handle, p.dst.buffer().handle(), std::slice::from_ref(&region));
+            }
+
+            for p in pending_textures.iter() {
+                let aspect = p.dst.texture().aspect();
+                let region = vk::BufferImageCopy::default()
+                    .buffer_offset(p.src_offset)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(aspect)
+                            .mip_level(p.mip_level)
+                            .base_array_layer(p.array_layer)
+                            .layer_count(1),
+                    )
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .image_extent(p.extent);
+                encoder.copy_buffer_to_image(
+                    staging_handle,
+                    p.dst.texture().handle(),
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    std::slice::from_ref(&region),
+                );
             }
 
             // Post-copy barriers: TRANSFER_DST -> final_state
@@ -149,11 +244,32 @@ impl<'a> UploadPool<'a> {
                 ).with_range(p.dst.offset() as usize, p.size as usize));
             }
             encoder.buffer_barriers(&post);
+
+            if !pending_textures.is_empty() {
+                let mut post_img: Vec<TextureBarrier> = Vec::with_capacity(pending_textures.len());
+                for p in pending_textures.iter() {
+                    let dst_stage = texture_state_to_dst_stage(p.final_state);
+                    post_img.push(TextureBarrier::new(
+                        p.dst.texture()
+                            .as_range(TextureLayout::TransferDst, .., ..)
+                            .unwrap(),
+                        TextureState::TransferDst,
+                        p.final_state,
+                        PipelineStage::Transfer.into(),
+                        dst_stage,
+                        queue,
+                        queue,
+                        false,
+                    ));
+                }
+                encoder.texture_barriers(&post_img);
+            }
         });
 
         if result.is_err() {
             // restore pending on failure (best-effort)
             self.pending = pending;
+            self.pending_textures = pending_textures;
         }
 
         result?;
@@ -164,8 +280,8 @@ impl<'a> UploadPool<'a> {
     /// Convenience: enqueue then flush (blocking).
     pub fn upload_buffer(
         &mut self,
-        immediate: &ImmediateCommandEncoder,
         device: &RenderDevice,
+        immediate: &ImmediateCommandEncoder,
         dst: BufferRange<'a>,
         data: &[u8],
         final_state: BufferState,
@@ -175,5 +291,34 @@ impl<'a> UploadPool<'a> {
             self.enqueue_copy(dst, data, final_state)?;
         }
         self.flush(immediate, device)
+    }
+
+    /// Convenience: enqueue then flush (blocking).
+    pub fn upload_texture(
+        &mut self,
+        device: &RenderDevice,
+        immediate: &ImmediateCommandEncoder,
+        dst: TextureRange<'a>,
+        data: &[u8],
+        extent: vk::Extent3D,
+        mip_level: u32,
+        array_layer: u32,
+        final_state: TextureState,
+    ) -> Result<(), vk::Result> {
+        if self.enqueue_upload_texture(dst, data, extent, mip_level, array_layer, final_state).is_err() {
+            self.flush(immediate, device)?;
+            self.enqueue_upload_texture(dst, data, extent, mip_level, array_layer, final_state)?;
+        }
+        self.flush(immediate, device)
+    }
+}
+
+fn texture_state_to_dst_stage(state: TextureState) -> PipelineStages {
+    match state {
+        TextureState::Sampled => PipelineStage::FragmentShader.into(),
+        TextureState::Color => PipelineStage::ColorAttachmentOutput.into(),
+        TextureState::DepthStencil => PipelineStages::from(PipelineStage::EarlyFragmentTests) | PipelineStages::from(PipelineStage::LateFragmentTests),
+        TextureState::TransferSrc | TextureState::TransferDst => PipelineStage::Transfer.into(),
+        _ => PipelineStage::AllCommands.into(),
     }
 }

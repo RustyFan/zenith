@@ -30,12 +30,18 @@ pub struct Camera {
     forward: Vec3,
     right: Vec3,
     up: Vec3,
+    /// FOV for horizontal axis
+    fov: Degree,
+    aspect_ratio: f32,
+    z_near: f32,
     view: Mat4,
     proj: Mat4,
 }
 
 impl Default for Camera {
     fn default() -> Self {
+        let aspect_ratio = 16.0 / 9.0;
+        let fov = Degree::new(90.0);
         let mut cam = Self {
             position: Default::default(),
             rotation: Quat::IDENTITY,
@@ -46,27 +52,56 @@ impl Default for Camera {
             right: WORLD_SPACE_RIGHT,
             up: WORLD_SPACE_UP,
 
+            fov,
+            aspect_ratio,
+            z_near: NEAR_PLANE,
+
             view: Default::default(),
-            proj: Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_6, 1.77777, NEAR_PLANE),
+            proj: Default::default(),
         };
         cam.update_view();
+        cam.update_proj();
         cam
     }
 }
 
 impl Camera {
-    pub fn new(fov_y: Radians, aspect_ratio: f32, z_near: f32) -> Self {
+    pub fn new(fov: Degree, aspect_ratio: f32, z_near: f32) -> Self {
         let mut cam = Self {
-            proj: Mat4::perspective_infinite_reverse_rh(fov_y.into(), aspect_ratio, z_near.max(0.0001)),
+            fov,
+            aspect_ratio,
+            z_near,
             ..Default::default()
         };
         cam.update_view();
+        cam.update_proj();
         cam
+    }
+
+    #[inline]
+    pub fn set_position(&mut self, position: Vec3) {
+        self.position = position;
+    }
+
+    #[inline]
+    pub fn set_aspect_ratio(&mut self, aspect_ratio: f32) {
+        if self.aspect_ratio != aspect_ratio {
+            self.aspect_ratio = aspect_ratio;
+            self.update_proj();
+        }
+    }
+
+    #[inline]
+    pub fn set_fov(&mut self, fov: Degree) {
+        if self.fov != fov {
+            self.fov = fov;
+            self.update_proj();
+        }
     }
 
     /// Return the location of camera.
     #[inline]
-    pub fn location(&self) -> Vec3 {
+    pub fn position(&self) -> Vec3 {
         self.position
     }
 
@@ -125,6 +160,12 @@ impl Camera {
         self.view = Mat4::look_to_rh(self.position, forward, WORLD_SPACE_UP);
     }
 
+    fn update_proj(&mut self) {
+        let half_fov: Radians = (self.fov / 2.0).into();
+        let fov_y = Radians::new((half_fov.tan() / self.aspect_ratio).atan() * 2.0);
+        self.proj = Mat4::perspective_infinite_reverse_rh(*fov_y, self.aspect_ratio, self.z_near);
+    }
+
     fn update_local_basis(&mut self) {
         self.forward = self.rotation * WORLD_SPACE_FORWARD;
         self.right = self.rotation * WORLD_SPACE_RIGHT;
@@ -156,7 +197,7 @@ impl Default for CameraController {
             accum_local_yaw: Default::default(),
 
             move_speed: 70.,
-            mouse_sensitivity: 0.4,
+            mouse_sensitivity: 30.0,
             rotation_smoothing_factor: 0.5,
 
             accum_dx: 0.0,
@@ -229,12 +270,13 @@ impl CameraController {
 
     /// Update camera with axis speed.
     #[profiling::function]
-    pub fn update_cameras<'a>(&mut self,
-                              delta_time: f32,
-                              forward_axis_speed: f32,
-                              right_axis_speed: f32,
-                              up_axis_speed: f32,
-                              to_update_cameras: impl IntoIterator<Item = &'a mut Camera>,
+    pub fn update_cameras<'a>(
+        &mut self,
+        delta_time: f32,
+        forward_axis_speed: f32,
+        right_axis_speed: f32,
+        up_axis_speed: f32,
+        to_update_cameras: impl IntoIterator<Item = &'a mut Camera>
     ) {
         let d_local_yaw = Radians::from(-self.accum_dx * self.mouse_sensitivity * delta_time);
         let d_local_pitch = Radians::from(-self.accum_dy * self.mouse_sensitivity * delta_time);
