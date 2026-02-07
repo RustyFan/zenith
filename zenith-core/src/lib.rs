@@ -5,4 +5,4 @@ pub mod math;
 pub mod input;
 pub mod file;
 pub mod profile;
-pub mod cli;
+pub mod cli;pub mod time;

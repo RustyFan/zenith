@@ -14,6 +14,7 @@ use zenith::asset::render::MeshCollection;
 use zenith::core::camera::{Camera, CameraController, NEAR_PLANE};
 use zenith::core::input::InputActionMapper;
 use zenith::core::math::Degree;
+use zenith::core::time::{Milliseconds, Timer};
 
 pub struct WorldApp {
     world_renderer: Option<WorldRenderer>,
@@ -60,6 +61,9 @@ impl App for WorldApp {
 
 impl RenderableApp for WorldApp {
     fn prepare(&mut self, render_device: &zenith::rhi::RenderDevice, window: Arc<Window>) -> Result<(), anyhow::Error> {
+        let mut prepare_timer = Timer::new();
+        prepare_timer.start();
+
         self.input.register_axis("walk", [KeyCode::KeyW], [KeyCode::KeyS], 0.2);
         self.input.register_axis("strafe", [KeyCode::KeyD], [KeyCode::KeyA], 0.2);
         self.input.register_axis("lift", [KeyCode::KeyE], [KeyCode::KeyQ], 0.2);
@@ -76,15 +80,37 @@ impl RenderableApp for WorldApp {
 
         // Blocking load & bake (first run may be slower).
         let manager = AssetManager::new();
+        let mut load_timer = Timer::new();
+        load_timer.start();
         manager.request_load("mesh/cerberus/scene.gltf")?;
+        load_timer.stop();
+        let load_ms = load_timer.elapsed_total::<Milliseconds>().value();
 
+        let mut renderer_new_timer = Timer::new();
+        renderer_new_timer.start();
         let mut renderer = WorldRenderer::new(render_device)?;
+        renderer_new_timer.stop();
+        let renderer_new_ms = renderer_new_timer.elapsed_total::<Milliseconds>().value();
 
         // mesh/cerberus/scene.gltf -> mesh/cerberus/scene.mscl
         let collection = AssetHandle::<MeshCollection>::new(PathBuf::from("mesh/cerberus/scene.mscl").into());
+        let mut upload_timer = Timer::new();
+        upload_timer.start();
         renderer.add_mesh(render_device, collection)?;
+        upload_timer.stop();
+        let upload_ms = upload_timer.elapsed_total::<Milliseconds>().value();
 
         self.world_renderer = Some(renderer);
+
+        prepare_timer.stop();
+        let prepare_ms = prepare_timer.elapsed_total::<Milliseconds>().value();
+        zenith::core::log::info!(
+            "WorldApp prepare timings: prepare={}ms, request_load={}ms, world_renderer_new={}ms, gpu_upload={}ms",
+            prepare_ms,
+            load_ms,
+            renderer_new_ms,
+            upload_ms
+        );
         Ok(())
     }
 

@@ -7,14 +7,15 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 use crate::app::{RenderableApp};
 use crate::Engine;
+use zenith_core::time::{Seconds, Timer};
 
 pub struct EngineLoop<A> {
     app: A,
     engine: Option<Engine>,
 
     frame_count: u64,
-    last_tick_time: std::time::Instant,
-    last_time_printed: std::time::Instant,
+    frame_timer: Timer,
+    fps_timer: Timer,
 }
 
 impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
@@ -86,13 +87,18 @@ impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
 
 impl<A: RenderableApp> EngineLoop<A> {
     pub(super) fn new(app: A) -> Result<Self, anyhow::Error> {
+        let mut frame_timer = Timer::new();
+        frame_timer.start();
+        let mut fps_timer = Timer::new();
+        fps_timer.start();
+
         Ok(Self {
             engine: None,
             app,
 
             frame_count: 0u64,
-            last_tick_time: std::time::Instant::now(),
-            last_time_printed: std::time::Instant::now(),
+            frame_timer,
+            fps_timer,
         })
     }
 
@@ -139,30 +145,25 @@ impl<A: RenderableApp> EngineLoop<A> {
 
     #[profiling::function]
     fn tick(&mut self) {
-        let delta_time = {
-            let now = std::time::Instant::now();
-            let delta_time = now - self.last_tick_time;
-            self.last_tick_time = now;
+        self.frame_timer.tick();
+        let delta_time = self.frame_timer.elapsed::<Seconds>().value() as f32;
 
-            let last_time_print_elapsed = (now - self.last_time_printed).as_secs_f32();
-            if last_time_print_elapsed > 1. {
-                let fps: u32 = (self.frame_count as f32 / last_time_print_elapsed).ceil() as u32;
-                let engine = self.engine.as_ref().unwrap();
-                let stats = engine.render_device.last_defer_release_stats();
-                info!(
-                    "Frame rate: {} fps, pipelines: {}, deferred: {}b/{}t/{}p",
-                    fps,
-                    engine.pipeline_cache_size(),
-                    stats.buffer_count,
-                    stats.texture_count,
-                    stats.pool_count,
-                );
-                self.last_time_printed = now;
-                self.frame_count = 0;
-            }
-
-            delta_time.as_secs_f32()
-        };
+        let last_time_print_elapsed = self.fps_timer.elapsed_total::<Seconds>().value() as f32;
+        if last_time_print_elapsed > 1. {
+            let fps: u32 = (self.frame_count as f32 / last_time_print_elapsed).ceil() as u32;
+            let engine = self.engine.as_ref().unwrap();
+            let stats = engine.render_device.last_defer_release_stats();
+            info!(
+                "Frame rate: {} fps, pipelines: {}, deferred: {}b/{}t/{}p",
+                fps,
+                engine.pipeline_cache_size(),
+                stats.buffer_count,
+                stats.texture_count,
+                stats.pool_count,
+            );
+            self.fps_timer.reset();
+            self.frame_count = 0;
+        }
 
         let engine = self.engine.as_mut().unwrap();
         let app = &mut self.app;
