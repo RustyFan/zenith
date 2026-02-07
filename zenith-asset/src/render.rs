@@ -83,6 +83,9 @@ pub enum TextureFormat {
     R16G16,
     R16G16B16A16,
     R32G32B32A32Float,
+    Bc5Unorm,
+    Bc7Unorm,
+    Bc7Srgb,
 }
 
 impl TextureFormat {
@@ -95,6 +98,36 @@ impl TextureFormat {
             TextureFormat::R16G16 => 4,
             TextureFormat::R16G16B16A16 => 8,
             TextureFormat::R32G32B32A32Float => 16,
+            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb => 0,
+        }
+    }
+
+    pub fn is_block_compressed(&self) -> bool {
+        matches!(self, TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb)
+    }
+
+    pub fn block_dimensions(&self) -> (u32, u32) {
+        match self {
+            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb => (4, 4),
+            _ => (1, 1),
+        }
+    }
+
+    pub fn bytes_per_block(&self) -> u32 {
+        match self {
+            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb => 16,
+            _ => self.bytes_per_pixel(),
+        }
+    }
+
+    pub fn data_size_in_bytes(&self, width: u32, height: u32) -> usize {
+        if self.is_block_compressed() {
+            let (bw, bh) = self.block_dimensions();
+            let blocks_x = (width + bw - 1) / bw;
+            let blocks_y = (height + bh - 1) / bh;
+            (blocks_x * blocks_y * self.bytes_per_block()) as usize
+        } else {
+            (width * height * self.bytes_per_pixel()) as usize
         }
     }
 
@@ -107,6 +140,9 @@ impl TextureFormat {
             TextureFormat::R16G16 => ash::vk::Format::R16G16_UNORM,
             TextureFormat::R16G16B16A16 => ash::vk::Format::R16G16B16A16_UNORM,
             TextureFormat::R32G32B32A32Float => ash::vk::Format::R32G32B32A32_SFLOAT,
+            TextureFormat::Bc5Unorm => ash::vk::Format::BC5_UNORM_BLOCK,
+            TextureFormat::Bc7Unorm => ash::vk::Format::BC7_UNORM_BLOCK,
+            TextureFormat::Bc7Srgb => ash::vk::Format::BC7_SRGB_BLOCK,
         }
     }
     

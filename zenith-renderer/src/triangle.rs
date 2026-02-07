@@ -41,8 +41,8 @@ impl TriangleRenderer {
         {
             let total_size = vertex_data.len() + index_data.len();
             let mut upload_pool = UploadPool::new(device, total_size as _)?;
-            upload_pool.enqueue_copy_buffer(vertex_buffer.as_range(..)?, vertex_data, BufferState::Vertex)?;
-            upload_pool.enqueue_copy_buffer(index_buffer.as_range(..)?, index_data, BufferState::Index)?;
+            upload_pool.enqueue_copy_buffer(device, vertex_buffer.as_range(..)?, vertex_data, BufferState::Vertex)?;
+            upload_pool.enqueue_copy_buffer(device, index_buffer.as_range(..)?, index_data, BufferState::Index)?;
 
             let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
             upload_pool.flush(&immediate, device)?;

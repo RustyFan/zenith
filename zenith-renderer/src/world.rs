@@ -2,7 +2,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4};
-use zenith_asset::{Asset, AssetHandle};
+use zenith_asset::{AssetHandle};
 use zenith_asset::render::{MeshCollection, Mesh, Material, TextureFormat};
 use zenith_core::camera::{Camera, WORLD_SPACE_UP};
 use zenith_core::math::{Degree};
@@ -110,39 +110,7 @@ impl WorldRenderer {
             .get()
             .ok_or_else(|| anyhow!("MeshCollection not loaded/registered (call AssetManager::request_load first)"))?;
 
-        // 1. Precalculate the size of gpu upload pool
-        //------------------------------------------------------------------------------------------------
-
-        let mut total_upload_bytes: usize = 0;
-
-        for (mesh_url, mat_url) in collection.iter()? {
-            let mesh_handle = AssetHandle::<Mesh>::new(mesh_url.clone());
-            let mesh = mesh_handle
-                .get()
-                .ok_or_else(|| anyhow!("Mesh not loaded: {:?}", mesh_url.as_ref()))?;
-            total_upload_bytes += mesh.gpu_size_in_bytes();
-
-            let mat_handle = AssetHandle::<Material>::new(mat_url.clone());
-            let mat = mat_handle
-                .get()
-                .ok_or_else(|| anyhow!("Material not loaded: {:?}", mat_url.as_ref()))?;
-
-            let tex_urls = [
-                mat.base_color_tex.as_ref(),
-                mat.mra_tex.as_ref(),
-                mat.normal_tex.as_ref(),
-                mat.emissive_tex.as_ref(),
-            ];
-            for url in tex_urls.into_iter().flatten() {
-                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
-                let tex = tex_handle
-                    .get()
-                    .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
-                total_upload_bytes += tex.gpu_size_in_bytes();
-            }
-        }
-
-        // 2. Populate all upload data
+        // 1. Populate all upload data
         //------------------------------------------------------------------------------------------------
 
         struct PendingMeshUpload {
@@ -222,11 +190,27 @@ impl WorldRenderer {
             });
         }
 
-        // 3. Upload data to gpu
+        // 2. Upload data to gpu
         //------------------------------------------------------------------------------------------------
 
         let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
-        let mut upload_pool = UploadPool::new(device, total_upload_bytes.max(1) as _)?;
+        let mut upload_pool = UploadPool::new(device, 64 * 1024)?;
+
+        let validate_texture_data_size = |tex: &zenith_asset::render::Texture| -> anyhow::Result<()> {
+            let expected = tex.format.data_size_in_bytes(tex.width, tex.height);
+            if tex.pixels.len() != expected {
+                return Err(anyhow!(
+                    "Texture data size mismatch: {} ({}x{}, {:?}) expected {} bytes, got {} bytes",
+                    tex.width * tex.height,
+                    tex.width,
+                    tex.height,
+                    tex.format,
+                    expected,
+                    tex.pixels.len()
+                ));
+            }
+            Ok(())
+        };
 
         for p in &pending {
             let mesh_handle = AssetHandle::<Mesh>::new(p.mesh_url.clone());
@@ -234,8 +218,8 @@ impl WorldRenderer {
                 .get()
                 .ok_or_else(|| anyhow!("Mesh not loaded: {:?}", p.mesh_url.as_ref()))?;
 
-            upload_pool.enqueue_copy_buffer(p.gpu.vertex_buffer.as_range(..)?, mesh.vertices_bytes(), BufferState::Vertex)?;
-            upload_pool.enqueue_copy_buffer(p.gpu.index_buffer.as_range(..)?, mesh.indices_bytes(), BufferState::Index)?;
+            upload_pool.enqueue_copy_buffer(device, p.gpu.vertex_buffer.as_range(..)?, mesh.vertices_bytes(), BufferState::Vertex)?;
+            upload_pool.enqueue_copy_buffer(device, p.gpu.index_buffer.as_range(..)?, mesh.indices_bytes(), BufferState::Index)?;
 
             if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.base_color_tex, p.tex_urls[0].as_ref()) {
                 let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
@@ -243,7 +227,9 @@ impl WorldRenderer {
                     .get()
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
+                validate_texture_data_size(&tex)?;
                 upload_pool.enqueue_upload_texture(
+                    device,
                     gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
                     tex.pixels.as_slice(),
                     TextureState::Sampled,
@@ -255,7 +241,9 @@ impl WorldRenderer {
                     .get()
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
+                validate_texture_data_size(&tex)?;
                 upload_pool.enqueue_upload_texture(
+                    device,
                     gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
                     tex.pixels.as_slice(),
                     TextureState::Sampled,
@@ -267,7 +255,9 @@ impl WorldRenderer {
                     .get()
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
+                validate_texture_data_size(&tex)?;
                 upload_pool.enqueue_upload_texture(
+                    device,
                     gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
                     tex.pixels.as_slice(),
                     TextureState::Sampled,
@@ -279,7 +269,9 @@ impl WorldRenderer {
                     .get()
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
+                validate_texture_data_size(&tex)?;
                 upload_pool.enqueue_upload_texture(
+                    device,
                     gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
                     tex.pixels.as_slice(),
                     TextureState::Sampled,
@@ -459,5 +451,9 @@ fn texture_format_to_vk(format: &TextureFormat) -> vk::Format {
         TextureFormat::R16G16 => vk::Format::R16G16_UNORM,
         TextureFormat::R16G16B16A16 => vk::Format::R16G16B16A16_UNORM,
         TextureFormat::R32G32B32A32Float => vk::Format::R32G32B32A32_SFLOAT,
+        TextureFormat::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
+        TextureFormat::Bc7Unorm => vk::Format::BC7_UNORM_BLOCK,
+        TextureFormat::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
     }
 }
+

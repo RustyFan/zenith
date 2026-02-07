@@ -18,3 +18,4 @@ profiling.workspace = true
 ash.workspace = true
 
 zenith-core = { path = "../zenith-core" }
+ispc-texcomp = "0.1.20"

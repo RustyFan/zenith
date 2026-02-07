@@ -15,6 +15,9 @@ pub struct AssetManager {
     content_dir: PathBuf,
 }
 
+const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION_FILE: &str = ".cache_version";
+
 impl AssetManager {
     pub fn new() -> Self {
         let root = workspace_root();
@@ -62,6 +65,10 @@ impl AssetManager {
     fn should_bake_asset(&self, path: &impl AsRef<Path>) -> bool {
         let raw_path = self.content_dir.join(path.as_ref().to_owned());
 
+        if !self.cache_version_matches() {
+            return true;
+        }
+
         let mesh_collection = MeshCollection::new(path);
         let asset_url = mesh_collection.asset_url();
         let cached_file_path = self.cache_dir.join(asset_url.path);
@@ -95,6 +102,22 @@ impl AssetManager {
         raw_last_modified_time > asset_last_modified_time
     }
 
+    fn cache_version_matches(&self) -> bool {
+        let version_path = self.cache_dir.join(CACHE_VERSION_FILE);
+        let contents = match std::fs::read_to_string(version_path) {
+            Ok(contents) => contents,
+            Err(_) => return false,
+        };
+        contents.trim() == CACHE_VERSION.to_string()
+    }
+
+    fn write_cache_version(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.cache_dir)?;
+        let version_path = self.cache_dir.join(CACHE_VERSION_FILE);
+        std::fs::write(version_path, CACHE_VERSION.to_string())?;
+        Ok(())
+    }
+
     #[profiling::function]
     fn request_load_raw(&self, load_request: RawResourceLoadRequest) -> Result<()> {
         // TODO: support other types of raw asset
@@ -108,6 +131,7 @@ impl AssetManager {
         // Bake the asset synchronously
         let asset_url = AssetUrl::from(load_request.relative_path.clone());
         RawGltfProcessor::bake(raw, ASSET_REGISTRY.get().unwrap(), &self.cache_dir, &asset_url)?;
+        self.write_cache_version()?;
 
         info!("Successfully baked asset {:?}", raw_content_path);
         Ok(())
@@ -178,7 +202,6 @@ impl AssetManager {
                     .unwrap()
                     .register(load_request.url.clone(), asset);
 
-                // Load referenced textures (baked as separate `.tex` assets).
                 for url in tex_urls.into_iter().flatten() {
                     self.request_load_asset(AssetLoadRequestBuilder::default().url(url).build()?)?;
                 }

@@ -13,6 +13,7 @@ use zenith::asset::{AssetHandle};
 use zenith::asset::render::MeshCollection;
 use zenith::core::camera::{Camera, CameraController, NEAR_PLANE};
 use zenith::core::input::InputActionMapper;
+use zenith::core::log;
 use zenith::core::math::Degree;
 use zenith::core::time::{Milliseconds, Timer};
 
@@ -21,6 +22,7 @@ pub struct WorldApp {
     input: InputActionMapper,
     camera: Camera,
     controller: CameraController,
+    asset_manager: AssetManager,
 }
 
 impl App for WorldApp {
@@ -30,6 +32,7 @@ impl App for WorldApp {
             input: InputActionMapper::new(),
             camera: Camera::default(),
             controller: CameraController::new(20.0),
+            asset_manager: AssetManager::new(),
         })
     }
 
@@ -79,10 +82,9 @@ impl RenderableApp for WorldApp {
         self.camera = camera;
 
         // Blocking load & bake (first run may be slower).
-        let manager = AssetManager::new();
         let mut load_timer = Timer::new();
         load_timer.start();
-        manager.request_load("mesh/cerberus/scene.gltf")?;
+        self.asset_manager.request_load("mesh/cerberus/scene.gltf")?;
         load_timer.stop();
         let load_ms = load_timer.elapsed_total::<Milliseconds>().value();
 
@@ -104,7 +106,7 @@ impl RenderableApp for WorldApp {
 
         prepare_timer.stop();
         let prepare_ms = prepare_timer.elapsed_total::<Milliseconds>().value();
-        zenith::core::log::info!(
+        log::info!(
             "WorldApp prepare timings: prepare={}ms, request_load={}ms, world_renderer_new={}ms, gpu_upload={}ms",
             prepare_ms,
             load_ms,

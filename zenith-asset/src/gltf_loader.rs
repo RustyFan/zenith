@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use gltf::{buffer::Data as BufferData, image::Data as ImageData, Document, Primitive};
+use ispc_texcomp::{RgbaSurface, bc5, bc7};
 use zenith_core::file::load_with_memory_mapping;
+use zenith_core::log;
 use zenith_core::log::info;
 use crate::render::{Material, MaterialBuilder, Mesh, MeshBuilder, MeshCollection, TextureBuilder, TextureFormat, Texture, Vertex};
 use crate::{Asset, RawResourceBaker, AssetRegistry, RawResource, RawResourceLoader, AssetUrl, serialize_asset};
@@ -20,6 +22,36 @@ pub struct RawGltf {
     gltf: gltf::Gltf,
     buffers: Vec<BufferData>,
     images: Vec<ImageData>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TextureUsageMask(u8);
+
+impl TextureUsageMask {
+    const BASE_COLOR: u8 = 1 << 0;
+    const MRA: u8 = 1 << 1;
+    const NORMAL: u8 = 1 << 2;
+    const EMISSIVE: u8 = 1 << 3;
+
+    fn add_base_color(&mut self) {
+        self.0 |= Self::BASE_COLOR;
+    }
+
+    fn add_mra(&mut self) {
+        self.0 |= Self::MRA;
+    }
+
+    fn add_normal(&mut self) {
+        self.0 |= Self::NORMAL;
+    }
+
+    fn add_emissive(&mut self) {
+        self.0 |= Self::EMISSIVE;
+    }
+
+    fn has(&self, flag: u8) -> bool {
+        (self.0 & flag) != 0
+    }
 }
 
 impl RawResource for RawGltf {
@@ -249,22 +281,212 @@ impl RawGltfProcessor {
         Ok(materials)
     }
 
+    fn collect_texture_usages(gltf: &Document, image_count: usize) -> Vec<TextureUsageMask> {
+        let mut usages = vec![TextureUsageMask::default(); image_count];
+
+        for material in gltf.materials() {
+            let pbr = material.pbr_metallic_roughness();
+            if let Some(texture) = pbr.base_color_texture() {
+                let image_index = texture.texture().source().index();
+                if let Some(slot) = usages.get_mut(image_index) {
+                    slot.add_base_color();
+                }
+            }
+            if let Some(texture) = pbr.metallic_roughness_texture() {
+                let image_index = texture.texture().source().index();
+                if let Some(slot) = usages.get_mut(image_index) {
+                    slot.add_mra();
+                }
+            }
+            if let Some(texture) = material.normal_texture() {
+                let image_index = texture.texture().source().index();
+                if let Some(slot) = usages.get_mut(image_index) {
+                    slot.add_normal();
+                }
+            }
+            if let Some(texture) = material.emissive_texture() {
+                let image_index = texture.texture().source().index();
+                if let Some(slot) = usages.get_mut(image_index) {
+                    slot.add_emissive();
+                }
+            }
+        }
+
+        usages
+    }
+
     #[profiling::function]
-    fn create_texture_from_gltf_image(image_data: &ImageData) -> Result<crate::render::Texture> {
-        // Convert GLTF format to wgpu-compatible format and pixels
-        let (wgpu_pixels, texture_format) = Self::convert_gltf_pixels_to_wgpu(image_data);
+    fn create_texture_from_gltf_image(image_data: &ImageData, usage: TextureUsageMask) -> Result<crate::render::Texture> {
+        if let Some((pixels, format)) = Self::compress_texture_if_possible(image_data, usage) {
+            return TextureBuilder::default()
+                .width(image_data.width)
+                .height(image_data.height)
+                .format(format)
+                .pixels(pixels)
+                .build()
+                .map_err(|e| anyhow!("Failed to build texture: {}", e));
+        }
+
+        // Fallback: store uncompressed pixels.
+        let (pixels, texture_format) = Self::convert_gltf_pixels(image_data);
+        log::warn!("Uncompressed glTF image: format[{:?}]", texture_format);
 
         TextureBuilder::default()
             .width(image_data.width)
             .height(image_data.height)
             .format(texture_format)
-            .pixels(wgpu_pixels)
+            .pixels(pixels)
             .build()
             .map_err(|e| anyhow!("Failed to build texture: {}", e))
     }
 
+    fn compress_texture_if_possible(image_data: &ImageData, usage: TextureUsageMask) -> Option<(Vec<u8>, TextureFormat)> {
+        if !Self::is_8bit_format(image_data.format) {
+            return None;
+        }
+
+        if usage.has(TextureUsageMask::NORMAL) {
+            let rg_pixels = Self::rg8_from_gltf(image_data)?;
+            let rgba_pixels = Self::rg8_to_rgba(&rg_pixels);
+            let compressed = Self::compress_bc5(&rgba_pixels, image_data.width, image_data.height);
+            return Some((compressed, TextureFormat::Bc5Unorm));
+        }
+
+        if usage.has(TextureUsageMask::BASE_COLOR) || usage.has(TextureUsageMask::EMISSIVE) {
+            let rgba_pixels = Self::rgba8_from_gltf(image_data)?;
+            let compressed = Self::compress_bc7(&rgba_pixels, image_data.width, image_data.height, true);
+            return Some((compressed, TextureFormat::Bc7Srgb));
+        }
+
+        if usage.has(TextureUsageMask::MRA) {
+            let rgba_pixels = Self::rgba8_from_gltf(image_data)?;
+            let compressed = Self::compress_bc7(&rgba_pixels, image_data.width, image_data.height, false);
+            return Some((compressed, TextureFormat::Bc7Unorm));
+        }
+
+        None
+    }
+
+    fn is_8bit_format(format: gltf::image::Format) -> bool {
+        matches!(
+            format,
+            gltf::image::Format::R8
+                | gltf::image::Format::R8G8
+                | gltf::image::Format::R8G8B8
+                | gltf::image::Format::R8G8B8A8
+        )
+    }
+
+    fn rgba8_from_gltf(data: &ImageData) -> Option<Vec<u8>> {
+        match data.format {
+            gltf::image::Format::R8G8B8A8 => Some(data.pixels.clone()),
+            gltf::image::Format::R8G8B8 => {
+                let mut rgba = Vec::with_capacity(data.pixels.len() * 4 / 3);
+                for chunk in data.pixels.chunks(3) {
+                    rgba.extend_from_slice(chunk);
+                    rgba.push(255);
+                }
+                Some(rgba)
+            }
+            gltf::image::Format::R8G8 => {
+                let mut rgba = Vec::with_capacity(data.pixels.len() * 2);
+                for chunk in data.pixels.chunks(2) {
+                    rgba.push(chunk[0]);
+                    rgba.push(chunk[1]);
+                    rgba.push(0);
+                    rgba.push(255);
+                }
+                Some(rgba)
+            }
+            gltf::image::Format::R8 => {
+                let mut rgba = Vec::with_capacity(data.pixels.len() * 4);
+                for value in data.pixels.iter().copied() {
+                    rgba.push(value);
+                    rgba.push(0);
+                    rgba.push(0);
+                    rgba.push(255);
+                }
+                Some(rgba)
+            }
+            _ => None,
+        }
+    }
+
+    fn rg8_from_gltf(data: &ImageData) -> Option<Vec<u8>> {
+        match data.format {
+            gltf::image::Format::R8G8 => Some(data.pixels.clone()),
+            gltf::image::Format::R8G8B8 => {
+                let mut rg = Vec::with_capacity(data.pixels.len() * 2 / 3);
+                for chunk in data.pixels.chunks(3) {
+                    rg.push(chunk[0]);
+                    rg.push(chunk[1]);
+                }
+                Some(rg)
+            }
+            gltf::image::Format::R8G8B8A8 => {
+                let mut rg = Vec::with_capacity(data.pixels.len() / 2);
+                for chunk in data.pixels.chunks(4) {
+                    rg.push(chunk[0]);
+                    rg.push(chunk[1]);
+                }
+                Some(rg)
+            }
+            gltf::image::Format::R8 => {
+                let mut rg = Vec::with_capacity(data.pixels.len() * 2);
+                for value in data.pixels.iter().copied() {
+                    rg.push(value);
+                    rg.push(0);
+                }
+                Some(rg)
+            }
+            _ => None,
+        }
+    }
+
+    fn rg8_to_rgba(pixels: &[u8]) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(pixels.len() * 2);
+        for chunk in pixels.chunks(2) {
+            rgba.push(chunk[0]);
+            rgba.push(chunk[1]);
+            rgba.push(0);
+            rgba.push(255);
+        }
+        rgba
+    }
+
+    fn compress_bc7(pixels: &[u8], width: u32, height: u32, use_alpha: bool) -> Vec<u8> {
+        let output_size = bc7::calc_output_size(width, height);
+        let mut output = vec![0u8; output_size];
+        let surface = RgbaSurface {
+            data: pixels,
+            width,
+            height,
+            stride: width * 4,
+        };
+        let settings = if use_alpha {
+            bc7::alpha_fast_settings()
+        } else {
+            bc7::opaque_fast_settings()
+        };
+        bc7::compress_blocks_into(&settings, &surface, &mut output);
+        output
+    }
+
+    fn compress_bc5(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+        let output_size = bc5::calc_output_size(width, height);
+        let mut output = vec![0u8; output_size];
+        let surface = RgbaSurface {
+            data: pixels,
+            width,
+            height,
+            stride: width * 4,
+        };
+        bc5::compress_blocks_into(&surface, &mut output);
+        output
+    }
+
     #[profiling::function]
-    fn convert_gltf_pixels_to_wgpu(data: &ImageData) -> (Vec<u8>, TextureFormat) {
+    fn convert_gltf_pixels(data: &ImageData) -> (Vec<u8>, TextureFormat) {
         match data.format {
             gltf::image::Format::R8G8B8 => {
                 // Convert RGB to RGBA
@@ -332,12 +554,15 @@ impl RawResourceBaker for RawGltfProcessor {
 
         let asset_url = url.path.to_str().ok_or(anyhow!(format!("Invalid asset url: {:?}", url)))?;
 
+        let texture_usage_by_image = Self::collect_texture_usages(&gltf, images.len());
+
         // Bake textures once (shared by materials via AssetUrl references).
         let texture_urls: Vec<AssetUrl> = images
             .iter()
             .enumerate()
             .map(|(idx, img)| {
-                let tex = Self::create_texture_from_gltf_image(img)?;
+                let usage = texture_usage_by_image.get(idx).copied().unwrap_or_default();
+                let tex = Self::create_texture_from_gltf_image(img, usage)?;
 
                 let main = PathBuf::from(asset_url);
                 let parent = main.parent().unwrap_or_else(|| Path::new(""));
@@ -346,7 +571,7 @@ impl RawResourceBaker for RawGltfProcessor {
                     .and_then(|s| s.to_str())
                     .unwrap_or("asset");
 
-                let mut p = parent.join(format!("{stem}_img{idx}_{}x{}", tex.width, tex.height));
+                let mut p = parent.join(format!("{stem}_tex{idx}_{}x{}", tex.width, tex.height));
                 p.set_extension(Texture::extension());
                 let url: AssetUrl = p.into();
 
