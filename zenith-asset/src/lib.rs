@@ -279,17 +279,20 @@ fn serialize_asset<A: Asset + Encode>(asset: &A, absolute_path: &PathBuf) -> Res
 
 fn deserialize_asset<A: Asset + Encode + DeserializeOwned>(absolute_path: &PathBuf) -> Result<A> {
     let absolute_path = absolute_path.canonicalize()?;
-    let mmap = load_with_memory_mapping(&absolute_path)?;
+    let bytes = match absolute_path.extension().and_then(|ext| ext.to_str()) {
+        Some("mscl") | Some("mat") => std::fs::read(&absolute_path)?,
+        _ => load_with_memory_mapping(&absolute_path)?.to_vec(),
+    };
 
     let header_len = ZSTD_MAGIC.len() + ZSTD_GUID.len();
-    if mmap.len() < header_len
-        || &mmap[..ZSTD_MAGIC.len()] != ZSTD_MAGIC
-        || &mmap[ZSTD_MAGIC.len()..header_len] != ZSTD_GUID.as_bytes()
+    if bytes.len() < header_len
+        || &bytes[..ZSTD_MAGIC.len()] != ZSTD_MAGIC
+        || &bytes[ZSTD_MAGIC.len()..header_len] != ZSTD_GUID.as_bytes()
     {
         anyhow::bail!("Unsupported asset format: {:?}", absolute_path);
     }
 
-    let compressed = &mmap[header_len..];
+    let compressed = &bytes[header_len..];
     let decompressed = zstd::stream::decode_all(Cursor::new(compressed))?;
     let (asset, _): (A, usize) = bincode::serde::decode_from_slice(&decompressed, bincode::config::standard())
         .expect(&format!("Failed to deserialize asset {:?}", absolute_path));

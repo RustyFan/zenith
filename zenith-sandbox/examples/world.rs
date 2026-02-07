@@ -81,7 +81,6 @@ impl RenderableApp for WorldApp {
         camera.set_position(Vec3::new(0.0, -90.0, 0.0));
         self.camera = camera;
 
-        // Blocking load & bake (first run may be slower).
         let mut load_timer = Timer::new();
         load_timer.start();
         self.asset_manager.request_load("mesh/cerberus/scene.gltf")?;
