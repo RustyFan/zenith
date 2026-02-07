@@ -269,6 +269,10 @@ impl Swapchain {
     }
 
     pub fn resize(&mut self, device: &RenderDevice, extent: vk::Extent2D) -> Result<()> {
+        if self.extent == extent {
+            return Ok(());
+        }
+
         device.wait_until_idle()?;
 
         // re-query surface capabilities as they may have changed

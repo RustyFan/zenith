@@ -114,25 +114,16 @@ impl Engine {
         self.render_device.end_frame();
     }
 
-    fn recreate_swapchain(&mut self) {
-        let inner_size = self.main_window.inner_size();
-        if inner_size.width == 0 || inner_size.height == 0 {
-            return;
-        }
-
+    #[profiling::function]
+    pub fn resize(&mut self, width: u32, height: u32) -> anyhow::Result<()> {
         let window_extent = vk::Extent2D {
-            width: inner_size.width,
-            height: inner_size.height,
+            width,
+            height,
         };
 
-        self.swapchain.resize(&self.render_device, window_extent).unwrap();
-    }
+        self.swapchain.resize(&self.render_device, window_extent)?;
 
-    #[profiling::function]
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.recreate_swapchain();
-        }
+        Ok(())
     }
 
     #[inline]

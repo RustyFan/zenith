@@ -106,7 +106,7 @@ impl RenderableApp for WorldApp {
         prepare_timer.stop();
         let prepare_ms = prepare_timer.elapsed_total::<Milliseconds>().value();
         log::info!(
-            "WorldApp prepare timings: prepare={}ms, request_load={}ms, world_renderer_new={}ms, gpu_upload={}ms",
+            "WorldApp prepare timings: prepare={:.3}ms, request_load={:.3}ms, world_renderer_new={:.3}ms, gpu_upload={:.3}ms",
             prepare_ms,
             load_ms,
             renderer_new_ms,

@@ -120,7 +120,7 @@ impl<A: RenderableApp> EngineLoop<A> {
                 let app = &mut self.app;
 
                 let inner_size = engine.main_window.inner_size();
-                engine.resize(inner_size.width, inner_size.height);
+                engine.resize(inner_size.width, inner_size.height).unwrap();
                 app.resize(inner_size.width, inner_size.height);
             }
             WindowEvent::CloseRequested => {
