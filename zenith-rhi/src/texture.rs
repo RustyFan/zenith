@@ -501,11 +501,11 @@ pub struct TextureRange<'a> {
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-struct TextureSubresource {
-    base_mip: u32,
-    num_mips: u32,
-    base_layer: u32,
-    num_layers: u32,
+pub struct TextureSubresource {
+    pub base_mip: u32,
+    pub num_mips: u32,
+    pub base_layer: u32,
+    pub num_layers: u32,
 }
 
 impl TextureSubresource {
@@ -547,6 +547,11 @@ impl<'a> TextureRange<'a> {
         // TODO: debug name for view
         self.texture.views.borrow_mut().insert(self.subresource, view);
         Ok(view)
+    }
+
+    #[inline]
+    pub fn subresource(&self) -> &TextureSubresource {
+        &self.subresource
     }
 }
 

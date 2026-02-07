@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use gltf::{buffer::Data as BufferData, image::Data as ImageData, Document, Primitive};
 use zenith_core::file::load_with_memory_mapping;
 use zenith_core::log::info;
-use crate::render::{Material, MaterialBuilder, Mesh, MeshBuilder, MeshCollection, TextureBuilder, TextureFormat, Vertex};
+use crate::render::{Material, MaterialBuilder, Mesh, MeshBuilder, MeshCollection, TextureBuilder, TextureFormat, Texture, Vertex};
 use crate::{Asset, RawResourceBaker, AssetRegistry, RawResource, RawResourceLoader, AssetUrl, serialize_asset};
 
 #[derive(Debug, Clone)]
@@ -66,25 +66,38 @@ impl RawGltfProcessor {
         node: &gltf::Node,
         buffers: &[BufferData],
         registry: &AssetRegistry,
-        meshes_url: &mut Vec<AssetUrl>,
+        meshes_url: &mut Vec<(AssetUrl, Option<usize>)>,
+        mesh_counter: &mut u32,
         main_url: &str,
     ) -> Result<()> {
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 // TODO: abstract asset serialize and register logic
                 let mesh_asset = Self::bake_mesh(&primitive, buffers)?;
-                let url = mesh_asset.url(&main_url);
+                let url = {
+                    let main = PathBuf::from(main_url);
+                    let parent = main.parent().unwrap_or_else(|| Path::new(""));
+                    let stem = main
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("mesh");
+                    let idx = *mesh_counter;
+                    *mesh_counter += 1;
+                    let mut p = parent.join(format!("{stem}_mesh{idx}"));
+                    p.set_extension(Mesh::<Vertex>::extension());
+                    AssetUrl::from(p)
+                };
 
                 let asset_serialize_path = base_directory.join(&url);
                 serialize_asset(&mesh_asset, &asset_serialize_path)?;
 
-                meshes_url.push(url.clone());
+                meshes_url.push((url.clone(), mesh_asset.material));
                 registry.register(url, mesh_asset);
             }
         }
 
         for child in node.children() {
-            Self::process_node(base_directory, &child, buffers, registry, meshes_url, main_url)?;
+            Self::process_node(base_directory, &child, buffers, registry, meshes_url, mesh_counter, main_url)?;
         }
 
         Ok(())
@@ -139,9 +152,12 @@ impl RawGltfProcessor {
             })
             .collect();
 
+        let material = primitive.material().index();
+
         let mesh = MeshBuilder::default()
             .vertices(vertices)
             .indices(indices)
+            .material(material)
             .build()?;
 
         Ok(mesh)
@@ -171,7 +187,7 @@ impl RawGltfProcessor {
     }
 
     #[profiling::function]
-    fn bake_materials(gltf: &Document, images: &[ImageData]) -> Result<Vec<Material>> {
+    fn bake_materials(gltf: &Document, texture_urls: &[AssetUrl]) -> Result<Vec<Material>> {
         let mut materials = Vec::new();
 
         for material in gltf.materials() {
@@ -185,25 +201,22 @@ impl RawGltfProcessor {
 
             if let Some(texture) = pbr.base_color_texture() {
                 let image_index = texture.texture().source().index();
-                if let Some(image_data) = images.get(image_index) {
-                    let tex = Self::create_texture_from_gltf_image(image_data)?;
-                    builder.base_color_tex(tex);
+                if let Some(url) = texture_urls.get(image_index) {
+                    builder.base_color_tex(url.clone());
                 }
             }
 
             if let Some(texture) = pbr.metallic_roughness_texture() {
                 let image_index = texture.texture().source().index();
-                if let Some(image_data) = images.get(image_index) {
-                    let tex = Self::create_texture_from_gltf_image(image_data)?;
-                    builder.mra_tex(tex);
+                if let Some(url) = texture_urls.get(image_index) {
+                    builder.mra_tex(url.clone());
                 }
             }
 
             if let Some(texture) = material.normal_texture() {
                 let image_index = texture.texture().source().index();
-                if let Some(image_data) = images.get(image_index) {
-                    let tex = Self::create_texture_from_gltf_image(image_data)?;
-                    builder.normal_tex(tex);
+                if let Some(url) = texture_urls.get(image_index) {
+                    builder.normal_tex(url.clone());
                 }
             }
 
@@ -221,9 +234,8 @@ impl RawGltfProcessor {
 
             if let Some(texture) = material.emissive_texture() {
                 let image_index = texture.texture().source().index();
-                if let Some(image_data) = images.get(image_index) {
-                    let tex = Self::create_texture_from_gltf_image(image_data)?;
-                    builder.emissive_tex(tex);
+                if let Some(url) = texture_urls.get(image_index) {
+                    builder.emissive_tex(url.clone());
                 }
             }
 
@@ -320,11 +332,47 @@ impl RawResourceBaker for RawGltfProcessor {
 
         let asset_url = url.path.to_str().ok_or(anyhow!(format!("Invalid asset url: {:?}", url)))?;
 
-        let materials = Self::bake_materials(&gltf, &images)?;
+        // Bake textures once (shared by materials via AssetUrl references).
+        let texture_urls: Vec<AssetUrl> = images
+            .iter()
+            .enumerate()
+            .map(|(idx, img)| {
+                let tex = Self::create_texture_from_gltf_image(img)?;
+
+                let main = PathBuf::from(asset_url);
+                let parent = main.parent().unwrap_or_else(|| Path::new(""));
+                let stem = main
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("asset");
+
+                let mut p = parent.join(format!("{stem}_img{idx}_{}x{}", tex.width, tex.height));
+                p.set_extension(Texture::extension());
+                let url: AssetUrl = p.into();
+
+                let asset_serialize_path = base_directory.join(&url);
+                serialize_asset(&tex, &asset_serialize_path)?;
+                registry.register(url.clone(), tex);
+
+                Ok(url)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let materials = Self::bake_materials(&gltf, &texture_urls)?;
         let mut material_urls = Vec::with_capacity(materials.len());
-        for material in materials {
+        for (mat_idx, material) in materials.into_iter().enumerate() {
             // TODO: abstract asset serialize and register logic
-            let url = material.url(asset_url);
+            let url = {
+                let main = PathBuf::from(asset_url);
+                let parent = main.parent().unwrap_or_else(|| Path::new(""));
+                let stem = main
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("material");
+                let mut p = parent.join(format!("{stem}_mat{mat_idx}"));
+                p.set_extension(Material::extension());
+                AssetUrl::from(p)
+            };
 
             let asset_serialize_path = base_directory.join(&url);
             serialize_asset(&material, &asset_serialize_path)?;
@@ -333,18 +381,22 @@ impl RawResourceBaker for RawGltfProcessor {
             registry.register(url, material);
         }
 
-        let mut meshes_urls = Vec::with_capacity(material_urls.len());
+        let mut meshes_urls: Vec<(AssetUrl, Option<usize>)> = Vec::new();
+        let mut mesh_counter: u32 = 0;
         for scene in gltf.scenes() {
             for node in scene.nodes() {
-                Self::process_node(&base_directory, &node, &buffers, registry, &mut meshes_urls, asset_url)?;
+                Self::process_node(&base_directory, &node, &buffers, registry, &mut meshes_urls, &mut mesh_counter, asset_url)?;
             }
         }
 
-        assert_eq!(meshes_urls.len(), material_urls.len());
-
         let mut mesh_collection = MeshCollection::new(&url);
-        for (mat, mesh) in material_urls.into_iter().zip(meshes_urls.into_iter()) {
-            mesh_collection.add_mesh(mesh, mat);
+        for (mesh_url, mat_index) in meshes_urls.into_iter() {
+            let idx = mat_index.unwrap_or(0);
+            let mat_url = material_urls
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| material_urls.first().cloned().unwrap());
+            mesh_collection.add_mesh(mesh_url, mat_url);
         }
 
         let mesh_collection_url = mesh_collection.url(asset_url);

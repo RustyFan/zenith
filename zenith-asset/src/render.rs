@@ -54,7 +54,7 @@ impl<V: NoUninit> Mesh<V> {
     }
 }
 
-impl<V: 'static + Send + Sync> Asset for Mesh<V> {
+impl<V: 'static + Send + Sync + NoUninit> Asset for Mesh<V> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -67,6 +67,10 @@ impl<V: 'static + Send + Sync> Asset for Mesh<V> {
 
     fn extension() -> &'static str {
         "mesh"
+    }
+
+    fn gpu_size_in_bytes(&self) -> usize {
+        self.vertices_bytes().len() + self.indices_bytes().len()
     }
 }
 
@@ -131,6 +135,10 @@ impl Asset for Texture {
     fn extension() -> &'static str {
         "tex"
     }
+
+    fn gpu_size_in_bytes(&self) -> usize {
+        self.pixels.len()
+    }
 }
 
 #[derive(Debug, Clone, Builder, Serialize, Deserialize, Encode, Decode)]
@@ -145,19 +153,19 @@ pub struct Material {
     #[builder(default = [0., 0., 0.])]
     pub emissive: [f32; 3],
 
-    // TODO: replace with asset path reference
+    // Texture assets referenced by URL (baked separately as `.tex`).
     #[builder(default)]
     #[bincode(with_serde)]
-    pub base_color_tex: Option<Texture>,
+    pub base_color_tex: Option<AssetUrl>,
     #[builder(default)]
     #[bincode(with_serde)]
-    pub mra_tex: Option<Texture>,
+    pub mra_tex: Option<AssetUrl>,
     #[builder(default)]
     #[bincode(with_serde)]
-    pub normal_tex: Option<Texture>,
+    pub normal_tex: Option<AssetUrl>,
     #[builder(default)]
     #[bincode(with_serde)]
-    pub emissive_tex: Option<Texture>,
+    pub emissive_tex: Option<AssetUrl>,
 }
 
 impl Asset for Material {
@@ -173,6 +181,13 @@ impl Asset for Material {
 
     fn extension() -> &'static str {
         "mat"
+    }
+
+    fn gpu_size_in_bytes(&self) -> usize {
+        size_of_val(&self.base_color) +
+            size_of_val(&self.metallic) +
+            size_of_val(&self.roughness) +
+            size_of_val(&self.emissive)
     }
 }
 
@@ -198,6 +213,10 @@ impl Asset for MeshCollection {
 
     fn extension() -> &'static str {
         "mscl"
+    }
+
+    fn gpu_size_in_bytes(&self) -> usize {
+        0
     }
 }
 

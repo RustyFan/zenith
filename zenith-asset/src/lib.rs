@@ -217,6 +217,8 @@ pub trait Asset: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn url(&self, name: &str) -> AssetUrl;
     fn extension() -> &'static str where Self: Sized;
+    /// Return the total size in byte of gpu upload data.
+    fn gpu_size_in_bytes(&self) -> usize;
 }
 
 /// Data needed to send a raw resource load request.

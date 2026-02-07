@@ -2,8 +2,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4};
-use zenith_core::collections::SmallVec;
-use zenith_asset::{AssetHandle, AssetRef};
+use zenith_asset::{Asset, AssetHandle};
 use zenith_asset::render::{MeshCollection, Mesh, Material, TextureFormat};
 use zenith_core::camera::{Camera, WORLD_SPACE_UP};
 use zenith_core::math::{Degree};
@@ -20,7 +19,6 @@ use zenith_rendergraph::{
     RenderGraphBuilder, RenderGraphResource, VertexLayout,
     GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
 };
-use zenith_rhi::texture::TextureRange;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
@@ -112,6 +110,49 @@ impl WorldRenderer {
             .get()
             .ok_or_else(|| anyhow!("MeshCollection not loaded/registered (call AssetManager::request_load first)"))?;
 
+        // 1. Precalculate the size of gpu upload pool
+        //------------------------------------------------------------------------------------------------
+
+        let mut total_upload_bytes: usize = 0;
+
+        for (mesh_url, mat_url) in collection.iter()? {
+            let mesh_handle = AssetHandle::<Mesh>::new(mesh_url.clone());
+            let mesh = mesh_handle
+                .get()
+                .ok_or_else(|| anyhow!("Mesh not loaded: {:?}", mesh_url.as_ref()))?;
+            total_upload_bytes += mesh.gpu_size_in_bytes();
+
+            let mat_handle = AssetHandle::<Material>::new(mat_url.clone());
+            let mat = mat_handle
+                .get()
+                .ok_or_else(|| anyhow!("Material not loaded: {:?}", mat_url.as_ref()))?;
+
+            let tex_urls = [
+                mat.base_color_tex.as_ref(),
+                mat.mra_tex.as_ref(),
+                mat.normal_tex.as_ref(),
+                mat.emissive_tex.as_ref(),
+            ];
+            for url in tex_urls.into_iter().flatten() {
+                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex = tex_handle
+                    .get()
+                    .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
+                total_upload_bytes += tex.gpu_size_in_bytes();
+            }
+        }
+
+        // 2. Populate all upload data
+        //------------------------------------------------------------------------------------------------
+
+        struct PendingMeshUpload {
+            gpu: GpuMesh,
+            mesh_url: zenith_asset::AssetUrl,
+            tex_urls: [Option<zenith_asset::AssetUrl>; 4],
+        }
+
+        let mut pending: Vec<PendingMeshUpload> = Vec::with_capacity(collection.iter()?.size_hint().1.unwrap_or(0));
+
         for (mesh_url, mat_url) in collection.iter()? {
             let mesh_handle = AssetHandle::<Mesh>::new(mesh_url.clone());
             let mesh = mesh_handle
@@ -123,105 +164,133 @@ impl WorldRenderer {
                 .get()
                 .ok_or_else(|| anyhow!("Material not loaded: {:?}", mat_url.as_ref()))?;
 
-            self.meshes.push(Self::add_gpu_mesh(device, mesh, mat)?);
+            let vertex_buffer = Arc::new(Buffer::new(
+                device,
+                &BufferDesc::vertex("world.mesh.vertex", mesh.vertices_bytes().len() as u64),
+            )?);
+            let index_buffer = Arc::new(Buffer::new(
+                device,
+                &BufferDesc::index("world.mesh.index", mesh.indices_bytes().len() as u64),
+            )?);
+
+            let create_texture = |name: &str, tex_url: Option<&zenith_asset::AssetUrl>| -> anyhow::Result<Option<Arc<Texture>>> {
+                if let Some(tex_url) = tex_url {
+                    let handle = AssetHandle::<zenith_asset::render::Texture>::new(tex_url.clone());
+                    let tex = handle
+                        .get()
+                        .ok_or_else(|| anyhow!("Texture not loaded: {:?}", tex_url.as_ref()))?;
+
+                    let format = texture_format_to_vk(&tex.format);
+                    let desc = TextureDesc::new_2d(
+                        &format!("world.tex.{name}"),
+                        tex.width,
+                        tex.height,
+                        format,
+                    ).with_transfer_dst_usage();
+
+                    Ok(Some(Arc::new(Texture::new(device, &desc)?)))
+                } else {
+                    Ok(None)
+                }
+            };
+
+            let tex_urls = [
+                mat.base_color_tex.clone(),
+                mat.mra_tex.clone(),
+                mat.normal_tex.clone(),
+                mat.emissive_tex.clone(),
+            ];
+
+            let material = GpuMaterial {
+                base_color_factor: mat.base_color,
+                base_color_tex: create_texture("base_color", tex_urls[0].as_ref())?,
+                mra_tex: create_texture("mra", tex_urls[1].as_ref())?,
+                normal_tex: create_texture("normal", tex_urls[2].as_ref())?,
+                emissive_tex: create_texture("emissive", tex_urls[3].as_ref())?,
+            };
+
+            pending.push(PendingMeshUpload {
+                gpu: GpuMesh {
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: mesh.indices.len() as u32,
+                    model: Mat4::from_axis_angle(WORLD_SPACE_UP, Degree::new(90.0).to_radians().into()),
+                    material,
+                },
+                mesh_url: mesh_url.clone(),
+                tex_urls,
+            });
         }
 
-        Ok(())
-    }
-
-    fn add_gpu_mesh(device: &RenderDevice, mesh: AssetRef<Mesh>, mat: AssetRef<Material>) -> anyhow::Result<GpuMesh> {
-        let vb_bytes = mesh.vertices_bytes();
-        let ib_bytes = mesh.indices_bytes();
-
-        let vertex_buffer = Arc::new(Buffer::new(
-            device,
-            &BufferDesc::vertex("world.mesh.vertex", vb_bytes.len() as u64),
-        )?);
-        let index_buffer = Arc::new(Buffer::new(
-            device,
-            &BufferDesc::index("world.mesh.index", ib_bytes.len() as u64),
-        )?);
+        // 3. Upload data to gpu
+        //------------------------------------------------------------------------------------------------
 
         let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
+        let mut upload_pool = UploadPool::new(device, total_upload_bytes.max(1) as _)?;
 
-        // Upload vb/ib.
-        let mut total = (vb_bytes.len() + ib_bytes.len()) as u64;
-        if let Some(asset) = mat.base_color_tex.as_ref() {
-            total += asset.pixels.as_slice().len() as u64;
-        }
-        if let Some(asset) = mat.mra_tex.as_ref() {
-            total += asset.pixels.as_slice().len() as u64;
-        }
-        if let Some(asset) = mat.normal_tex.as_ref() {
-            total += asset.pixels.as_slice().len() as u64;
-        }
-        if let Some(asset) = mat.emissive_tex.as_ref() {
-            total += asset.pixels.as_slice().len() as u64;
-        }
+        for p in &pending {
+            let mesh_handle = AssetHandle::<Mesh>::new(p.mesh_url.clone());
+            let mesh = mesh_handle
+                .get()
+                .ok_or_else(|| anyhow!("Mesh not loaded: {:?}", p.mesh_url.as_ref()))?;
 
-        let mut upload_pool = UploadPool::new(device, total.max(1))?;
-        upload_pool.enqueue_copy(vertex_buffer.as_range(..)?, vb_bytes, BufferState::Vertex)?;
-        upload_pool.enqueue_copy(index_buffer.as_range(..)?, ib_bytes, BufferState::Index)?;
+            upload_pool.enqueue_copy_buffer(p.gpu.vertex_buffer.as_range(..)?, mesh.vertices_bytes(), BufferState::Vertex)?;
+            upload_pool.enqueue_copy_buffer(p.gpu.index_buffer.as_range(..)?, mesh.indices_bytes(), BufferState::Index)?;
 
-        let create_texture = |name: &str, tex: Option<&zenith_asset::render::Texture>| -> anyhow::Result<Option<Arc<Texture>>> {
-            if let Some(tex) = tex {
-                let format = texture_format_to_vk(&tex.format);
-                let desc = TextureDesc::new_2d(
-                    &format!("world.tex.{name}"),
-                    tex.width,
-                    tex.height,
-                    format,
-                ).with_transfer_dst_usage();
+            if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.base_color_tex, p.tex_urls[0].as_ref()) {
+                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex = tex_handle
+                    .get()
+                    .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
-                Ok(Some(Arc::new(Texture::new(device, &desc)?)))
-            } else {
-                Ok(None)
+                upload_pool.enqueue_upload_texture(
+                    gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
+                    tex.pixels.as_slice(),
+                    TextureState::Sampled,
+                )?;
             }
-        };
+            if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.mra_tex, p.tex_urls[1].as_ref()) {
+                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex = tex_handle
+                    .get()
+                    .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
-        let material = GpuMaterial {
-            base_color_factor: mat.base_color,
-            base_color_tex: create_texture("base_color", mat.base_color_tex.as_ref())?,
-            mra_tex: create_texture("mra", mat.mra_tex.as_ref())?,
-            normal_tex: create_texture("normal", mat.normal_tex.as_ref())?,
-            emissive_tex: create_texture("emissive", mat.emissive_tex.as_ref())?,
-        };
+                upload_pool.enqueue_upload_texture(
+                    gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
+                    tex.pixels.as_slice(),
+                    TextureState::Sampled,
+                )?;
+            }
+            if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.normal_tex, p.tex_urls[2].as_ref()) {
+                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex = tex_handle
+                    .get()
+                    .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
-        let mut texture_ranges: SmallVec<[(TextureRange, &[u8]); 4]> = SmallVec::new();
+                upload_pool.enqueue_upload_texture(
+                    gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
+                    tex.pixels.as_slice(),
+                    TextureState::Sampled,
+                )?;
+            }
+            if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.emissive_tex, p.tex_urls[3].as_ref()) {
+                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex = tex_handle
+                    .get()
+                    .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
-        if let (Some(tex), Some(asset)) = (&material.base_color_tex, mat.base_color_tex.as_ref()) {
-            texture_ranges.push((tex.as_range(TextureLayout::Undefined, .., ..)?, asset.pixels.as_slice()));
-        }
-        if let (Some(tex), Some(asset)) = (&material.mra_tex, mat.mra_tex.as_ref()) {
-            texture_ranges.push((tex.as_range(TextureLayout::Undefined, .., ..)?, asset.pixels.as_slice()));
-        }
-        if let (Some(tex), Some(asset)) = (&material.normal_tex, mat.normal_tex.as_ref()) {
-            texture_ranges.push((tex.as_range(TextureLayout::Undefined, .., ..)?, asset.pixels.as_slice()));
-        }
-        if let (Some(tex), Some(asset)) = (&material.emissive_tex, mat.emissive_tex.as_ref()) {
-            texture_ranges.push((tex.as_range(TextureLayout::Undefined, .., ..)?, asset.pixels.as_slice()));
-        }
-
-        for (range, data) in texture_ranges {
-            upload_pool.enqueue_upload_texture(
-                range,
-                data,
-                vk::Extent3D { width: range.texture().width(), height: range.texture().height(), depth: 1 },
-                0,
-                0,
-                TextureState::Sampled,
-            )?;
+                upload_pool.enqueue_upload_texture(
+                    gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
+                    tex.pixels.as_slice(),
+                    TextureState::Sampled,
+                )?;
+            }
         }
 
         upload_pool.flush(&immediate, device)?;
+        self.meshes.extend(pending.into_iter().map(|p| p.gpu));
 
-        Ok(GpuMesh {
-            vertex_buffer,
-            index_buffer,
-            index_count: mesh.indices.len() as u32,
-            model: Mat4::from_axis_angle(WORLD_SPACE_UP, Degree::new(90.0).to_radians().into()),
-            material,
-        })
+        Ok(())
     }
 
     pub fn render(

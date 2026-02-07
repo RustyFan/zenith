@@ -20,9 +20,6 @@ struct PendingBufferCopy<'a> {
 struct PendingTextureCopy<'a> {
     dst: TextureRange<'a>,
     src_offset: vk::DeviceSize,
-    extent: vk::Extent3D,
-    mip_level: u32,
-    array_layer: u32,
     final_state: TextureState,
 }
 
@@ -53,7 +50,7 @@ impl<'a> UploadPool<'a> {
     #[inline]
     pub fn staging_size(&self) -> vk::DeviceSize { self.staging_size }
 
-    pub fn enqueue_copy(
+    pub fn enqueue_copy_buffer(
         &mut self,
         dst: BufferRange<'a>,
         data: &[u8],
@@ -91,9 +88,6 @@ impl<'a> UploadPool<'a> {
         &mut self,
         dst: TextureRange<'a>,
         data: &[u8],
-        extent: vk::Extent3D,
-        mip_level: u32,
-        array_layer: u32,
         final_state: TextureState,
     ) -> Result<(), vk::Result> {
         let size = data.len() as vk::DeviceSize;
@@ -116,9 +110,6 @@ impl<'a> UploadPool<'a> {
         self.pending_textures.push(PendingTextureCopy {
             dst,
             src_offset,
-            extent,
-            mip_level,
-            array_layer,
             final_state,
         });
 
@@ -209,12 +200,13 @@ impl<'a> UploadPool<'a> {
                     .image_subresource(
                         vk::ImageSubresourceLayers::default()
                             .aspect_mask(aspect)
-                            .mip_level(p.mip_level)
-                            .base_array_layer(p.array_layer)
+                            .mip_level(p.dst.subresource().base_mip)
+                            .base_array_layer(p.dst.subresource().base_layer)
                             .layer_count(1),
                     )
                     .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                    .image_extent(p.extent);
+                    .image_extent(p.dst.texture().extent());
+                
                 encoder.copy_buffer_to_image(
                     staging_handle,
                     p.dst.texture().handle(),
@@ -286,9 +278,9 @@ impl<'a> UploadPool<'a> {
         data: &[u8],
         final_state: BufferState,
     ) -> Result<(), vk::Result> {
-        if self.enqueue_copy(dst, data, final_state).is_err() {
+        if self.enqueue_copy_buffer(dst, data, final_state).is_err() {
             self.flush(immediate, device)?;
-            self.enqueue_copy(dst, data, final_state)?;
+            self.enqueue_copy_buffer(dst, data, final_state)?;
         }
         self.flush(immediate, device)
     }
@@ -300,14 +292,11 @@ impl<'a> UploadPool<'a> {
         immediate: &ImmediateCommandEncoder,
         dst: TextureRange<'a>,
         data: &[u8],
-        extent: vk::Extent3D,
-        mip_level: u32,
-        array_layer: u32,
         final_state: TextureState,
     ) -> Result<(), vk::Result> {
-        if self.enqueue_upload_texture(dst, data, extent, mip_level, array_layer, final_state).is_err() {
+        if self.enqueue_upload_texture(dst, data, final_state).is_err() {
             self.flush(immediate, device)?;
-            self.enqueue_upload_texture(dst, data, extent, mip_level, array_layer, final_state)?;
+            self.enqueue_upload_texture(dst, data, final_state)?;
         }
         self.flush(immediate, device)
     }

@@ -2,29 +2,10 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use anyhow::Result;
 use zenith_core::log::info;
+use zenith_core::workspace_root;
 use crate::gltf_loader::{GltfLoader, RawGltfProcessor};
 use crate::{RawResourceBaker, AssetLoadRequest, AssetType, RawResourceLoadRequest, RawResourceLoader, ASSET_REGISTRY, RawResourceLoadRequestBuilder, AssetLoadRequestBuilder, Asset, AssetUrl, deserialize_asset};
 use crate::render::{Material, Mesh, MeshCollection, Texture};
-
-fn workspace_root() -> PathBuf {
-    // Get the directory where Cargo.toml for the workspace is located
-    let mut current_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    loop {
-        let cargo_toml = current_dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-                if content.contains("[workspace]") {
-                    return current_dir;
-                }
-            }
-        }
-        if !current_dir.pop() {
-            break;
-        }
-    }
-    // Fallback to parent directory of current crate
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
-}
 
 /// Managing the loading, registering of assets and maintaining assets' cache.
 /// Asset lifetime:
@@ -185,10 +166,22 @@ impl AssetManager {
             AssetType::Material => {
                 let asset: Material = deserialize_asset(&cache_asset_path)?;
 
+                let tex_urls = [
+                    asset.base_color_tex.clone(),
+                    asset.mra_tex.clone(),
+                    asset.normal_tex.clone(),
+                    asset.emissive_tex.clone(),
+                ];
+
                 ASSET_REGISTRY
                     .get()
                     .unwrap()
-                    .register(load_request.url, asset);
+                    .register(load_request.url.clone(), asset);
+
+                // Load referenced textures (baked as separate `.tex` assets).
+                for url in tex_urls.into_iter().flatten() {
+                    self.request_load_asset(AssetLoadRequestBuilder::default().url(url).build()?)?;
+                }
             }
             _ => unreachable!()
         }
