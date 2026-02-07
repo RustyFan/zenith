@@ -15,7 +15,7 @@ pub struct AssetManager {
     content_dir: PathBuf,
 }
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: &str = "7f9c2e2f-9b9b-4c51-9b65-2f7a6c3e0b2d";
 const CACHE_VERSION_FILE: &str = ".cache_version";
 
 impl AssetManager {
@@ -108,13 +108,13 @@ impl AssetManager {
             Ok(contents) => contents,
             Err(_) => return false,
         };
-        contents.trim() == CACHE_VERSION.to_string()
+        contents.trim() == CACHE_VERSION
     }
 
     fn write_cache_version(&self) -> Result<()> {
         std::fs::create_dir_all(&self.cache_dir)?;
         let version_path = self.cache_dir.join(CACHE_VERSION_FILE);
-        std::fs::write(version_path, CACHE_VERSION.to_string())?;
+        std::fs::write(version_path, CACHE_VERSION)?;
         Ok(())
     }
 

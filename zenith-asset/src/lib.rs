@@ -1,6 +1,6 @@
 use std::any::{Any, TypeId};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,10 @@ use zenith_core::file::load_with_memory_mapping;
 pub mod render;
 pub mod manager;
 pub mod gltf_loader;
+
+const ZSTD_MAGIC: &[u8; 5] = b"ZSTD1";
+const ZSTD_GUID: &str = "7f9c2e2f-9b9b-4c51-9b65-2f7a6c3e0b2d";
+const ZSTD_LEVEL: i32 = 3;
 
 static ASSET_REGISTRY: OnceLock<AssetRegistry> = OnceLock::new();
 
@@ -262,9 +266,12 @@ fn serialize_asset<A: Asset + Encode>(asset: &A, absolute_path: &PathBuf) -> Res
 
     let config = bincode::config::standard();
     let encoded_data = bincode::encode_to_vec(asset, config)?;
+    let compressed = zstd::stream::encode_all(Cursor::new(encoded_data), ZSTD_LEVEL)?;
 
     let mut file = File::create(absolute_path)?;
-    file.write_all(&encoded_data)?;
+    file.write_all(ZSTD_MAGIC)?;
+    file.write_all(ZSTD_GUID.as_bytes())?;
+    file.write_all(&compressed)?;
     file.flush()?;
 
     Ok(())
@@ -274,7 +281,17 @@ fn deserialize_asset<A: Asset + Encode + DeserializeOwned>(absolute_path: &PathB
     let absolute_path = absolute_path.canonicalize()?;
     let mmap = load_with_memory_mapping(&absolute_path)?;
 
-    let (asset, _): (A, usize) = bincode::serde::decode_from_slice(&mmap, bincode::config::standard())
+    let header_len = ZSTD_MAGIC.len() + ZSTD_GUID.len();
+    if mmap.len() < header_len
+        || &mmap[..ZSTD_MAGIC.len()] != ZSTD_MAGIC
+        || &mmap[ZSTD_MAGIC.len()..header_len] != ZSTD_GUID.as_bytes()
+    {
+        anyhow::bail!("Unsupported asset format: {:?}", absolute_path);
+    }
+
+    let compressed = &mmap[header_len..];
+    let decompressed = zstd::stream::decode_all(Cursor::new(compressed))?;
+    let (asset, _): (A, usize) = bincode::serde::decode_from_slice(&decompressed, bincode::config::standard())
         .expect(&format!("Failed to deserialize asset {:?}", absolute_path));
 
     Ok(asset)
