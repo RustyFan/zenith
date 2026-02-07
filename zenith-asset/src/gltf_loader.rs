@@ -315,6 +315,26 @@ impl RawGltfProcessor {
         usages
     }
 
+    fn split_asset_path(asset_url: &str, fallback: &str) -> (PathBuf, String) {
+        let main = Path::new(asset_url);
+        let parent = main.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        let stem = main
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(fallback)
+            .to_owned();
+        (parent, stem)
+    }
+
+    fn rgb8_to_rgba(pixels: &[u8]) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(pixels.len() * 4 / 3);
+        for chunk in pixels.chunks(3) {
+            rgba.extend_from_slice(chunk);
+            rgba.push(255);
+        }
+        rgba
+    }
+
     #[profiling::function]
     fn create_texture_from_gltf_image(image_data: &ImageData, usage: TextureUsageMask) -> Result<crate::render::Texture> {
         if let Some((pixels, format)) = Self::compress_texture_if_possible(image_data, usage) {
@@ -381,12 +401,7 @@ impl RawGltfProcessor {
         match data.format {
             gltf::image::Format::R8G8B8A8 => Some(data.pixels.clone()),
             gltf::image::Format::R8G8B8 => {
-                let mut rgba = Vec::with_capacity(data.pixels.len() * 4 / 3);
-                for chunk in data.pixels.chunks(3) {
-                    rgba.extend_from_slice(chunk);
-                    rgba.push(255);
-                }
-                Some(rgba)
+                Some(Self::rgb8_to_rgba(&data.pixels))
             }
             gltf::image::Format::R8G8 => {
                 let mut rgba = Vec::with_capacity(data.pixels.len() * 2);
@@ -490,12 +505,7 @@ impl RawGltfProcessor {
         match data.format {
             gltf::image::Format::R8G8B8 => {
                 // Convert RGB to RGBA
-                let mut rgba_data = Vec::with_capacity(data.pixels.len() * 4 / 3);
-                for chunk in data.pixels.chunks(3) {
-                    rgba_data.extend_from_slice(chunk);
-                    rgba_data.push(255); // Add alpha = 1.0
-                }
-                (rgba_data, TextureFormat::R8G8B8A8)
+                (Self::rgb8_to_rgba(&data.pixels), TextureFormat::R8G8B8A8)
             }
             gltf::image::Format::R16G16B16 => {
                 // Convert RGB16 to RGBA16
@@ -557,6 +567,7 @@ impl RawResourceBaker for RawGltfProcessor {
         let texture_usage_by_image = Self::collect_texture_usages(&gltf, images.len());
 
         // Bake textures once (shared by materials via AssetUrl references).
+        let (tex_parent, tex_stem) = Self::split_asset_path(asset_url, "asset");
         let texture_urls: Vec<AssetUrl> = images
             .iter()
             .enumerate()
@@ -564,14 +575,7 @@ impl RawResourceBaker for RawGltfProcessor {
                 let usage = texture_usage_by_image.get(idx).copied().unwrap_or_default();
                 let tex = Self::create_texture_from_gltf_image(img, usage)?;
 
-                let main = PathBuf::from(asset_url);
-                let parent = main.parent().unwrap_or_else(|| Path::new(""));
-                let stem = main
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("asset");
-
-                let mut p = parent.join(format!("{stem}_tex{idx}_{}x{}", tex.width, tex.height));
+                let mut p = tex_parent.join(format!("{tex_stem}_tex{idx}_{}x{}", tex.width, tex.height));
                 p.set_extension(Texture::extension());
                 let url: AssetUrl = p.into();
 
@@ -584,17 +588,12 @@ impl RawResourceBaker for RawGltfProcessor {
             .collect::<Result<Vec<_>>>()?;
 
         let materials = Self::bake_materials(&gltf, &texture_urls)?;
+        let (mat_parent, mat_stem) = Self::split_asset_path(asset_url, "material");
         let mut material_urls = Vec::with_capacity(materials.len());
         for (mat_idx, material) in materials.into_iter().enumerate() {
             // TODO: abstract asset serialize and register logic
             let url = {
-                let main = PathBuf::from(asset_url);
-                let parent = main.parent().unwrap_or_else(|| Path::new(""));
-                let stem = main
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("material");
-                let mut p = parent.join(format!("{stem}_mat{mat_idx}"));
+                let mut p = mat_parent.join(format!("{mat_stem}_mat{mat_idx}"));
                 p.set_extension(Material::extension());
                 AssetUrl::from(p)
             };

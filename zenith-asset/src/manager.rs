@@ -63,7 +63,7 @@ impl AssetManager {
 
     #[profiling::function]
     fn should_bake_asset(&self, path: &impl AsRef<Path>) -> bool {
-        let raw_path = self.content_dir.join(path.as_ref().to_owned());
+        let raw_path = self.content_dir.join(path.as_ref());
 
         if !self.cache_version_matches() {
             return true;
@@ -156,15 +156,11 @@ impl AssetManager {
                 .register(load_request.url.clone(), asset.clone());
 
             for mesh_url in &asset.meshes {
-                self.request_load_asset(AssetLoadRequestBuilder::default()
-                    .url(mesh_url.clone())
-                    .build()?)?;
+                self.request_load_asset(Self::build_asset_request(mesh_url.clone())?)?;
             }
 
             for mat_url in &asset.materials {
-                self.request_load_asset(AssetLoadRequestBuilder::default()
-                    .url(mat_url.clone())
-                    .build()?)?;
+                self.request_load_asset(Self::build_asset_request(mat_url.clone())?)?;
             }
 
             return Ok(());
@@ -173,19 +169,11 @@ impl AssetManager {
         match asset_type {
             AssetType::Mesh => {
                 let asset: Mesh = deserialize_asset(&cache_asset_path)?;
-
-                ASSET_REGISTRY
-                    .get()
-                    .unwrap()
-                    .register(load_request.url, asset);
+                Self::register_asset(load_request.url, asset);
             }
             AssetType::Texture => {
                 let asset: Texture = deserialize_asset(&cache_asset_path)?;
-
-                ASSET_REGISTRY
-                    .get()
-                    .unwrap()
-                    .register(load_request.url, asset);
+                Self::register_asset(load_request.url, asset);
             }
             AssetType::Material => {
                 let asset: Material = deserialize_asset(&cache_asset_path)?;
@@ -197,18 +185,28 @@ impl AssetManager {
                     asset.emissive_tex.clone(),
                 ];
 
-                ASSET_REGISTRY
-                    .get()
-                    .unwrap()
-                    .register(load_request.url.clone(), asset);
+                Self::register_asset(load_request.url.clone(), asset);
 
                 for url in tex_urls.into_iter().flatten() {
-                    self.request_load_asset(AssetLoadRequestBuilder::default().url(url).build()?)?;
+                    self.request_load_asset(Self::build_asset_request(url)?)?;
                 }
             }
             _ => unreachable!()
         }
 
         Ok(())
+    }
+
+    fn build_asset_request(url: AssetUrl) -> Result<AssetLoadRequest> {
+        Ok(AssetLoadRequestBuilder::default()
+            .url(url)
+            .build()?)
+    }
+
+    fn register_asset<A: Asset>(url: AssetUrl, asset: A) {
+        ASSET_REGISTRY
+            .get()
+            .unwrap()
+            .register(url, asset);
     }
 }

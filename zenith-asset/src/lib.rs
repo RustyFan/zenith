@@ -42,9 +42,7 @@ unsafe impl Sync for AssetRegistry {}
 
 impl AssetRegistry {
     pub fn new() -> Self {
-        Self {
-            ..Default::default()
-        }
+        Self::default()
     }
 
     /// Register an asset.
@@ -60,13 +58,13 @@ impl AssetRegistry {
     }
 
     /// Get an asset by url. Return None is this asset had NOT been loaded.
-    fn get<A: Asset>(&self, url: AssetUrl) -> Option<AssetRef<'_, A>> {
+    fn get<A: Asset>(&self, url: &AssetUrl) -> Option<AssetRef<'_, A>> {
         let assets = self.assets_map.read();
-        let key = (url, TypeId::of::<A>());
+        let key = (url.clone(), TypeId::of::<A>());
 
         assets.get(&key)
             .map(Arc::clone)
-            .and_then(AssetRef::new)
+            .map(AssetRef::new)
     }
 }
 
@@ -140,9 +138,8 @@ impl AssetUrl {
             .path
             .extension()
             .and_then(|os_str| os_str.to_str())
-            .map(|str| str.to_lowercase())
-            .unwrap_or("unknown".to_owned());
-        extension_asset_type(&extension)
+            .unwrap_or("unknown");
+        extension_asset_type(&extension.to_ascii_lowercase())
     }
 }
 
@@ -177,7 +174,7 @@ impl<A: Asset> AssetHandle<A> {
 
     /// Get the underlying asset data if this asset is successfully loaded and registered.
     pub fn get(&self) -> Option<AssetRef<'_, A>> {
-        ASSET_REGISTRY.get().unwrap().get(self.url.clone())
+        ASSET_REGISTRY.get().unwrap().get(&self.url)
     }
 }
 
@@ -187,11 +184,11 @@ pub struct AssetRef<'a, A> {
 }
 
 impl<'a, A: Asset> AssetRef<'a, A> {
-    fn new(asset: Arc<dyn Asset>) -> Option<Self> {
-        Some(Self {
+    fn new(asset: Arc<dyn Asset>) -> Self {
+        Self {
             asset,
             _marker: PhantomData,
-        })
+        }
     }
 }
 
@@ -206,11 +203,6 @@ impl<'a, A: Asset> Deref for AssetRef<'a, A> {
     }
 }
 
-impl<'a, A: Asset> AsRef<A> for AssetRef<'a, A> {
-    fn as_ref(&self) -> &A {
-        &self
-    }
-}
 
 /// Asset is any type of data which can be serialized and deserialized.
 /// Asset should be read-only which is thread-safe.
