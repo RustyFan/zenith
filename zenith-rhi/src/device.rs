@@ -73,7 +73,19 @@ pub(crate) fn set_debug_name_handle<T: vk::Handle>(
 
 /// Get required device extensions.
 fn get_required_device_extensions() -> Vec<*const i8> {
-    vec![ash::khr::swapchain::NAME.as_ptr()]
+    #[cfg(all(debug_assertions, feature = "shader_debug_print"))]
+    let mut extensions = vec![ash::khr::swapchain::NAME.as_ptr()];
+
+    #[cfg(not(all(debug_assertions, feature = "shader_debug_print")))]
+    let extensions = vec![ash::khr::swapchain::NAME.as_ptr()];
+
+    #[cfg(all(debug_assertions, feature = "shader_debug_print"))]
+    {
+        // Required for VK_EXT_debug_printf
+        extensions.push(ash::khr::shader_non_semantic_info::NAME.as_ptr());
+    }
+
+    extensions
 }
 
 /// Vulkan logical device with queues.
@@ -232,6 +244,13 @@ impl RenderDevice {
     #[inline]
     pub fn handle(&self) -> &Device {
         &self.device
+    }
+
+    /// Get a reference to the debug utils device extension (debug builds only).
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub(crate) fn debug_utils(&self) -> &ash::ext::debug_utils::Device {
+        &self.debug_utils
     }
 
     /// Set debug name for a zenith-rhi wrapper object (best-effort, no-op without validation).

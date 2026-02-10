@@ -168,6 +168,15 @@ fn create_instance(entry: &Entry, display_handle: RawDisplayHandle) -> Result<In
 
     let extensions = get_required_instance_extensions(display_handle);
 
+    #[cfg(all(debug_assertions, feature = "shader_debug_print"))]
+    const ENABLED_VALIDATION_FEATURES: [vk::ValidationFeatureEnableEXT; 1] = [
+        vk::ValidationFeatureEnableEXT::DEBUG_PRINTF,
+    ];
+
+    #[cfg(all(debug_assertions, feature = "shader_debug_print"))]
+    let mut validation_features = vk::ValidationFeaturesEXT::default()
+        .enabled_validation_features(&ENABLED_VALIDATION_FEATURES);
+
     #[cfg(debug_assertions)]
     let layer_names: Vec<CString> = VALIDATION_LAYERS
         .iter()
@@ -177,7 +186,13 @@ fn create_instance(entry: &Entry, display_handle: RawDisplayHandle) -> Result<In
     #[cfg(debug_assertions)]
     let layer_pointers: Vec<*const i8> = layer_names.iter().map(|s| s.as_ptr()).collect();
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "shader_debug_print"))]
+    let mut create_info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(&extensions)
+        .push_next(&mut validation_features);
+
+    #[cfg(all(debug_assertions, not(feature = "shader_debug_print")))]
     let mut create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
         .enabled_extension_names(&extensions);
@@ -207,7 +222,8 @@ fn setup_debug_messenger(
         .message_severity(
             vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
                 | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+                | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE,
         )
         .message_type(
             vk::DebugUtilsMessageTypeFlagsEXT::GENERAL

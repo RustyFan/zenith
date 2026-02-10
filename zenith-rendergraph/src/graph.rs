@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::sync::{Arc};
 use parking_lot::Mutex;
 use zenith_core::collections::SmallVec;
+use zenith_core::color;
 use zenith_rhi::{BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout};
 use zenith_rhi::{
     vk, GraphicPipeline, GraphicPipelineDesc, PipelineCache, RenderDevice,
@@ -205,12 +206,14 @@ impl CompiledRenderGraph {
     #[profiling::function]
     pub fn execute(&mut self, device: &RenderDevice, cmd_pool: &CommandPool) -> anyhow::Result<()>  {
         let encoder = CommandEncoder::new("cmd.rendergraph.execute", device, cmd_pool)?;
-        
+
         encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
+        encoder.begin_debug_label("render_graph::execution", color::LIGHT_GREEN);
 
         let nodes = std::mem::take(&mut self.serial_nodes);
         self.record_nodes(device, &encoder, nodes);
 
+        encoder.end_debug_label();
         encoder.end()?;
 
         device.submit_commands(
@@ -241,6 +244,7 @@ impl CompiledRenderGraph {
 
         let encoder = CommandEncoder::new("cmd.rendergraph.present", device, cmd_pool)?;
         encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
+        encoder.begin_debug_label("render_graph::present", color::LIGHT_YELLOW);
 
         let nodes = std::mem::take(&mut self.present_nodes);
         self.record_nodes(device, &encoder, nodes);
@@ -251,6 +255,7 @@ impl CompiledRenderGraph {
             [(self.swapchain_tex_id, TextureState::Present.into(), Some(vk::PipelineStageFlags2::BOTTOM_OF_PIPE))].into_iter(),
         );
 
+        encoder.end_debug_label();
         encoder.end()?;
 
         let frame_sync = swapchain.current_frame_sync();
@@ -308,9 +313,11 @@ impl CompiledRenderGraph {
                     self.graphic_pipe_index += 1;
 
                     if let Some(record) = job_functor.take() {
+                        encoder.begin_debug_label(&name, color::LIGHT_BLUE);
                         profiling::scope!("rendergraph::node_recording", &name);
 
                         let Some(pipeline_desc) = pipeline_desc else {
+                            encoder.end_debug_label();
                             continue;
                         };
 
@@ -323,7 +330,9 @@ impl CompiledRenderGraph {
                             color_attachment_ids,
                             depth_attachment_id,
                         };
-                        record(&mut ctx).expect("Failed to record graphic node.");
+                        let result = record(&mut ctx);
+                        encoder.end_debug_label();
+                        result.expect("Failed to record graphic node.");
                     } else {
                         log::warn!("Missing job of graphic node {}!", name);
                     }
@@ -334,6 +343,7 @@ impl CompiledRenderGraph {
 
                     let name = node.name;
                     if let Some(record) = job_functor.take() {
+                        encoder.begin_debug_label(&name, color::LIGHT_PINK);
                         profiling::scope!("rendergraph::node_recording", &name);
 
                         let mut ctx = LambdaNodeExecutionContext {
@@ -341,7 +351,9 @@ impl CompiledRenderGraph {
                             resources: &self.resources,
                             encoder,
                         };
-                        record(&mut ctx).expect("Failed to record lambda node.");
+                        let result = record(&mut ctx);
+                        encoder.end_debug_label();
+                        result.expect("Failed to record lambda node.");
                     } else {
                         log::warn!("Missing job of lambda node {}!", name);
                     }

@@ -3,6 +3,11 @@ name = "zenith-rhi"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Enable shader debug printf support (VK_EXT_debug_printf)
+# Only works in debug builds with validation layers enabled
+shader_debug_print = []
+
 [dependencies]
 ash = { version = "0.38", features = ["std", "debug", "loaded"] }
 ash-window = "0.13"
@@ -15,6 +20,7 @@ derive_builder = { workspace = true }
 memoffset = { workspace = true }
 paste.workspace = true
 parking_lot.workspace = true
+glam.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-rhi-derive = { path = "../zenith-rhi-derive" }

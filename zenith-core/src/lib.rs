@@ -9,6 +9,7 @@ pub mod file;
 pub mod profile;
 pub mod cli;
 pub mod time;
+pub mod color;
 
 pub fn workspace_root() -> PathBuf {
     // Get the directory where Cargo.toml for the workspace is located

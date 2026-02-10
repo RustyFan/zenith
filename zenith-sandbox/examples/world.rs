@@ -31,7 +31,7 @@ impl App for WorldApp {
             world_renderer: None,
             input: InputActionMapper::new(),
             camera: Camera::default(),
-            controller: CameraController::new(20.0),
+            controller: CameraController::new(10.0),
             asset_manager: AssetManager::new(),
         })
     }

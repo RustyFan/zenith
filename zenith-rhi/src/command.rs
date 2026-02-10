@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use ash::{vk};
 use bytemuck::NoUninit;
+use glam::Vec4;
 use zenith_rhi_derive::DeviceObject;
 use crate::barrier::{BufferBarrier, TextureBarrier, MemoryBarrier};
 use crate::{Queue, RenderDevice};
@@ -120,6 +121,36 @@ impl<'a> CommandEncoder<'a> {
     pub fn handle(&self) -> vk::CommandBuffer {
         self.cmd
     }
+
+    // Debug label commands
+    #[cfg(debug_assertions)]
+    pub fn begin_debug_label(&self, label: &str, color: Vec4) {
+        use std::ffi::CString;
+        let c_label = CString::new(label).unwrap();
+        let label_info = vk::DebugUtilsLabelEXT::default()
+            .label_name(c_label.as_c_str())
+            .color(color.to_array());
+        unsafe {
+            self.device
+                .debug_utils()
+                .cmd_begin_debug_utils_label(self.cmd, &label_info);
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub fn begin_debug_label(&self, _label: &str, _color: Vec4) {}
+
+    #[cfg(debug_assertions)]
+    pub fn end_debug_label(&self) {
+        unsafe {
+            self.device
+                .debug_utils()
+                .cmd_end_debug_utils_label(self.cmd);
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub fn end_debug_label(&self) {}
 
     // Pipeline commands
     pub fn bind_pipeline(&self, bind_point: vk::PipelineBindPoint, pipeline: vk::Pipeline) {

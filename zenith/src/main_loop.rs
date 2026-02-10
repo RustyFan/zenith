@@ -40,6 +40,7 @@ impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
             });
 
         let mut window_attributes = Window::default_attributes()
+            .with_title("Zenith")
             .with_min_inner_size(LogicalSize::new(32, 32))
             .with_inner_size(window_size);
 

@@ -58,7 +58,7 @@ PSOutput main(PSInput input) {
     float roughness;
     decode_normal_mra(nmr, n, metallic, roughness);
 
-    let clip_pos = float4((input.uv - 0.5) * float2(2.0, -2.0), 1.0, 1.0);
+    let clip_pos = float4((input.uv - 0.5) * float2(2.0, -2.0), depth, 1.0);
     var world_point = mul(view.inv_view_proj, clip_pos);
     world_point.xyz /= world_point.w;
 
