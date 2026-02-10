@@ -3,9 +3,11 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use zenith_core::log::info;
 use zenith_core::workspace_root;
-use crate::gltf_loader::{GltfLoader, RawGltfProcessor};
+use crate::gltf::{GltfLoader, RawGltfProcessor};
 use crate::{RawResourceBaker, AssetLoadRequest, AssetType, RawResourceLoadRequest, RawResourceLoader, ASSET_REGISTRY, RawResourceLoadRequestBuilder, AssetLoadRequestBuilder, Asset, AssetUrl, deserialize_asset};
-use crate::render::{Material, Mesh, MeshCollection, Texture};
+use crate::material::Material;
+use crate::mesh::{Mesh, MeshCollection};
+use crate::texture::Texture;
 
 /// Managing the loading, registering of assets and maintaining assets' cache.
 /// Asset lifetime:

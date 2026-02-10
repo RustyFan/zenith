@@ -60,6 +60,8 @@ pub struct UploadPool<'a> {
 }
 
 impl<'a> UploadPool<'a> {
+    pub const POOL_SIZE_IN_BYTES: u64 = 1024 * 16;
+
     fn map_vk_error(result: vk::Result) -> UploadError {
         match result {
             vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => UploadError::OutOfDeviceMemory,
@@ -102,9 +104,13 @@ impl<'a> UploadPool<'a> {
         Ok(())
     }
 
-    pub fn new(_device: &RenderDevice, staging_size: vk::DeviceSize) -> Result<Self, UploadError> {
+    pub fn new() -> Result<Self, UploadError> {
+        Self::new_sized(Self::POOL_SIZE_IN_BYTES)
+    }
+
+    pub fn new_sized(pool_size: u64) -> Result<Self, UploadError> {
         Ok(Self {
-            default_size: staging_size,
+            default_size: pool_size,
             write_head: 0,
             current: None,
             batches: Vec::new(),

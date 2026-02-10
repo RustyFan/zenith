@@ -26,4 +26,3 @@ zenith-core = { path = "../zenith-core" }
 zenith-rhi-derive = { path = "../zenith-rhi-derive" }
 bytemuck.workspace = true
 shader-slang = { git = "https://github.com/FloatyMonkey/slang-rs" }
-

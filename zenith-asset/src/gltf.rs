@@ -5,8 +5,10 @@ use ispc_texcomp::{RgbaSurface, bc5, bc7};
 use zenith_core::file::load_with_memory_mapping;
 use zenith_core::log;
 use zenith_core::log::info;
-use crate::render::{Material, MaterialBuilder, Mesh, MeshBuilder, MeshCollection, TextureBuilder, TextureFormat, Texture, Vertex};
+use crate::mesh::{Mesh, MeshBuilder, MeshCollection, Vertex};
 use crate::{Asset, RawResourceBaker, AssetRegistry, RawResource, RawResourceLoader, AssetUrl, serialize_asset};
+use crate::material::{Material, MaterialBuilder};
+use crate::texture::{Texture, TextureBuilder, TextureFormat};
 
 #[derive(Debug, Clone)]
 pub struct GltfLoader;
@@ -336,7 +338,7 @@ impl RawGltfProcessor {
     }
 
     #[profiling::function]
-    fn create_texture_from_gltf_image(image_data: &ImageData, usage: TextureUsageMask) -> Result<crate::render::Texture> {
+    fn create_texture_from_gltf_image(image_data: &ImageData, usage: TextureUsageMask) -> Result<Texture> {
         if let Some((pixels, format)) = Self::compress_texture_if_possible(image_data, usage) {
             return TextureBuilder::default()
                 .width(image_data.width)

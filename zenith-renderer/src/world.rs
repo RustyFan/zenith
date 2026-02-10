@@ -3,7 +3,9 @@ use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec4};
 use zenith_asset::{AssetHandle};
-use zenith_asset::render::{MeshCollection, Mesh, Material, TextureFormat};
+use zenith_asset::material::Material;
+use zenith_asset::mesh::{MeshCollection, Mesh};
+use zenith_asset::texture::TextureFormat;
 use zenith_core::camera::{Camera, WORLD_SPACE_UP};
 use zenith_core::math::{Degree};
 use zenith_rhi::{
@@ -180,8 +182,7 @@ impl WorldRenderer {
         {
             let vertex_data = bytemuck::cast_slice(&lighting_vertices);
             let index_data = bytemuck::cast_slice(&lighting_indices);
-            let total_size = vertex_data.len() + index_data.len();
-            let mut upload_pool = UploadPool::new(device, total_size as _)?;
+            let mut upload_pool = UploadPool::new()?;
             upload_pool.enqueue_copy_buffer(device, lighting_vertex_buffer.as_range(..)?, vertex_data, BufferState::Vertex)?;
             upload_pool.enqueue_copy_buffer(device, lighting_index_buffer.as_range(..)?, index_data, BufferState::Index)?;
 
@@ -247,7 +248,7 @@ impl WorldRenderer {
 
             let create_texture = |name: &str, tex_url: Option<&zenith_asset::AssetUrl>| -> anyhow::Result<Option<Arc<Texture>>> {
                 if let Some(tex_url) = tex_url {
-                    let handle = AssetHandle::<zenith_asset::render::Texture>::new(tex_url.clone());
+                    let handle = AssetHandle::<zenith_asset::texture::Texture>::new(tex_url.clone());
                     let tex = handle
                         .get()
                         .ok_or_else(|| anyhow!("Texture not loaded: {:?}", tex_url.as_ref()))?;
@@ -298,9 +299,9 @@ impl WorldRenderer {
         //------------------------------------------------------------------------------------------------
 
         let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
-        let mut upload_pool = UploadPool::new(device, 64 * 1024)?;
+        let mut upload_pool = UploadPool::new()?;
 
-        let validate_texture_data_size = |tex: &zenith_asset::render::Texture| -> anyhow::Result<()> {
+        let validate_texture_data_size = |tex: &zenith_asset::texture::Texture| -> anyhow::Result<()> {
             let expected = tex.format.data_size_in_bytes(tex.width, tex.height);
             if tex.pixels.len() != expected {
                 return Err(anyhow!(
@@ -326,7 +327,7 @@ impl WorldRenderer {
             upload_pool.enqueue_copy_buffer(device, p.gpu.index_buffer.as_range(..)?, mesh.indices_bytes(), BufferState::Index)?;
 
             if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.base_color_tex, p.tex_urls[0].as_ref()) {
-                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex_handle = AssetHandle::<zenith_asset::texture::Texture>::new(url.clone());
                 let tex = tex_handle
                     .get()
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
@@ -340,7 +341,7 @@ impl WorldRenderer {
                 )?;
             }
             if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.mra_tex, p.tex_urls[1].as_ref()) {
-                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex_handle = AssetHandle::<zenith_asset::texture::Texture>::new(url.clone());
                 let tex = tex_handle
                     .get()
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
@@ -354,7 +355,7 @@ impl WorldRenderer {
                 )?;
             }
             if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.normal_tex, p.tex_urls[2].as_ref()) {
-                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex_handle = AssetHandle::<zenith_asset::texture::Texture>::new(url.clone());
                 let tex = tex_handle
                     .get()
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
@@ -368,7 +369,7 @@ impl WorldRenderer {
                 )?;
             }
             if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.emissive_tex, p.tex_urls[3].as_ref()) {
-                let tex_handle = AssetHandle::<zenith_asset::render::Texture>::new(url.clone());
+                let tex_handle = AssetHandle::<zenith_asset::texture::Texture>::new(url.clone());
                 let tex = tex_handle
                     .get()
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;

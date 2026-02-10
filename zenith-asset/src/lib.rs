@@ -15,9 +15,11 @@ use serde::de::DeserializeOwned;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_core::file::load_with_memory_mapping;
 
-pub mod render;
+pub mod mesh;
 pub mod manager;
-pub mod gltf_loader;
+pub mod gltf;
+pub mod texture;
+pub mod material;
 
 const ZSTD_MAGIC: &[u8; 5] = b"ZSTD1";
 const ZSTD_GUID: &str = "7f9c2e2f-9b9b-4c51-9b65-2f7a6c3e0b2d";

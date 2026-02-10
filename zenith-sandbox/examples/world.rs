@@ -10,7 +10,7 @@ use zenith::rhi::TextureState;
 use zenith::renderer::WorldRenderer;
 use zenith::asset::manager::AssetManager;
 use zenith::asset::{AssetHandle};
-use zenith::asset::render::MeshCollection;
+use zenith::asset::mesh::MeshCollection;
 use zenith::core::camera::{Camera, CameraController, NEAR_PLANE};
 use zenith::core::input::InputActionMapper;
 use zenith::core::log;

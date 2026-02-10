@@ -39,8 +39,7 @@ impl TriangleRenderer {
         let index_buffer = Arc::new(Buffer::new(device, &BufferDesc::index("triangle.index", index_data.len() as u64))?);
 
         {
-            let total_size = vertex_data.len() + index_data.len();
-            let mut upload_pool = UploadPool::new(device, total_size as _)?;
+            let mut upload_pool = UploadPool::new()?;
             upload_pool.enqueue_copy_buffer(device, vertex_buffer.as_range(..)?, vertex_data, BufferState::Vertex)?;
             upload_pool.enqueue_copy_buffer(device, index_buffer.as_range(..)?, index_data, BufferState::Index)?;
 
