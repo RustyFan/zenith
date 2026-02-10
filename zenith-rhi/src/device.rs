@@ -7,14 +7,16 @@ use crate::queue::Queue;
 use crate::synchronization::{Fence, Semaphore};
 use ash::{vk, Device, Instance};
 use std::cell::RefCell;
-#[cfg(feature = "validation")]
+use std::sync::Arc;
+use parking_lot::Mutex;
+#[cfg(debug_assertions)]
 use std::ffi::CString;
 use std::default::Default;
 use zenith_core::collections::{SmallVec, hashset::HashSet};
 use crate::CommandEncoder;
 use crate::bindless::BindlessCaps;
 
-#[cfg(feature = "validation")]
+#[cfg(debug_assertions)]
 fn set_debug_name_raw(
     debug_utils: &ash::ext::debug_utils::Device,
     object_handle: u64,
@@ -41,8 +43,9 @@ fn set_debug_name_raw(
     }
 }
 
-#[cfg(not(feature = "validation"))]
+#[cfg(not(debug_assertions))]
 #[inline]
+#[allow(dead_code)]
 fn set_debug_name_raw(
     _debug_utils: &ash::ext::debug_utils::Device,
     _object_handle: u64,
@@ -58,11 +61,11 @@ pub(crate) fn set_debug_name_handle<T: vk::Handle>(
     object_type: vk::ObjectType,
     name: &str,
 ) {
-    #[cfg(feature = "validation")]
+    #[cfg(debug_assertions)]
     {
         set_debug_name_raw(&device.debug_utils, object.as_raw(), object_type, name);
     }
-    #[cfg(not(feature = "validation"))]
+    #[cfg(not(debug_assertions))]
     {
         let _ = (device, object, object_type, name);
     }
@@ -81,13 +84,14 @@ pub struct RenderDevice {
 
     device: Device,
     parent_physical_device: PhysicalDevice,
-    #[cfg(feature = "validation")]
+    #[cfg(debug_assertions)]
     debug_utils: ash::ext::debug_utils::Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
     current_frame: u8,
     bindless_caps: BindlessCaps,
+    bindless_pool: Option<Arc<Mutex<crate::BindlessPool>>>,
 }
 
 impl RenderDevice {
@@ -185,7 +189,7 @@ impl RenderDevice {
             .push_next(&mut vulkan_13_features);
 
         let device = unsafe { instance.create_device(physical_device.handle(), &create_info, None)? };
-        #[cfg(feature = "validation")]
+        #[cfg(debug_assertions)]
         let debug_utils = ash::ext::debug_utils::Device::new(instance, &device);
 
         let graphics_queue = unsafe { device.get_device_queue(physical_device.graphics_queue_family(), 0) };
@@ -197,7 +201,7 @@ impl RenderDevice {
         let mut device = Self {
             parent_physical_device: physical_device.clone(),
             device,
-            #[cfg(feature = "validation")]
+            #[cfg(debug_assertions)]
             debug_utils,
             graphics_queue,
             present_queue,
@@ -206,7 +210,12 @@ impl RenderDevice {
             resource_caches,
             current_frame: 0,
             bindless_caps,
+            bindless_pool: None,
         };
+
+        // Initialize the bindless pool now that we have a complete device
+        let bindless_pool = Arc::new(Mutex::new(crate::BindlessPool::new(&device)?));
+        device.bindless_pool = Some(bindless_pool);
 
         for _ in 0..num_frames {
             device.frame_resource_fences.push(Fence::new("fence.execution", &device, true)?);
@@ -238,6 +247,9 @@ impl RenderDevice {
             self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
             self.device.reset_fences(&[fence]).unwrap();
         }
+        // NOTE: reset_frame_resources() is NOT called here because the present
+        // path uses a separate in_flight_fence.  The caller (Engine::render)
+        // must wait for BOTH fences before calling reset_frame_resources().
         self.current_frame as _
     }
 
@@ -332,6 +344,10 @@ impl RenderDevice {
         &self.bindless_caps
     }
 
+    pub fn bindless_pool(&self) -> &Arc<Mutex<crate::BindlessPool>> {
+        self.bindless_pool.as_ref().expect("Bindless pool not initialized")
+    }
+
     pub fn graphics_queue(&self) -> Queue {
         Queue::new(self.graphics_queue, self.parent_physical_device.graphics_queue_family())
     }
@@ -406,6 +422,8 @@ impl Drop for RenderDevice {
         self.resource_caches.clear();
         self.frame_resource_fences.clear();
 
+        self.bindless_pool = None;
+        
         unsafe {
             self.device.destroy_device(None);
         }

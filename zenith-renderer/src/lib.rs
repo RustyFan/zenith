@@ -1,3 +1,4 @@
+mod defer_shading;
 mod triangle;
 mod world;
 

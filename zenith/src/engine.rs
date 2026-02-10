@@ -1,15 +1,13 @@
 use crate::app::RenderContext;
 use crate::RenderableApp;
 use std::sync::{Arc};
-use parking_lot::Mutex;
 use winit::window::Window;
 use zenith_rendergraph::RenderGraphBuilder;
 use zenith_rhi::core::{select_physical_device, PhysicalDevice};
 use zenith_rhi::swapchain::SwapchainWindow;
-use zenith_rhi::{vk, BindlessPool, CommandPool, PipelineCache, RenderDevice, RhiCore, Swapchain, SwapchainConfig};
+use zenith_rhi::{vk, CommandPool, PipelineCache, RenderDevice, RhiCore, Swapchain, SwapchainConfig};
 
 pub struct Engine {
-    bindless_pool: Arc<Mutex<BindlessPool>>,
     execute_command_pools: Vec<CommandPool>,
     present_command_pools: Vec<CommandPool>,
     pipeline_cache: PipelineCache,
@@ -68,7 +66,6 @@ impl Engine {
             .unzip();
 
         Ok(Self {
-            bindless_pool: Arc::new(Mutex::new(BindlessPool::new(&device)?)),
             execute_command_pools,
             present_command_pools,
             pipeline_cache,
@@ -90,10 +87,20 @@ impl Engine {
 
     #[profiling::function]
     pub fn render<A: RenderableApp>(&mut self, app: &mut A) {
+        // 1. Wait for the previous cycle's execute fence (begin_frame).
         let frame_index = self.render_device.begin_frame();
+
+        // 2. Wait for the previous cycle's present fence (acquire_next_image).
+        let (image_index, _) = self.swapchain.acquire_next_image(self.render_device.handle())
+            .expect("Failed to acquire next swapchain image!");
+        self.swapchain.reset_current_fence(self.render_device.handle())
+            .expect("Failed to reset swapchain fence!");
+
+        // 3. BOTH fences waited — safe to release deferred resources and reset pools.
+        self.render_device.reset_frame_resources();
         self.execute_command_pools[frame_index].reset().expect("Failed to reset execute command pool");
 
-        let mut builder = RenderGraphBuilder::new(self.bindless_pool.clone());
+        let mut builder = RenderGraphBuilder::new();
         let render_context = RenderContext::new(
             &mut builder,
             &self.swapchain,
@@ -107,7 +114,7 @@ impl Engine {
         compiled.execute(&mut self.render_device, &self.execute_command_pools[frame_index])
             .expect("Failed to execute render graph!");
 
-        let retired = compiled.present(&mut self.render_device, &self.present_command_pools[frame_index], &mut self.swapchain)
+        let retired = compiled.present(&mut self.render_device, &self.present_command_pools[frame_index], &mut self.swapchain, image_index)
             .expect("Failed to present swapchain!");
 
         retired.release_frame_resources(&mut self.render_device);

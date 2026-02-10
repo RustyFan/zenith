@@ -20,6 +20,6 @@ pub use node::{
     RenderGraphNode,
 };
 pub use graph::{
-    BindlessBinder, RenderGraph, CompiledRenderGraph, RetiredRenderGraph,
+    RenderGraph, CompiledRenderGraph, RetiredRenderGraph,
     GraphicNodeExecutionContext, LambdaNodeExecutionContext,
 };

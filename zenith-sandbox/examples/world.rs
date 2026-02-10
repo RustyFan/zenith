@@ -130,7 +130,7 @@ impl RenderableApp for WorldApp {
         let mut output = builder.import(output, TextureState::Undefined);
 
         self.world_renderer
-            .as_ref()
+            .as_mut()
             .unwrap()
             .render(builder, &mut output, extent.width, extent.height, &self.camera);
     }

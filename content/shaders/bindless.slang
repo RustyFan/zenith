@@ -5,31 +5,41 @@ static const uint BINDLESS_BINDING_TEXTURE = 0;
 static const uint BINDLESS_BINDING_BUFFER = 1;
 static const uint BINDLESS_BINDING_SAMPLER = 2;
 
-uint bindless_index(uint handle) {
+func bindless_index(uint handle) -> uint {
     return handle & BINDLESS_INDEX_MASK;
 }
 
-uint bindless_type(uint handle) {
+func bindless_type(uint handle) -> uint {
     return handle >> BINDLESS_TYPE_SHIFT;
 }
 
 [[vk::binding(0, 0)]]
-Texture2D texture_heap[];
+Texture2D bindless_texture_heap[];
 
 [[vk::binding(1, 0)]]
-ByteAddressBuffer buffer_heap[];
+StructuredBuffer<float4> bindless_buffer_heap[];
 
 [[vk::binding(2, 0)]]
-SamplerState sampler_heap[];
+SamplerState bindless_sampler_heap[];
 
-T get_bindless_buffer<T>(uint handle) {
+func load_bindless_float(uint handle, uint element_index) -> float {
     const uint index = bindless_index(handle);
-    return buffer_heap[NonUniformResourceIndex(index)].Load<T>(0);
+    return bindless_buffer_heap[NonUniformResourceIndex(index)][element_index].x;
 }
 
-T get_bindless_buffer_with_offset<T>(uint handle) {
+func load_bindless_float4(uint handle, uint element_index) -> float4 {
     const uint index = bindless_index(handle);
-    return buffer_heap[NonUniformResourceIndex(index)].Load<T>(0);
+    return bindless_buffer_heap[NonUniformResourceIndex(index)][element_index];
+}
+
+func load_bindless_float4x4(uint handle, uint element_index) -> float4x4 {
+    const uint index = bindless_index(handle);
+    float4 c0 = bindless_buffer_heap[NonUniformResourceIndex(index)][element_index];
+    float4 c1 = bindless_buffer_heap[NonUniformResourceIndex(index)][element_index + 1];
+    float4 c2 = bindless_buffer_heap[NonUniformResourceIndex(index)][element_index + 2];
+    float4 c3 = bindless_buffer_heap[NonUniformResourceIndex(index)][element_index + 3];
+    // float4x4(a,b,c,d) in Slang/HLSL treats arguments as rows.
+    return float4x4(c0, c1, c2, c3);
 }
 
 enum SamplerKind : uint {
@@ -39,9 +49,9 @@ enum SamplerKind : uint {
     NearestClamp  = 3,
 };
 
-float4 sample_bindless_texture(uint handle, SamplerKind sampler_kind, float2 uv) {
+func sample_bindless_texture(uint handle, SamplerKind sampler_kind, float2 uv) -> float4 {
     const uint index = bindless_index(handle);
-    const Texture2D tex = texture_heap[NonUniformResourceIndex(index)];
-    const SamplerState samp = sampler_heap[NonUniformResourceIndex((uint)sampler_kind)];
+    const Texture2D tex = bindless_texture_heap[NonUniformResourceIndex(index)];
+    const SamplerState samp = bindless_sampler_heap[NonUniformResourceIndex((uint)sampler_kind)];
     return tex.Sample(samp, uv);
 }

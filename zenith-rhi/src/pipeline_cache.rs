@@ -4,8 +4,9 @@ use crate::pipeline::{GraphicPipeline, GraphicPipelineDesc};
 use ash::{vk};
 use std::sync::Arc;
 use zenith_core::collections::hashmap::HashMap;
+use zenith_core::collections::SmallVec;
 use zenith_rhi_derive::DeviceObject;
-use crate::{BindlessPool, DescriptorSetLayout, RenderDevice};
+use crate::{DescriptorSetLayout, RenderDevice};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 
@@ -60,18 +61,20 @@ impl PipelineCache {
     pub fn handle(&self) -> vk::PipelineCache { self.cache }
 
     /// Get or create a graphics pipeline.
-    pub fn get_or_create(&mut self, name: &str, bindless_pool: Option<&BindlessPool>, device: &RenderDevice, desc: &GraphicPipelineDesc) -> Result<Arc<GraphicPipeline>, vk::Result> {
+    pub fn get_or_create(
+        &mut self,
+        name: &str,
+        device: &RenderDevice,
+        desc: &GraphicPipelineDesc,
+    ) -> Result<Arc<GraphicPipeline>, vk::Result> {
         if let Some(cached) = self.pipelines.get(desc) {
             return Ok(cached.clone());
         }
 
-        let mut descriptor_layouts = Vec::with_capacity(2);
-        if let Some(bindless_pool) = bindless_pool {
-            descriptor_layouts.push(bindless_pool.set_layout().clone());
-        }
+        let mut descriptor_layouts: SmallVec<[Arc<DescriptorSetLayout>; 4]> = SmallVec::new();
 
         let max_set = desc.shader.merged_reflection.max_set().unwrap_or(0);
-        for idx in (BindlessPool::SET_INDEX + 1)..=max_set {
+        for idx in 0..=max_set {
             let name = format!("descriptor_layout.s{idx}");
             let layout = DescriptorSetLayout::from_reflection(&name, device, &desc.shader.merged_reflection.bindings, idx)?;
             descriptor_layouts.push(Arc::new(layout));

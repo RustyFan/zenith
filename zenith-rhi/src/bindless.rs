@@ -8,10 +8,10 @@ use ash::vk;
 use ash::vk::Handle;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::Arc;
 
 use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindLocation, DescriptorBindingCollector, LayoutBinding};
-use crate::{CommandEncoder, DescriptorBindingError, DescriptorPool, DescriptorSetLayout, RenderDevice};
+use crate::{DescriptorBindingError, DescriptorPool, DescriptorSetLayout, RenderDevice, ShaderBinding};
+use std::sync::Arc;
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone)]
@@ -150,12 +150,10 @@ struct BindlessPoolState {
 }
 
 pub struct BindlessPool {
-    device: ash::Device,
     collector: DescriptorBindingCollector,
     _pool: DescriptorPool,
     set_layout: Arc<DescriptorSetLayout>,
     set: vk::DescriptorSet,
-
     state: BindlessPoolState,
     caps: BindlessCaps,
 }
@@ -163,51 +161,81 @@ pub struct BindlessPool {
 impl BindlessPool {
     pub const SET_INDEX: u32 = 0;
 
-    pub fn new(device: &RenderDevice) -> Result<Self, vk::Result> {
-        let caps = device.bindless_caps();
-
-        // Bindless descriptor set layout: set 0 with 3 bindings.
-        // - binding 0: textures (sampled)
-        // - binding 1: typeless buffers (ByteAddressBuffer) -> STORAGE_BUFFER
-        // - binding 2: samplers
-        let bindings = [
-            LayoutBinding {
+    /// Shader variable name prefix for bindless resources.
+    /// During reflection, any set containing a binding whose name starts
+    /// with this prefix will have its layout replaced by the bindless pool layout.
+    pub const BINDING_PREFIX: &'static str = "bindless_";
+    
+    pub fn canonical_shader_bindings(caps: &BindlessCaps) -> [ShaderBinding; 3] {
+        let binding_flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
+        [
+            ShaderBinding {
+                name: "bindless_texture_heap".to_string(),
+                set: Self::SET_INDEX,
                 binding: ResourceType::Texture2D as u32,
                 descriptor_type: vk::DescriptorType::SAMPLED_IMAGE,
+                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
                 count: caps.max_textures,
-                stage_flags: vk::ShaderStageFlags::ALL,
-                binding_flags: vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                binding_flags,
             },
-            LayoutBinding {
+            ShaderBinding {
+                name: "bindless_buffer_heap".to_string(),
+                set: Self::SET_INDEX,
                 binding: ResourceType::Buffer as u32,
                 descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
                 count: caps.max_storage_buffers,
-                stage_flags: vk::ShaderStageFlags::ALL,
-                binding_flags: vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                binding_flags,
             },
-            LayoutBinding {
+            ShaderBinding {
+                name: "bindless_sampler_heap".to_string(),
+                set: Self::SET_INDEX,
                 binding: ResourceType::Sampler as u32,
                 descriptor_type: vk::DescriptorType::SAMPLER,
+                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
                 count: caps.max_samplers,
-                stage_flags: vk::ShaderStageFlags::ALL,
-                binding_flags: vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                binding_flags,
             },
-        ];
+        ]
+    }
 
-        let set_layout = DescriptorSetLayout::new(
+    pub fn descriptor_layout_bindings(caps: &BindlessCaps) -> Vec<LayoutBinding> {
+        let canonical = Self::canonical_shader_bindings(caps);
+        let bindings = canonical
+            .into_iter()
+            .map(|binding| {
+                let count = match binding.binding {
+                    x if x == ResourceType::Texture2D as u32 => caps.max_textures,
+                    x if x == ResourceType::Buffer as u32 => caps.max_storage_buffers,
+                    x if x == ResourceType::Sampler as u32 => caps.max_samplers,
+                    _ => 1,
+                };
+                LayoutBinding {
+                    binding: binding.binding,
+                    descriptor_type: binding.descriptor_type,
+                    count,
+                    stage_flags: binding.stage_flags,
+                    binding_flags: vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+                }
+            })
+            .collect::<Vec<_>>();
+        bindings
+    }
+
+    pub fn new(device: &RenderDevice) -> Result<Self, vk::Result> {
+        let caps = device.bindless_caps();
+        let bindings = Self::descriptor_layout_bindings(caps);
+        let set_layout = Arc::new(DescriptorSetLayout::new(
             "layout.bindless",
             device,
             &bindings,
             vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
-        )?;
-        let set_layout = Arc::new(set_layout);
-
+        )?);
         let pool_sizes = [
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: caps.max_textures },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: caps.max_storage_buffers },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: caps.max_samplers },
         ];
-
         let pool = DescriptorPool::new(
             "pool.bindless",
             device,
@@ -215,11 +243,9 @@ impl BindlessPool {
             &pool_sizes,
             vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND,
         )?;
-
         let set = pool.allocate(&set_layout)?;
 
         Ok(Self {
-            device: device.handle().clone(),
             collector: Default::default(),
             _pool: pool,
             set_layout,
@@ -228,12 +254,12 @@ impl BindlessPool {
             state: Default::default(),
         })
     }
-    
-    #[inline]
-    pub fn set_layout(&self) -> &Arc<DescriptorSetLayout> { &self.set_layout }
 
     #[inline]
     pub fn set(&self) -> vk::DescriptorSet { self.set }
+
+    #[inline]
+    pub fn set_layout(&self) -> &Arc<DescriptorSetLayout> { &self.set_layout }
 
     #[inline]
     pub fn caps(&self) -> BindlessCaps { self.caps }
@@ -332,14 +358,14 @@ impl BindlessPool {
         }
     }
 
-    pub fn update(&mut self, _encoder: &CommandEncoder<'_>) {
+    /// Flush pending descriptor writes into the pool's internal set.
+    pub fn flush(&mut self, device: &RenderDevice) {
         if self.collector.num_bindings() == 0 {
             return;
         }
-
         let writes = self.collector.write_to(0, std::slice::from_ref(&self.set));
         unsafe {
-            self.device.update_descriptor_sets(&writes, &[]);
+            device.handle().update_descriptor_sets(&writes, &[]);
         }
         self.collector.clear();
     }

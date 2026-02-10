@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4};
+use glam::{Mat4, Vec4};
 use zenith_asset::{AssetHandle};
 use zenith_asset::render::{MeshCollection, Mesh, Material, TextureFormat};
 use zenith_core::camera::{Camera, WORLD_SPACE_UP};
@@ -19,6 +19,7 @@ use zenith_rendergraph::{
     RenderGraphBuilder, RenderGraphResource, VertexLayout,
     GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
 };
+use crate::defer_shading::GBuffer;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
@@ -29,19 +30,38 @@ pub struct WorldVertex {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
+struct LightingVertex {
+    pub position: [f32; 2],
+    pub uv: [f32; 2],
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct PushConstants {
     // Column-major 4x4 (matches glam::Mat4::to_cols_array()).
-    mvp: [f32; 16],
+    model: [f32; 16],
     base_color_factor: [f32; 4],
     base_color_tex: u32,
+    mra_tex: u32,
+    normal_tex: u32,
     sampler_kind: u32,
     flags: u32,
     keep_normal_scale: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LightingPushConstants {
+    gbuffer_base: u32,
+    gbuffer_nmr: u32,
+    scene_depth: u32,
+}
+
 const INVALID_BINDLESS: u32 = u32::MAX;
 const FLAG_HAS_BASE_COLOR_TEX: u32 = 1 << 0;
+const FLAG_HAS_MRA_TEX: u32 = 1 << 1;
+const FLAG_HAS_NORMAL_TEX: u32 = 1 << 2;
 
 #[derive(Clone)]
 struct GpuMaterial {
@@ -68,29 +88,106 @@ struct GpuMesh {
 pub struct WorldRenderer {
     vertex_shader: Arc<Shader>,
     fragment_shader: Arc<Shader>,
+    lighting_vertex_shader: Arc<Shader>,
+    lighting_fragment_shader: Arc<Shader>,
+    lighting_vertex_buffer: Arc<Buffer>,
+    lighting_index_buffer: Arc<Buffer>,
     meshes: Vec<GpuMesh>,
+    gbuffer: Option<GBuffer>,
+    width: u32,
+    height: u32,
     // Fixed bindless sampler heap indices:
     // 0=LinearRepeat, 1=LinearClamp, 2=NearestRepeat, 3=NearestClamp
     samplers: [Arc<Sampler>; 4],
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct ViewData {
+    view_proj: [f32; 16],
+    inv_view_proj: [f32; 16],
+    view: [f32; 16],
+    inv_view: [f32; 16],
+    proj: [f32; 16],
+    inv_proj: [f32; 16],
+    position: [f32; 4],
+}
+
+impl ViewData {
+    pub fn from_camera(cam: &Camera) -> Self {
+        let vp = cam.view_projection();
+        let v = cam.view();
+        let p = cam.projection();
+        Self {
+            view_proj: vp.to_cols_array(),
+            inv_view_proj: vp.inverse().to_cols_array(),
+            view: v.to_cols_array(),
+            inv_view: v.inverse().to_cols_array(),
+            proj: p.to_cols_array(),
+            inv_proj: p.inverse().to_cols_array(),
+            position: Vec4::new(cam.position().x, cam.position().y, cam.position().z, 1.0).to_array(),
+        }
+    }
+}
+
 impl WorldRenderer {
     pub fn new(device: &RenderDevice) -> anyhow::Result<Self> {
         let vertex_shader = Shader::from_file(
-            "shader.world.vs",
+            "shader.defer_shading.vs",
             device,
-            "content/shaders/world.slang",
-            "vsmain",
+            "content/shaders/defer_shading.slang",
             zenith_rhi::ShaderStage::Vertex,
         )?;
 
         let fragment_shader = Shader::from_file(
-            "shader.world.ps",
+            "shader.defer_shading.ps",
             device,
-            "content/shaders/world.slang",
-            "psmain",
+            "content/shaders/defer_shading.slang",
             zenith_rhi::ShaderStage::Fragment,
         )?;
+
+        let lighting_vertex_shader = Shader::from_file(
+            "shader.lighting.vs",
+            device,
+            "content/shaders/lighting.slang",
+            zenith_rhi::ShaderStage::Vertex,
+        )?;
+
+        let lighting_fragment_shader = Shader::from_file(
+            "shader.lighting.ps",
+            device,
+            "content/shaders/lighting.slang",
+            zenith_rhi::ShaderStage::Fragment,
+        )?;
+
+        let lighting_vertices = [
+            LightingVertex { position: [-1.0,  1.0], uv: [0.0, 0.0] },
+            LightingVertex { position: [ 1.0,  1.0], uv: [1.0, 0.0] },
+            LightingVertex { position: [-1.0, -1.0], uv: [0.0, 1.0] },
+            LightingVertex { position: [ 1.0, -1.0], uv: [1.0, 1.0] },
+        ];
+        let lighting_indices: [u16; 6] = [0, 1, 2, 1, 2, 3];
+
+        let lighting_vertex_buffer = Arc::new(Buffer::new(
+            device,
+            &BufferDesc::vertex("world.lighting.vertex", (lighting_vertices.len() * size_of::<LightingVertex>()) as u64),
+        )?);
+        let lighting_index_buffer = Arc::new(Buffer::new(
+            device,
+            &BufferDesc::index("world.lighting.index", (lighting_indices.len() * size_of::<u16>()) as u64),
+        )?);
+
+        {
+            let vertex_data = bytemuck::cast_slice(&lighting_vertices);
+            let index_data = bytemuck::cast_slice(&lighting_indices);
+            let total_size = vertex_data.len() + index_data.len();
+            let mut upload_pool = UploadPool::new(device, total_size as _)?;
+            upload_pool.enqueue_copy_buffer(device, lighting_vertex_buffer.as_range(..)?, vertex_data, BufferState::Vertex)?;
+            upload_pool.enqueue_copy_buffer(device, lighting_index_buffer.as_range(..)?, index_data, BufferState::Index)?;
+
+            let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
+            upload_pool.flush(&immediate, device)?;
+        }
 
         let linear_repeat = Arc::new(Sampler::new(device, &SamplerDesc::linear())?);
         let linear_clamp = Arc::new(Sampler::new(device, &SamplerDesc::linear().with_address_mode(vk::SamplerAddressMode::CLAMP_TO_EDGE))?);
@@ -100,7 +197,14 @@ impl WorldRenderer {
         Ok(Self {
             vertex_shader: Arc::new(vertex_shader),
             fragment_shader: Arc::new(fragment_shader),
+            lighting_vertex_shader: Arc::new(lighting_vertex_shader),
+            lighting_fragment_shader: Arc::new(lighting_fragment_shader),
+            lighting_vertex_buffer,
+            lighting_index_buffer,
             meshes: Vec::new(),
+            gbuffer: None,
+            width: 0,
+            height: 0,
             samplers: [linear_repeat, linear_clamp, nearest_repeat, nearest_clamp],
         })
     }
@@ -286,18 +390,44 @@ impl WorldRenderer {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         builder: &mut RenderGraphBuilder,
         output: &mut RenderGraphResource<Texture>,
         width: u32,
         height: u32,
         camera: &Camera,
     ) {
-        if self.meshes.is_empty() {
+        if self.meshes.is_empty() || width == 0 || height == 0 {
             return;
         }
 
-        let mut depth = builder.create(TextureDesc::new_depth("world.depth", width, height));
+        self.width = width;
+        self.height = height;
+
+        let view = builder.create(
+            BufferDesc::uniform("view", size_of::<ViewData>() as _)
+        );
+        let (gbuffer_base, gbuffer_nmr, scene_depth) = self.render_meshes(builder, camera, &view);
+        self.render_lighting(builder, output, gbuffer_base, gbuffer_nmr, scene_depth, &view);
+    }
+
+    fn render_meshes(
+        &mut self,
+        builder: &mut RenderGraphBuilder,
+        camera: &Camera,
+        view: &RenderGraphResource<Buffer>,
+    ) -> (RenderGraphResource<Texture>, RenderGraphResource<Texture>, RenderGraphResource<Texture>) {
+        let width = self.width;
+        let height = self.height;
+
+        let mut depth = builder.create(
+            TextureDesc::new_depth("scene.depth", width, height)
+                .with_additional_usage(vk::ImageUsageFlags::SAMPLED)
+        );
+
+        let gbuffer = self.gbuffer.get_or_insert_with(|| GBuffer::new(width, height));
+        gbuffer.ensure_size(width, height);
+        let (mut gbuffer_base_color, mut gbuffer_normal_mra) = gbuffer.create(builder);
 
         // Import buffers first (RenderGraphBuilder is mutably borrowed when a node builder exists).
         let mut imported = Vec::with_capacity(self.meshes.len());
@@ -307,9 +437,11 @@ impl WorldRenderer {
             imported.push((vb, ib, m.index_count, m.model, m.material.clone()));
         }
 
-        let mut node = builder.add_graphic_node("world");
+        let mut node = builder.add_graphic_node("gbuffer");
 
-        let output_rt = node.write(output, TextureState::Color);
+        let view = node.read(&view, BufferState::Uniform);
+        let gbuffer_base_rt = node.write(&mut gbuffer_base_color, TextureState::Color);
+        let gbuffer_nmr_rt = node.write(&mut gbuffer_normal_mra, TextureState::Color);
         let depth_rt = node.write(&mut depth, TextureState::DepthStencil);
 
         // Import buffers and capture per-mesh draw info.
@@ -328,9 +460,14 @@ impl WorldRenderer {
             .build()
             .unwrap();
 
-        let color_info = ColorAttachmentDescBuilder::default()
+        let base_color_info = ColorAttachmentDescBuilder::default()
             .clear_input()
             .clear_value([0.05, 0.05, 0.05, 1.0])
+            .build()
+            .unwrap();
+        let normal_info = ColorAttachmentDescBuilder::default()
+            .clear_input()
+            .clear_value([0.5, 0.5, 1.0, 1.0])
             .build()
             .unwrap();
 
@@ -352,50 +489,97 @@ impl WorldRenderer {
 
         {
             let mut binder = node.pipeline(shader, state);
-            binder.push_color(output_rt, color_info);
+            binder.push_color(gbuffer_base_rt, base_color_info);
+            binder.push_color(gbuffer_nmr_rt, normal_info);
             binder.depth(depth_rt, depth_info);
             binder.finish();
         }
 
         let samplers = self.samplers.clone();
 
-        let view_proj_mat = camera.view_projection();
+        let view_data = ViewData::from_camera(camera);
         node.execute(move |ctx| {
             let extent = vk::Extent2D { width, height };
             let encoder = ctx.encoder();
 
-            // Bindless: ensure our fixed samplers exist in heap[0..3].
-            let mut bindless = ctx.create_bindless_binder();
-            bindless.bind_sampler_at(0, samplers[0].handle())?;
-            bindless.bind_sampler_at(1, samplers[1].handle())?;
-            bindless.bind_sampler_at(2, samplers[2].handle())?;
-            bindless.bind_sampler_at(3, samplers[3].handle())?;
+            // Bind all bindless resources via direct pool access (set0 bound at command buffer start).
+            let mut draw_state: Vec<(u32, Mat4, [f32; 4], u32, u32, u32, u32)> = Vec::with_capacity(draws.len());
+            {
+                let mut pool = ctx.device().bindless_pool().lock();
 
-            // Bind textures (idempotent) and then bind the bindless set.
-            // Note: we still call bind() for all textures to satisfy \"all textures bound\" requirement.
-            let mut draw_state: Vec<(u32, Mat4, [f32; 4], u32, u32)> = Vec::with_capacity(draws.len());
-            for (_vb, _ib, index_count, model, material) in draws.iter() {
-                if let Some(t) = &material.base_color_tex {
-                    let handle = bindless.bind(
-                        t.as_range(TextureLayout::ShaderReadOnly, .., ..)
-                            .map_err(|e| anyhow!("failed to create base_color texture range: {e:?}"))?,
-                    )?;
-                    draw_state.push((*index_count, *model, material.base_color_factor, *handle, FLAG_HAS_BASE_COLOR_TEX));
-                } else {
-                    draw_state.push((*index_count, *model, material.base_color_factor, INVALID_BINDLESS, 0));
+                // Ensure our fixed samplers exist in heap[0..3].
+                pool.bind_sampler_at(0, samplers[0].handle())?;
+                pool.bind_sampler_at(1, samplers[1].handle())?;
+                pool.bind_sampler_at(2, samplers[2].handle())?;
+                pool.bind_sampler_at(3, samplers[3].handle())?;
+
+                // Bind textures (idempotent).
+                for (_vb, _ib, index_count, model, material) in draws.iter() {
+                    let mut flags = 0;
+                    let mut base_color_tex = INVALID_BINDLESS;
+                    let mut mra_tex = INVALID_BINDLESS;
+                    let mut normal_tex = INVALID_BINDLESS;
+
+                    if let Some(t) = &material.base_color_tex {
+                        let handle = pool.bind(
+                            t.as_range(TextureLayout::ShaderReadOnly, .., ..)
+                                .map_err(|e| anyhow!("failed to create base_color texture range: {e:?}"))?,
+                        )?;
+                        base_color_tex = *handle;
+                        flags |= FLAG_HAS_BASE_COLOR_TEX;
+                    }
+
+                    if let Some(t) = &material.mra_tex {
+                        let handle = pool.bind(
+                            t.as_range(TextureLayout::ShaderReadOnly, .., ..)
+                                .map_err(|e| anyhow!("failed to create mra texture range: {e:?}"))?,
+                        )?;
+                        mra_tex = *handle;
+                        flags |= FLAG_HAS_MRA_TEX;
+                    }
+                    if let Some(t) = &material.normal_tex {
+                        let handle = pool.bind(
+                            t.as_range(TextureLayout::ShaderReadOnly, .., ..)
+                                .map_err(|e| anyhow!("failed to create normal texture range: {e:?}"))?,
+                        )?;
+                        normal_tex = *handle;
+                        flags |= FLAG_HAS_NORMAL_TEX;
+                    }
+                    if let Some(t) = &material.emissive_tex {
+                        let _ = pool.bind(
+                            t.as_range(TextureLayout::ShaderReadOnly, .., ..)
+                                .map_err(|e| anyhow!("failed to create emissive texture range: {e:?}"))?,
+                        )?;
+                    }
+
+                    draw_state.push((
+                        *index_count,
+                        *model,
+                        material.base_color_factor,
+                        base_color_tex,
+                        mra_tex,
+                        normal_tex,
+                        flags,
+                    ));
                 }
 
-                if let Some(t) = &material.mra_tex {
-                    let _ = bindless.bind(t.as_range(TextureLayout::ShaderReadOnly, .., ..).map_err(|e| anyhow!("failed to create mra texture range: {e:?}"))?)?;
-                }
-                if let Some(t) = &material.normal_tex {
-                    let _ = bindless.bind(t.as_range(TextureLayout::ShaderReadOnly, .., ..).map_err(|e| anyhow!("failed to create normal texture range: {e:?}"))?)?;
-                }
-                if let Some(t) = &material.emissive_tex {
-                    let _ = bindless.bind(t.as_range(TextureLayout::ShaderReadOnly, .., ..).map_err(|e| anyhow!("failed to create emissive texture range: {e:?}"))?)?;
-                }
+                // Flush all pending descriptor writes into the pool-owned bindless set.
+                pool.flush(ctx.device());
+                ctx.bind_descriptor_sets(0, std::slice::from_ref(&pool.set()));
             }
-            bindless.finish();
+
+            // Write and bind view buffer.
+            let view = ctx.get(&view)
+                .as_range(..)
+                .map_err(|e| anyhow::anyhow!("failed to create view buffer range: {:?}", e))?;
+            view.write(bytemuck::bytes_of(&view_data))
+                .map_err(|e| anyhow::anyhow!("failed to write view buffer: {:?}", e))?;
+
+            let mut binder = ctx.create_binder();
+            binder.bind("view", view)?;
+            // first_set=1: skip set 0 (bindless, managed by BindlessPool)
+            let sets = binder.finish(ctx.device(), 1).map_err(|e| anyhow::anyhow!("descriptor set finish failed: {e}"))?;
+            ctx.bind_descriptor_sets(1, &sets);
 
             ctx.begin_rendering(extent);
             ctx.bind_pipeline();
@@ -417,14 +601,15 @@ impl WorldRenderer {
             };
             encoder.set_scissor(0, &[scissor]);
 
-            for (i, (index_count, model, base_color_factor, base_color_tex, flags)) in draw_state.into_iter().enumerate() {
+            for (i, (index_count, model, base_color_factor, base_color_tex, mra_tex, normal_tex, flags)) in draw_state.into_iter().enumerate() {
                 let (vb_acc, ib_acc, _, _, _) = &draws[i];
 
-                let mvp = view_proj_mat * model;
                 let pc = PushConstants {
-                    mvp: mvp.to_cols_array(),
+                    model: model.to_cols_array(),
                     base_color_factor,
                     base_color_tex,
+                    mra_tex,
+                    normal_tex,
                     sampler_kind: 0, // LinearRepeat
                     flags,
                     keep_normal_scale: 0.0,
@@ -435,6 +620,135 @@ impl WorldRenderer {
                 encoder.bind_index_buffer(ctx.get(ib_acc).handle(), 0, vk::IndexType::UINT32);
                 encoder.draw_indexed(index_count, 1, 0, 0, 0);
             }
+
+            ctx.end_rendering();
+            Ok(())
+        });
+
+        (gbuffer_base_color, gbuffer_normal_mra, depth)
+    }
+
+    fn render_lighting(
+        &self,
+        builder: &mut RenderGraphBuilder,
+        output: &mut RenderGraphResource<Texture>,
+        gbuffer_base: RenderGraphResource<Texture>,
+        gbuffer_nmr: RenderGraphResource<Texture>,
+        scene_depth: RenderGraphResource<Texture>,
+        view: &RenderGraphResource<Buffer>,
+    ) {
+        let width = self.width;
+        let height = self.height;
+
+        let vb = builder.import(self.lighting_vertex_buffer.clone(), BufferState::Vertex);
+        let ib = builder.import(self.lighting_index_buffer.clone(), BufferState::Index);
+
+        let mut node = builder.add_graphic_node("lighting");
+        let vb = node.read(&vb, BufferState::Vertex);
+        let ib = node.read(&ib, BufferState::Index);
+        let gbuffer_base = node.read(&gbuffer_base, TextureState::Sampled);
+        let gbuffer_nmr = node.read(&gbuffer_nmr, TextureState::Sampled);
+        let scene_depth = node.read(&scene_depth, TextureState::Sampled);
+        let view = node.read(view, BufferState::StorageRead);
+        let output_rt = node.write(output, TextureState::Color);
+
+        let shader = GraphicShaderInputBuilder::default()
+            .vertex_shader(self.lighting_vertex_shader.clone())
+            .fragment_shader(self.lighting_fragment_shader.clone())
+            .vertex_layout::<LightingVertex>()
+            .build()
+            .unwrap();
+
+        let color_info = ColorAttachmentDescBuilder::default()
+            .clear_input()
+            .clear_value([0.0, 0.0, 0.0, 1.0])
+            .build()
+            .unwrap();
+
+        let state = GraphicPipelineStateBuilder::default()
+            .rasterization(RasterizationStateBuilder::default().cull_mode(vk::CullModeFlags::NONE).build().unwrap())
+            .build();
+
+        {
+            let mut binder = node.pipeline(shader, state);
+            binder.push_color(output_rt, color_info);
+            binder.finish();
+        }
+
+        let samplers = self.samplers.clone();
+        node.execute(move |ctx| {
+            let extent = vk::Extent2D { width, height };
+            let encoder = ctx.encoder();
+
+            // Bind all bindless resources via direct pool access (set0 bound at command buffer start).
+            let base_handle;
+            let nmr_handle;
+            let depth_handle;
+            {
+                let mut pool = ctx.device().bindless_pool().lock();
+                pool.bind_sampler_at(0, samplers[0].handle())?;
+                pool.bind_sampler_at(1, samplers[1].handle())?;
+                pool.bind_sampler_at(2, samplers[2].handle())?;
+                pool.bind_sampler_at(3, samplers[3].handle())?;
+
+                let base_range = ctx.get(&gbuffer_base)
+                    .as_range(TextureLayout::ShaderReadOnly, .., ..)
+                    .map_err(|e| anyhow!("failed to create gbuffer base range: {e:?}"))?;
+                let nmr_range = ctx.get(&gbuffer_nmr)
+                    .as_range(TextureLayout::ShaderReadOnly, .., ..)
+                    .map_err(|e| anyhow!("failed to create gbuffer nmr range: {e:?}"))?;
+                let depth_range = ctx.get(&scene_depth)
+                    .as_range(TextureLayout::ShaderReadOnly, .., ..)
+                    .map_err(|e| anyhow!("failed to create scene depth range: {e:?}"))?;
+
+                base_handle = pool.bind(base_range)?;
+                nmr_handle = pool.bind(nmr_range)?;
+                depth_handle = pool.bind(depth_range)?;
+
+                pool.flush(ctx.device());
+                ctx.bind_descriptor_sets(0, std::slice::from_ref(&pool.set()));
+            }
+
+            // Bind the view buffer (already written by render_meshes).
+            let view_range = ctx.get(&view)
+                .as_range(..)
+                .map_err(|e| anyhow!("failed to create lighting view buffer range: {e:?}"))?;
+            let mut binder = ctx.create_binder();
+            binder.bind("view", view_range)?;
+            let sets = binder.finish(ctx.device(), 1).map_err(|e| anyhow::anyhow!("descriptor set finish failed: {e}"))?;
+            ctx.bind_descriptor_sets(1, &sets);
+            
+            ctx.begin_rendering(extent);
+            ctx.bind_pipeline();
+
+            let pc = LightingPushConstants {
+                gbuffer_base: *base_handle,
+                gbuffer_nmr: *nmr_handle,
+                scene_depth: *depth_handle,
+            };
+            ctx.push_constants(0, &pc);
+
+            let viewport = vk::Viewport {
+                x: 0.0,
+                // Flip Y in rasterization (Vulkan supports negative viewport height).
+                // This avoids baking Y-flip into the projection matrix.
+                y: height as f32,
+                width: width as f32,
+                height: -(height as f32),
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            encoder.set_viewport(0, &[viewport]);
+
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            };
+            encoder.set_scissor(0, &[scissor]);
+
+            encoder.bind_vertex_buffers(0, &[ctx.get(&vb).handle()], &[0]);
+            encoder.bind_index_buffer(ctx.get(&ib).handle(), 0, vk::IndexType::UINT16);
+            encoder.draw_indexed(6, 1, 0, 0, 0);
 
             ctx.end_rendering();
             Ok(())

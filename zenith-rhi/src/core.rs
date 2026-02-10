@@ -12,7 +12,7 @@ use crate::NUM_BACK_BUFFERS;
 use crate::swapchain::SwapchainWindow;
 
 /// Validation layers to enable in debug builds.
-#[cfg(feature = "validation")]
+#[cfg(debug_assertions)]
 const VALIDATION_LAYERS: &[&str] = &["VK_LAYER_KHRONOS_validation"];
 
 /// Scoring weights for physical device selection.
@@ -55,9 +55,9 @@ pub struct RhiCore {
     instance: Instance,
 
     /// Debug messenger (only in debug builds with validation).
-    #[cfg(feature = "validation")]
+    #[cfg(debug_assertions)]
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
-    #[cfg(feature = "validation")]
+    #[cfg(debug_assertions)]
     debug_utils: Option<ash::ext::debug_utils::Instance>,
 }
 
@@ -71,15 +71,15 @@ impl RhiCore {
 
         let instance = create_instance(&entry, display_handle)?;
 
-        #[cfg(feature = "validation")]
+        #[cfg(debug_assertions)]
         let (debug_utils, debug_messenger) = setup_debug_messenger(&entry, &instance)?;
 
         Ok(Self {
             entry,
             instance,
-            #[cfg(feature = "validation")]
+            #[cfg(debug_assertions)]
             debug_messenger,
-            #[cfg(feature = "validation")]
+            #[cfg(debug_assertions)]
             debug_utils,
         })
     }
@@ -107,7 +107,7 @@ impl RhiCore {
 impl Drop for RhiCore {
     fn drop(&mut self) {
         unsafe {
-            #[cfg(feature = "validation")]
+            #[cfg(debug_assertions)]
             if let (Some(debug_utils), Some(messenger)) = (&self.debug_utils, self.debug_messenger) {
                 debug_utils.destroy_debug_utils_messenger(messenger, None);
             }
@@ -148,7 +148,7 @@ fn get_required_instance_extensions(display_handle: RawDisplayHandle) -> Vec<*co
     }
 
     // Debug utils (for validation layers)
-    #[cfg(feature = "validation")]
+    #[cfg(debug_assertions)]
     extensions.push(ash::ext::debug_utils::NAME.as_ptr());
 
     extensions
@@ -168,20 +168,26 @@ fn create_instance(entry: &Entry, display_handle: RawDisplayHandle) -> Result<In
 
     let extensions = get_required_instance_extensions(display_handle);
 
-    #[cfg(feature = "validation")]
+    #[cfg(debug_assertions)]
     let layer_names: Vec<CString> = VALIDATION_LAYERS
         .iter()
         .map(|&s| CString::new(s).unwrap())
         .collect();
 
-    #[cfg(feature = "validation")]
+    #[cfg(debug_assertions)]
     let layer_pointers: Vec<*const i8> = layer_names.iter().map(|s| s.as_ptr()).collect();
 
+    #[cfg(debug_assertions)]
     let mut create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
         .enabled_extension_names(&extensions);
 
-    #[cfg(feature = "validation")]
+    #[cfg(not(debug_assertions))]
+    let create_info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(&extensions);
+
+    #[cfg(debug_assertions)]
     {
         create_info = create_info.enabled_layer_names(&layer_pointers);
     }
@@ -190,7 +196,7 @@ fn create_instance(entry: &Entry, display_handle: RawDisplayHandle) -> Result<In
 }
 
 /// Setup debug messenger for validation layers.
-#[cfg(feature = "validation")]
+#[cfg(debug_assertions)]
 fn setup_debug_messenger(
     entry: &Entry,
     instance: &Instance,
@@ -216,7 +222,7 @@ fn setup_debug_messenger(
 }
 
 /// Vulkan debug callback function.
-#[cfg(feature = "validation")]
+#[cfg(debug_assertions)]
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_type: vk::DebugUtilsMessageTypeFlagsEXT,

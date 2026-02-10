@@ -7,13 +7,12 @@ use std::cell::Cell;
 use std::sync::{Arc};
 use parking_lot::Mutex;
 use zenith_core::collections::SmallVec;
-use zenith_rhi::{BindlessPool, BindlessHandle, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout};
+use zenith_rhi::{BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout};
 use zenith_rhi::{
     vk, GraphicPipeline, GraphicPipelineDesc, PipelineCache, RenderDevice,
     DescriptorSetBinder, Swapchain,
 };
 use bytemuck::NoUninit;
-use zenith_rhi::descriptor::BindableResource;
 
 pub enum ResourceStorage {
     ManagedBuffer {
@@ -84,7 +83,6 @@ impl<S: GraphResourceState> ResourceStateTracker<S> {
 pub struct RenderGraph {
     pub(crate) nodes: Vec<RenderGraphNode>,
     pub(crate) initial_resources: Vec<InitialResourceStorage>,
-    pub(crate) bindless_pool: Arc<Mutex<BindlessPool>>,
 }
 
 impl RenderGraph {
@@ -147,7 +145,7 @@ impl RenderGraph {
                     };
 
                     let pipeline = pipeline_cache
-                        .get_or_create(&format!("pipeline.{}", node.name), Some(&self.bindless_pool.lock()), device, pipeline_desc)
+                        .get_or_create(&format!("pipeline.{}", node.name), device, pipeline_desc)
                         .expect("Failed to create graphics pipeline");
 
                     graphic_pipelines.push(Some(pipeline));
@@ -190,7 +188,6 @@ impl RenderGraph {
             graphic_pipe_index: 0,
             graphic_pipelines,
             swapchain_tex_id,
-            bindless_pool: self.bindless_pool,
         }
     }
 }
@@ -202,7 +199,6 @@ pub struct CompiledRenderGraph {
     graphic_pipe_index: u32,
     graphic_pipelines: Vec<Option<Arc<GraphicPipeline>>>,
     swapchain_tex_id: GraphResourceId,
-    bindless_pool: Arc<Mutex<BindlessPool>>,
 }
 
 impl CompiledRenderGraph {
@@ -230,10 +226,7 @@ impl CompiledRenderGraph {
         Ok(())
     }
 
-    pub fn present(mut self, device: &mut RenderDevice, cmd_pool: &CommandPool, swapchain: &mut Swapchain) -> anyhow::Result<RetiredRenderGraph> {
-        let (image_index, _) = swapchain.acquire_next_image(device.handle())?;
-        swapchain.reset_current_fence(device.handle())?;
-        device.reset_frame_resources();
+    pub fn present(mut self, device: &mut RenderDevice, cmd_pool: &CommandPool, swapchain: &mut Swapchain, image_index: u32) -> anyhow::Result<RetiredRenderGraph> {
         cmd_pool.reset()?;
 
         // update the swapchain texture reference to the acquired image
@@ -283,7 +276,7 @@ impl CompiledRenderGraph {
         &mut self,
         device: &RenderDevice,
         encoder: &CommandEncoder,
-        nodes: impl IntoIterator<Item = RenderGraphNode>,
+        nodes: Vec<RenderGraphNode>,
     ) {
         for node in nodes {
             let transition_resources = |reflection| {
@@ -329,7 +322,6 @@ impl CompiledRenderGraph {
                             encoder,
                             color_attachment_ids,
                             depth_attachment_id,
-                            bindless_pool: &self.bindless_pool,
                         };
                         record(&mut ctx).expect("Failed to record graphic node.");
                     } else {
@@ -344,7 +336,11 @@ impl CompiledRenderGraph {
                     if let Some(record) = job_functor.take() {
                         profiling::scope!("rendergraph::node_recording", &name);
 
-                        let mut ctx = LambdaNodeExecutionContext { device, resources: &self.resources, encoder };
+                        let mut ctx = LambdaNodeExecutionContext {
+                            device,
+                            resources: &self.resources,
+                            encoder,
+                        };
                         record(&mut ctx).expect("Failed to record lambda node.");
                     } else {
                         log::warn!("Missing job of lambda node {}!", name);
@@ -517,7 +513,6 @@ pub struct GraphicNodeExecutionContext<'node> {
     encoder: &'node CommandEncoder<'node>,
     color_attachment_ids: SmallVec<[GraphResourceId; 8]>,
     depth_attachment_id: Option<GraphResourceId>,
-    bindless_pool: &'node Arc<Mutex<BindlessPool>>,
 }
 
 impl<'node> GraphicNodeExecutionContext<'node> {
@@ -629,65 +624,18 @@ impl<'node> GraphicNodeExecutionContext<'node> {
         ).unwrap()
     }
 
-    #[inline]
-    pub fn create_bindless_binder(&self) -> BindlessBinder<'node> {
-        BindlessBinder {
-            pool: self.bindless_pool,
-            encoder: self.encoder,
-            pipeline_layout: self.pipeline.map(|pipe| pipe.layout()),
-        }
-    }
-
     /// Bind descriptor sets to the pipeline.
-    pub fn bind_descriptor_sets(&self, binder: DescriptorSetBinder) {
-        let sets = binder.finish(self.device).unwrap();
-
+    pub fn bind_descriptor_sets(&self, first_set: u32, sets: &[vk::DescriptorSet]) {
         if let Some(pipeline) = self.pipeline {
             if !sets.is_empty() {
                 self.encoder.bind_descriptor_sets(
                     vk::PipelineBindPoint::GRAPHICS,
                     pipeline.layout(),
-                    // starts after the bindless pool
-                    BindlessPool::SET_INDEX + 1,
-                    &sets,
+                    first_set,
+                    sets,
                     &[],
                 );
             }
-        }
-    }
-}
-
-pub struct BindlessBinder<'node> {
-    pool: &'node Arc<Mutex<BindlessPool>>,
-    encoder: &'node CommandEncoder<'node>,
-    pipeline_layout: Option<vk::PipelineLayout>,
-}
-
-impl<'node> BindlessBinder<'node> {
-    #[inline]
-    pub fn bind<T: BindableResource>(&mut self, res: T) -> anyhow::Result<BindlessHandle> {
-        Ok(self.pool.lock().bind(res)?)
-    }
-
-    #[inline]
-    pub fn bind_sampler_at(&mut self, index: u32, sampler: vk::Sampler) -> anyhow::Result<()> {
-        Ok(self.pool.lock().bind_sampler_at(index, sampler)?)
-    }
-
-    #[inline]
-    pub fn finish(&mut self) {
-        let mut pool = self.pool.lock();
-        pool.update(self.encoder);
-
-        // TODO: if we make all resources bindless, these is no need to bind descriptor sets every time
-        if let Some(layout) = self.pipeline_layout {
-            self.encoder.bind_descriptor_sets(
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                0,
-                &[pool.set()],
-                &[],
-            );
         }
     }
 }
@@ -711,6 +659,9 @@ impl<'node> LambdaNodeExecutionContext<'node> {
 
     #[inline]
     pub fn command_encoder(&self) -> &CommandEncoder<'node> { self.encoder }
+
+    #[inline]
+    pub fn bindless_pool(&self) -> &Arc<Mutex<BindlessPool>> { self.device.bindless_pool() }
 }
 
 pub struct RetiredRenderGraph {

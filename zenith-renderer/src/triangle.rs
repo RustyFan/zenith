@@ -52,7 +52,6 @@ impl TriangleRenderer {
             "shader.triangle.vs",
             &device,
             "content/shaders/triangle.slang",
-            "vsmain",
             zenith_rhi::ShaderStage::Vertex,
         )?;
 
@@ -60,7 +59,6 @@ impl TriangleRenderer {
             "shader.triangle.ps",
             &device,
             "content/shaders/triangle.slang",
-            "psmain",
             zenith_rhi::ShaderStage::Fragment,
         )?;
 
@@ -90,14 +88,14 @@ impl TriangleRenderer {
             BufferState::Undefined,
         );
         let tb = builder.create(
-            BufferDesc::uniform("triangle.time", size_of::<f32>() as _).with_additional_usage(vk::BufferUsageFlags::STORAGE_BUFFER),
+            BufferDesc::uniform("triangle.time", size_of::<f32>() as _),
         );
 
         let mut node = builder.add_graphic_node("triangle");
 
         let vb = node.read(&vb, BufferState::Vertex);
         let ib = node.read(&ib, BufferState::Index);
-        let tb = node.read(&tb, BufferState::StorageRead);
+        let tb = node.read(&tb, BufferState::Uniform);
         let output_rt = node.write(output, TextureState::Color);
 
         let shader = GraphicShaderInputBuilder::default()
@@ -122,29 +120,25 @@ impl TriangleRenderer {
         }
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
-
         node.execute(move |ctx| {
             let extent = vk::Extent2D { width, height };
             let encoder = ctx.encoder();
 
-            // update time buffer
-            let elapsed_bytes = bytemuck::bytes_of(&elapsed);
+            // update time buffer (padded to float4 for StructuredBuffer<float4>)
             let time_buffer = ctx.get(&tb)
-                .as_range(0..(elapsed_bytes.len() as u64))
+                .as_range(..)
                 .map_err(|e| anyhow::anyhow!("failed to create time buffer range: {:?}", e))?;
 
-            time_buffer.write(elapsed_bytes)
+            time_buffer.write(bytemuck::bytes_of(&elapsed))
                 .map_err(|e| anyhow::anyhow!("failed to write time buffer: {:?}", e))?;
 
-            // upload to bindless pool
-            let mut binder = ctx.create_bindless_binder();
-            let time_handle = binder.bind(time_buffer)?;
-            binder.finish();
-
+            let mut binder = ctx.create_binder();
+            binder.bind("time", time_buffer)?;
+            let sets = binder.finish(ctx.device(), 0).map_err(|e| anyhow::anyhow!("descriptor set finish failed: {e}"))?;
+            ctx.bind_descriptor_sets(0, &sets);
+            
             ctx.begin_rendering(extent);
             ctx.bind_pipeline();
-
-            ctx.push_constants(0, &*time_handle);
 
             let viewport = vk::Viewport {
                 x: 0.0,

@@ -12,6 +12,7 @@ pub mod pipeline_cache;
 pub mod resource_cache;
 pub mod sampler;
 pub mod shader;
+mod slang_compiler;
 pub mod swapchain;
 pub mod texture;
 pub mod upload;
@@ -52,7 +53,7 @@ pub use pipeline_cache::{PipelineCache, PipelineCacheStats};
 pub use resource_cache::TransientResourceCache;
 pub use sampler::{Sampler, SamplerDesc};
 pub use shader::{
-    reflect_spirv, Shader, ShaderBinding, ShaderError, ShaderReflection, ShaderStage,
+    Shader, ShaderBinding, ShaderError, ShaderReflection, ShaderStage,
 };
 pub use swapchain::{FrameSync, SwapchainConfig, Swapchain};
 pub use texture::{Texture, TextureDesc};

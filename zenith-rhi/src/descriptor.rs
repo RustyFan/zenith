@@ -4,7 +4,7 @@ use ash::{vk};
 use std::collections::HashMap;
 use std::default::Default;
 use zenith_rhi_derive::DeviceObject;
-use crate::{BindlessPool, GraphicPipeline, RenderDevice};
+use crate::{GraphicPipeline, RenderDevice};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 use crate::shader::{ShaderBinding, ShaderReflection};
@@ -86,16 +86,25 @@ impl DescriptorSetLayout {
         let bindings: Vec<LayoutBinding> = shader_bindings
             .iter()
             .filter(|b| b.set == set_index)
-            .map(|b| LayoutBinding {
-                binding: b.binding,
-                descriptor_type: b.descriptor_type,
-                count: b.count,
-                stage_flags: b.stage_flags,
-                binding_flags: vk::DescriptorBindingFlags::empty(),
+            .map(|b| {
+                LayoutBinding {
+                    binding: b.binding,
+                    descriptor_type: b.descriptor_type,
+                    count: b.count,
+                    stage_flags: b.stage_flags,
+                    binding_flags: b.binding_flags,
+                }
             })
             .collect();
 
-        let layout = Self::new(name, device, &bindings, vk::DescriptorSetLayoutCreateFlags::empty())?;
+        // If any binding requires UPDATE_AFTER_BIND, the layout must use the corresponding flag.
+        let layout_flags = if bindings.iter().any(|b| b.binding_flags.contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)) {
+            vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL
+        } else {
+            vk::DescriptorSetLayoutCreateFlags::empty()
+        };
+
+        let layout = Self::new(name, device, &bindings, layout_flags)?;
         device.set_debug_name(&layout);
         Ok(layout)
     }
@@ -279,7 +288,7 @@ impl<'a> DescriptorSetBinder<'a> {
         Ok(self)
     }
 
-    pub fn finish(self, device: &RenderDevice) -> anyhow::Result<Vec<vk::DescriptorSet>, DescriptorBindingError> {
+    pub fn finish(self, device: &RenderDevice, first_set: u32) -> anyhow::Result<Vec<vk::DescriptorSet>, DescriptorBindingError> {
          let pool_sizes = self.resource_ty_sizes.into_iter()
             .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
                 ty,
@@ -287,21 +296,18 @@ impl<'a> DescriptorSetBinder<'a> {
             })
             .collect::<Vec<_>>();
 
-        // bindless set starts at set 0
-        // every other descriptor set should start at set 1
-        let base_set_index = BindlessPool::SET_INDEX + 1;
-
-        let pool = DescriptorPool::new("descriptor_pool", self.device, self.pipeline.descriptor_layouts.len() as u32 - 1, &pool_sizes, vk::DescriptorPoolCreateFlags::empty())
+        let layouts = &self.pipeline.descriptor_layouts[first_set as usize..];
+        let pool = DescriptorPool::new("descriptor_pool", self.device, layouts.len() as u32, &pool_sizes, vk::DescriptorPoolCreateFlags::empty())
             .map_err(|e| DescriptorBindingError::AllocationFailed(e))?;
-        let descriptor_sets: Result<Vec<_>, _> = self.pipeline.descriptor_layouts.iter().skip(base_set_index as usize)
+        let descriptor_sets: Result<Vec<_>, _> = layouts.iter()
             .map(|layout| {
                 pool.allocate(layout).map_err(DescriptorBindingError::AllocationFailed)
             })
             .collect();
-        let descriptor_sets = descriptor_sets?;
         device.defer_release(pool);
+        let descriptor_sets = descriptor_sets?;
 
-        let writes = self.collector.write_to(base_set_index, &descriptor_sets);
+        let writes = self.collector.write_to(first_set, &descriptor_sets);
         if !writes.is_empty() {
             unsafe {
                 self.device.handle().update_descriptor_sets(&writes, &[]);
