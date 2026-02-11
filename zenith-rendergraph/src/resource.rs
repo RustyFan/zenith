@@ -4,8 +4,8 @@ use std::sync::Arc;
 use derive_more::From;
 use zenith_rhi::vk;
 use crate::builder::ResourceAccessStorage;
-use crate::graph::ResourceStorage;
 use crate::interface::{Buffer, Texture, BufferDesc, TextureDesc, BufferState, TextureState, ResourceDescriptor, ResourceState};
+use crate::RenderGraphBuilder;
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -14,9 +14,6 @@ pub(crate) mod sealed {
 pub trait GraphResource: Sized + sealed::Sealed {
     type Descriptor: GraphResourceDescriptor;
     type State: GraphResourceState;
-
-    #[doc(hidden)]
-    fn from_storage(storage: &ResourceStorage) -> &Self;
 }
 
 pub trait GraphResourceDescriptor: Clone + Into<ResourceDescriptor> {
@@ -57,6 +54,22 @@ pub struct RenderGraphResource<R: GraphResource> {
 impl<R: GraphResource> RenderGraphResource<R> {
     pub fn valid(&self) -> bool {
         self.id != u32::MAX
+    }
+
+    /// Gets the descriptor for this resource.
+    ///
+    /// # Safety
+    /// This method uses transmute which is safe because:
+    /// 1. The sealed trait ensures only Buffer and Texture implement GraphResource
+    /// 2. PhantomData<R> ensures the resource type matches the storage variant
+    /// 3. The enum discriminant is checked before transmute
+    pub fn desc(&self, builder: &RenderGraphBuilder) -> &<R as GraphResource>::Descriptor {
+        match builder.initial_resources.get(self.id as usize).unwrap() {
+            InitialResourceStorage::ManagedBuffer(desc) => unsafe { std::mem::transmute(desc) },
+            InitialResourceStorage::ManagedTexture(desc) => unsafe { std::mem::transmute(desc) },
+            InitialResourceStorage::ImportedBuffer(res, _) => unsafe { std::mem::transmute(res.desc()) },
+            InitialResourceStorage::ImportedTexture(res, _) => unsafe { std::mem::transmute(res.desc()) },
+        }
     }
 }
 

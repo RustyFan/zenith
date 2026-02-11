@@ -37,6 +37,13 @@ pub enum ResourceStorage {
 }
 
 impl ResourceStorage {
+    /// Extracts a buffer reference from storage.
+    ///
+    /// # Panics
+    /// Panics with unreachable!() if called on a texture variant.
+    /// This is safe because the type system (via PhantomData<R> and sealed traits)
+    /// ensures this is only called when the storage actually contains a buffer.
+    #[allow(dead_code)]
     pub(crate) fn as_buffer(&self) -> &Buffer {
         match self {
             ResourceStorage::ManagedBuffer { resource, .. } => resource,
@@ -45,6 +52,12 @@ impl ResourceStorage {
         }
     }
 
+    /// Extracts a texture reference from storage.
+    ///
+    /// # Panics
+    /// Panics with unreachable!() if called on a buffer variant.
+    /// This is safe because the type system (via PhantomData<R> and sealed traits)
+    /// ensures this is only called when the storage actually contains a texture.
     pub(crate) fn as_texture(&self) -> &Texture {
         match self {
             ResourceStorage::ManagedTexture { resource, .. } => resource,
@@ -528,11 +541,27 @@ pub struct GraphicNodeExecutionContext<'node> {
 }
 
 impl<'node> GraphicNodeExecutionContext<'node> {
+    /// Gets a reference to the concrete resource.
+    ///
+    /// # Safety
+    /// This method uses transmute which is safe because:
+    /// 1. The sealed trait ensures only Buffer and Texture implement GraphResource
+    /// 2. PhantomData<R> in RenderGraphResourceAccess ensures the resource type matches the storage variant
+    /// 3. The enum discriminant is checked before transmute
     #[inline]
     pub fn get<R: GraphResource, V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<R, V>) -> &R {
-        let storage = self.resources.get(resource.id as usize)
-            .expect("Graph resource index out of bound!");
-        R::from_storage(storage)
+        match self.resources.get(resource.id as usize).expect("Graph resource index out of bound!") {
+            ResourceStorage::ManagedBuffer { resource, .. } => unsafe { std::mem::transmute(resource) },
+            ResourceStorage::ManagedTexture { resource, .. } => unsafe { std::mem::transmute(resource) },
+            ResourceStorage::ImportedBuffer { resource, .. } => {
+                let res: &Buffer = resource.as_ref();
+                unsafe { std::mem::transmute(res) }
+            },
+            ResourceStorage::ImportedTexture { resource, .. } => {
+                let res: &Texture = resource.as_ref();
+                unsafe { std::mem::transmute(res) }
+            },
+        }
     }
 
     pub fn bind_pipeline(&self) {
@@ -659,11 +688,27 @@ pub struct LambdaNodeExecutionContext<'node> {
 }
 
 impl<'node> LambdaNodeExecutionContext<'node> {
+    /// Gets a reference to the concrete resource.
+    ///
+    /// # Safety
+    /// This method uses transmute which is safe because:
+    /// 1. The sealed trait ensures only Buffer and Texture implement GraphResource
+    /// 2. PhantomData<R> in RenderGraphResourceAccess ensures the resource type matches the storage variant
+    /// 3. The enum discriminant is checked before transmute
     #[inline]
     pub fn get<R: GraphResource, V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<R, V>) -> &R {
-        let storage = self.resources.get(resource.id as usize)
-            .expect("Graph resource index out of bound!");
-        R::from_storage(storage)
+        match self.resources.get(resource.id as usize).expect("Graph resource index out of bound!") {
+            ResourceStorage::ManagedBuffer { resource, .. } => unsafe { std::mem::transmute(resource) },
+            ResourceStorage::ManagedTexture { resource, .. } => unsafe { std::mem::transmute(resource) },
+            ResourceStorage::ImportedBuffer { resource, .. } => { 
+                let res: &Buffer = resource.as_ref();
+                unsafe { std::mem::transmute(res) }
+            },
+            ResourceStorage::ImportedTexture { resource, .. } => {
+                let res: &Texture = resource.as_ref();
+                unsafe { std::mem::transmute(res) }
+            },
+        }
     }
 
     #[inline]

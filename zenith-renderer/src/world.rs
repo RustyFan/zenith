@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec4};
+use glam::{Mat4};
 use zenith_asset::{AssetHandle};
 use zenith_asset::material::Material;
 use zenith_asset::mesh::{MeshCollection, Mesh};
 use zenith_asset::texture::TextureFormat;
-use zenith_core::camera::{Camera, WORLD_SPACE_UP};
+use zenith_core::camera::{Camera, ViewData, WORLD_SPACE_UP};
 use zenith_core::math::{Degree};
 use zenith_rhi::{
     vk, RenderDevice,
@@ -22,20 +22,14 @@ use zenith_rendergraph::{
     GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
 };
 use crate::defer_shading::GBuffer;
+use crate::lighting::DirectLightingRenderer;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
-pub struct WorldVertex {
+pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub tex_coord: [f32; 2],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
-struct LightingVertex {
-    pub position: [f32; 2],
-    pub uv: [f32; 2],
 }
 
 #[repr(C)]
@@ -50,14 +44,6 @@ struct PushConstants {
     sampler_kind: u32,
     flags: u32,
     keep_normal_scale: f32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct LightingPushConstants {
-    gbuffer_base: u32,
-    gbuffer_nmr: u32,
-    scene_depth: u32,
 }
 
 const INVALID_BINDLESS: u32 = u32::MAX;
@@ -90,22 +76,19 @@ struct GpuMesh {
 pub struct WorldRenderer {
     vertex_shader: Arc<Shader>,
     fragment_shader: Arc<Shader>,
-    lighting_vertex_shader: Arc<Shader>,
-    lighting_fragment_shader: Arc<Shader>,
-    lighting_vertex_buffer: Arc<Buffer>,
-    lighting_index_buffer: Arc<Buffer>,
     meshes: Vec<GpuMesh>,
-    gbuffer: Option<GBuffer>,
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     // Fixed bindless sampler heap indices:
     // 0=LinearRepeat, 1=LinearClamp, 2=NearestRepeat, 3=NearestClamp
     samplers: [Arc<Sampler>; 4],
+
+    direct_lighting_renderer: DirectLightingRenderer,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
-struct ViewData {
+struct GpuViewData {
     view_proj: [f32; 16],
     inv_view_proj: [f32; 16],
     view: [f32; 16],
@@ -115,25 +98,22 @@ struct ViewData {
     position: [f32; 4],
 }
 
-impl ViewData {
-    pub fn from_camera(cam: &Camera) -> Self {
-        let vp = cam.view_projection();
-        let v = cam.view();
-        let p = cam.projection();
+impl GpuViewData {
+    pub fn from_view_data(view: &ViewData) -> Self {
         Self {
-            view_proj: vp.to_cols_array(),
-            inv_view_proj: vp.inverse().to_cols_array(),
-            view: v.to_cols_array(),
-            inv_view: v.inverse().to_cols_array(),
-            proj: p.to_cols_array(),
-            inv_proj: p.inverse().to_cols_array(),
-            position: Vec4::new(cam.position().x, cam.position().y, cam.position().z, 1.0).to_array(),
+            view_proj: view.view_proj.to_cols_array(),
+            inv_view_proj: view.inv_view_proj.to_cols_array(),
+            view: view.view.to_cols_array(),
+            inv_view: view.inv_view.inverse().to_cols_array(),
+            proj: view.proj.to_cols_array(),
+            inv_proj: view.inv_proj.inverse().to_cols_array(),
+            position: view.position.to_array(),
         }
     }
 }
 
 impl WorldRenderer {
-    pub fn new(device: &RenderDevice) -> anyhow::Result<Self> {
+    pub fn new(device: &RenderDevice, width: u32, height: u32) -> anyhow::Result<Self> {
         let vertex_shader = Shader::from_file(
             "shader.defer_shading.vs",
             device,
@@ -148,48 +128,6 @@ impl WorldRenderer {
             zenith_rhi::ShaderStage::Fragment,
         )?;
 
-        let lighting_vertex_shader = Shader::from_file(
-            "shader.lighting.vs",
-            device,
-            "content/shaders/lighting.slang",
-            zenith_rhi::ShaderStage::Vertex,
-        )?;
-
-        let lighting_fragment_shader = Shader::from_file(
-            "shader.lighting.ps",
-            device,
-            "content/shaders/lighting.slang",
-            zenith_rhi::ShaderStage::Fragment,
-        )?;
-
-        let lighting_vertices = [
-            LightingVertex { position: [-1.0,  1.0], uv: [0.0, 0.0] },
-            LightingVertex { position: [ 1.0,  1.0], uv: [1.0, 0.0] },
-            LightingVertex { position: [-1.0, -1.0], uv: [0.0, 1.0] },
-            LightingVertex { position: [ 1.0, -1.0], uv: [1.0, 1.0] },
-        ];
-        let lighting_indices: [u16; 6] = [0, 1, 2, 1, 2, 3];
-
-        let lighting_vertex_buffer = Arc::new(Buffer::new(
-            device,
-            &BufferDesc::vertex("world.lighting.vertex", (lighting_vertices.len() * size_of::<LightingVertex>()) as u64),
-        )?);
-        let lighting_index_buffer = Arc::new(Buffer::new(
-            device,
-            &BufferDesc::index("world.lighting.index", (lighting_indices.len() * size_of::<u16>()) as u64),
-        )?);
-
-        {
-            let vertex_data = bytemuck::cast_slice(&lighting_vertices);
-            let index_data = bytemuck::cast_slice(&lighting_indices);
-            let mut upload_pool = UploadPool::new()?;
-            upload_pool.enqueue_copy_buffer(device, lighting_vertex_buffer.as_range(..)?, vertex_data, BufferState::Vertex)?;
-            upload_pool.enqueue_copy_buffer(device, lighting_index_buffer.as_range(..)?, index_data, BufferState::Index)?;
-
-            let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
-            upload_pool.flush(&immediate, device)?;
-        }
-
         let linear_repeat = Arc::new(Sampler::new(device, &SamplerDesc::linear())?);
         let linear_clamp = Arc::new(Sampler::new(device, &SamplerDesc::linear().with_address_mode(vk::SamplerAddressMode::CLAMP_TO_EDGE))?);
         let nearest_repeat = Arc::new(Sampler::new(device, &SamplerDesc::nearest())?);
@@ -198,16 +136,27 @@ impl WorldRenderer {
         Ok(Self {
             vertex_shader: Arc::new(vertex_shader),
             fragment_shader: Arc::new(fragment_shader),
-            lighting_vertex_shader: Arc::new(lighting_vertex_shader),
-            lighting_fragment_shader: Arc::new(lighting_fragment_shader),
-            lighting_vertex_buffer,
-            lighting_index_buffer,
             meshes: Vec::new(),
-            gbuffer: None,
-            width: 0,
-            height: 0,
+            width,
+            height,
             samplers: [linear_repeat, linear_clamp, nearest_repeat, nearest_clamp],
+            direct_lighting_renderer: DirectLightingRenderer::new(device, width, height)?,
         })
+    }
+    
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        
+        if width == self.width && height == self.height {
+            return;
+        }
+
+        self.width = width;
+        self.height = height;
+        
+        self.direct_lighting_renderer.resize(width, height);
     }
 
     pub fn add_mesh(&mut self, device: &RenderDevice,  mesh_collection: AssetHandle<MeshCollection>) -> anyhow::Result<()> {
@@ -216,6 +165,7 @@ impl WorldRenderer {
             .ok_or_else(|| anyhow!("MeshCollection not loaded/registered (call AssetManager::request_load first)"))?;
 
         // 1. Populate all upload data
+        // TODO: render resource creation should NOT be done here
         //------------------------------------------------------------------------------------------------
 
         struct PendingMeshUpload {
@@ -389,27 +339,19 @@ impl WorldRenderer {
 
         Ok(())
     }
-
+    
     pub fn render(
         &mut self,
         builder: &mut RenderGraphBuilder,
-        output: &mut RenderGraphResource<Texture>,
-        width: u32,
-        height: u32,
         camera: &Camera,
+        output: &mut RenderGraphResource<Texture>,
     ) {
-        if self.meshes.is_empty() || width == 0 || height == 0 {
-            return;
-        }
-
-        self.width = width;
-        self.height = height;
-
         let view = builder.create(
-            BufferDesc::uniform("view", size_of::<ViewData>() as _)
+            BufferDesc::uniform("view", size_of::<GpuViewData>() as _)
         );
-        let (gbuffer_base, gbuffer_nmr, scene_depth) = self.render_meshes(builder, camera, &view);
-        self.render_lighting(builder, output, gbuffer_base, gbuffer_nmr, scene_depth, &view);
+
+        let (gbuffer, scene_depth) = self.render_meshes(builder, camera, &view);
+        self.direct_lighting_renderer.render(builder, gbuffer, scene_depth, &view, output);
     }
 
     fn render_meshes(
@@ -417,18 +359,13 @@ impl WorldRenderer {
         builder: &mut RenderGraphBuilder,
         camera: &Camera,
         view: &RenderGraphResource<Buffer>,
-    ) -> (RenderGraphResource<Texture>, RenderGraphResource<Texture>, RenderGraphResource<Texture>) {
-        let width = self.width;
-        let height = self.height;
-
+    ) -> (GBuffer, RenderGraphResource<Texture>) {
         let mut depth = builder.create(
-            TextureDesc::new_depth("scene.depth", width, height)
+            TextureDesc::new_depth("scene.depth", self.width, self.height)
                 .with_additional_usage(vk::ImageUsageFlags::SAMPLED)
         );
 
-        let gbuffer = self.gbuffer.get_or_insert_with(|| GBuffer::new(width, height));
-        gbuffer.ensure_size(width, height);
-        let (mut gbuffer_base_color, mut gbuffer_normal_mra) = gbuffer.create(builder);
+        let mut gbuffer = GBuffer::new(builder, self.width, self.height);
 
         // Import buffers first (RenderGraphBuilder is mutably borrowed when a node builder exists).
         let mut imported = Vec::with_capacity(self.meshes.len());
@@ -441,8 +378,8 @@ impl WorldRenderer {
         let mut node = builder.add_graphic_node("gbuffer");
 
         let view = node.read(&view, BufferState::Uniform);
-        let gbuffer_base_rt = node.write(&mut gbuffer_base_color, TextureState::Color);
-        let gbuffer_nmr_rt = node.write(&mut gbuffer_normal_mra, TextureState::Color);
+        let gbuffer_base_rt = node.write(&mut gbuffer.base_color, TextureState::Color);
+        let gbuffer_nmr_rt = node.write(&mut gbuffer.normal_mra, TextureState::Color);
         let depth_rt = node.write(&mut depth, TextureState::DepthStencil);
 
         // Import buffers and capture per-mesh draw info.
@@ -457,7 +394,7 @@ impl WorldRenderer {
         let shader = GraphicShaderInputBuilder::default()
             .vertex_shader(self.vertex_shader.clone())
             .fragment_shader(self.fragment_shader.clone())
-            .vertex_layout::<WorldVertex>()
+            .vertex_layout::<Vertex>()
             .build()
             .unwrap();
 
@@ -498,7 +435,9 @@ impl WorldRenderer {
 
         let samplers = self.samplers.clone();
 
-        let view_data = ViewData::from_camera(camera);
+        let view_data = GpuViewData::from_view_data(&camera.view_data());
+        let width = self.width;
+        let height = self.height;
         node.execute(move |ctx| {
             let extent = vk::Extent2D { width, height };
             let encoder = ctx.encoder();
@@ -626,134 +565,7 @@ impl WorldRenderer {
             Ok(())
         });
 
-        (gbuffer_base_color, gbuffer_normal_mra, depth)
-    }
-
-    fn render_lighting(
-        &self,
-        builder: &mut RenderGraphBuilder,
-        output: &mut RenderGraphResource<Texture>,
-        gbuffer_base: RenderGraphResource<Texture>,
-        gbuffer_nmr: RenderGraphResource<Texture>,
-        scene_depth: RenderGraphResource<Texture>,
-        view: &RenderGraphResource<Buffer>,
-    ) {
-        let width = self.width;
-        let height = self.height;
-
-        let vb = builder.import(self.lighting_vertex_buffer.clone(), BufferState::Vertex);
-        let ib = builder.import(self.lighting_index_buffer.clone(), BufferState::Index);
-
-        let mut node = builder.add_graphic_node("lighting");
-        let vb = node.read(&vb, BufferState::Vertex);
-        let ib = node.read(&ib, BufferState::Index);
-        let gbuffer_base = node.read(&gbuffer_base, TextureState::Sampled);
-        let gbuffer_nmr = node.read(&gbuffer_nmr, TextureState::Sampled);
-        let scene_depth = node.read(&scene_depth, TextureState::Sampled);
-        let view = node.read(view, BufferState::StorageRead);
-        let output_rt = node.write(output, TextureState::Color);
-
-        let shader = GraphicShaderInputBuilder::default()
-            .vertex_shader(self.lighting_vertex_shader.clone())
-            .fragment_shader(self.lighting_fragment_shader.clone())
-            .vertex_layout::<LightingVertex>()
-            .build()
-            .unwrap();
-
-        let color_info = ColorAttachmentDescBuilder::default()
-            .clear_input()
-            .clear_value([0.0, 0.0, 0.0, 1.0])
-            .build()
-            .unwrap();
-
-        let state = GraphicPipelineStateBuilder::default()
-            .rasterization(RasterizationStateBuilder::default().cull_mode(vk::CullModeFlags::NONE).build().unwrap())
-            .build();
-
-        {
-            let mut binder = node.pipeline(shader, state);
-            binder.push_color(output_rt, color_info);
-            binder.finish();
-        }
-
-        let samplers = self.samplers.clone();
-        node.execute(move |ctx| {
-            let extent = vk::Extent2D { width, height };
-            let encoder = ctx.encoder();
-
-            // Bind all bindless resources via direct pool access (set0 bound at command buffer start).
-            let base_handle;
-            let nmr_handle;
-            let depth_handle;
-            {
-                let mut pool = ctx.device().bindless_pool().lock();
-                pool.bind_sampler_at(0, samplers[0].handle())?;
-                pool.bind_sampler_at(1, samplers[1].handle())?;
-                pool.bind_sampler_at(2, samplers[2].handle())?;
-                pool.bind_sampler_at(3, samplers[3].handle())?;
-
-                let base_range = ctx.get(&gbuffer_base)
-                    .as_range(TextureLayout::ShaderReadOnly, .., ..)
-                    .map_err(|e| anyhow!("failed to create gbuffer base range: {e:?}"))?;
-                let nmr_range = ctx.get(&gbuffer_nmr)
-                    .as_range(TextureLayout::ShaderReadOnly, .., ..)
-                    .map_err(|e| anyhow!("failed to create gbuffer nmr range: {e:?}"))?;
-                let depth_range = ctx.get(&scene_depth)
-                    .as_range(TextureLayout::ShaderReadOnly, .., ..)
-                    .map_err(|e| anyhow!("failed to create scene depth range: {e:?}"))?;
-
-                base_handle = pool.bind(base_range)?;
-                nmr_handle = pool.bind(nmr_range)?;
-                depth_handle = pool.bind(depth_range)?;
-
-                pool.flush(ctx.device());
-                ctx.bind_descriptor_sets(0, std::slice::from_ref(&pool.set()));
-            }
-
-            // Bind the view buffer (already written by render_meshes).
-            let view_range = ctx.get(&view)
-                .as_range(..)
-                .map_err(|e| anyhow!("failed to create lighting view buffer range: {e:?}"))?;
-            let mut binder = ctx.create_binder();
-            binder.bind("view", view_range)?;
-            let sets = binder.finish(ctx.device(), 1).map_err(|e| anyhow::anyhow!("descriptor set finish failed: {e}"))?;
-            ctx.bind_descriptor_sets(1, &sets);
-            
-            ctx.begin_rendering(extent);
-            ctx.bind_pipeline();
-
-            let pc = LightingPushConstants {
-                gbuffer_base: *base_handle,
-                gbuffer_nmr: *nmr_handle,
-                scene_depth: *depth_handle,
-            };
-            ctx.push_constants(0, &pc);
-
-            let viewport = vk::Viewport {
-                x: 0.0,
-                // Flip Y in rasterization (Vulkan supports negative viewport height).
-                // This avoids baking Y-flip into the projection matrix.
-                y: height as f32,
-                width: width as f32,
-                height: -(height as f32),
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            encoder.set_viewport(0, &[viewport]);
-
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            };
-            encoder.set_scissor(0, &[scissor]);
-
-            encoder.bind_vertex_buffers(0, &[ctx.get(&vb).handle()], &[0]);
-            encoder.bind_index_buffer(ctx.get(&ib).handle(), 0, vk::IndexType::UINT16);
-            encoder.draw_indexed(6, 1, 0, 0, 0);
-
-            ctx.end_rendering();
-            Ok(())
-        });
+        (gbuffer, depth)
     }
 }
 

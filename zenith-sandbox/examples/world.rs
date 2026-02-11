@@ -89,7 +89,7 @@ impl RenderableApp for WorldApp {
 
         let mut renderer_new_timer = Timer::new();
         renderer_new_timer.start();
-        let mut renderer = WorldRenderer::new(render_device)?;
+        let mut renderer = WorldRenderer::new(render_device, size.width, size.height)?;
         renderer_new_timer.stop();
         let renderer_new_ms = renderer_new_timer.elapsed_total::<Milliseconds>().value();
 
@@ -117,6 +117,7 @@ impl RenderableApp for WorldApp {
 
     fn resize(&mut self, width: u32, height: u32) {
         self.camera.set_aspect_ratio(width as f32 / height as f32);
+        self.world_renderer.as_mut().unwrap().resize(width, height);
     }
 
     fn render(&mut self, mut context: RenderContext) {
@@ -132,7 +133,7 @@ impl RenderableApp for WorldApp {
         self.world_renderer
             .as_mut()
             .unwrap()
-            .render(builder, &mut output, extent.width, extent.height, &self.camera);
+            .render(builder, &self.camera, &mut output,);
     }
 }
 

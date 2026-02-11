@@ -8,7 +8,7 @@
 //!                ----------> x
 //!
 
-use glam::{EulerRot, Mat4, Quat, Vec3};
+use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
 use log::{warn};
 use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
 use winit::window::{CursorGrabMode, Window};
@@ -18,6 +18,17 @@ pub const NEAR_PLANE: f32 = 0.1;
 pub const WORLD_SPACE_UP: Vec3 = Vec3::new(0., 0., 1.);
 pub const WORLD_SPACE_FORWARD: Vec3 = Vec3::new(0., 1., 0.);
 pub const WORLD_SPACE_RIGHT: Vec3 = Vec3::new(1., 0., 0.);
+
+#[derive(Debug, Clone)]
+pub struct ViewData {
+    pub view_proj: Mat4,
+    pub inv_view_proj: Mat4,
+    pub view: Mat4,
+    pub inv_view: Mat4,
+    pub proj: Mat4,
+    pub inv_proj: Mat4,
+    pub position: Vec4,
+}
 
 /// Common camera data.
 #[derive(Debug)]
@@ -30,7 +41,7 @@ pub struct Camera {
     forward: Vec3,
     right: Vec3,
     up: Vec3,
-    /// FOV for horizontal axis
+    /// horizontal FOV
     fov: Degree,
     aspect_ratio: f32,
     z_near: f32,
@@ -137,6 +148,21 @@ impl Camera {
     #[inline]
     pub fn up(&self) -> Vec3 {
         self.up
+    }
+
+    pub fn view_data(&self) -> ViewData {
+        let vp = self.view_projection();
+        let v = self.view();
+        let p = self.projection();
+        ViewData {
+            view_proj: vp,
+            inv_view_proj: vp.inverse(),
+            view: v,
+            inv_view: v.inverse(),
+            proj: p,
+            inv_proj: p.inverse(),
+            position: Vec4::new(self.position().x, self.position().y, self.position().z, 1.0),
+        }
     }
 
     fn translate(&mut self, delta_position: Vec3) {

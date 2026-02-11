@@ -43,16 +43,13 @@ impl AssetManager {
     #[profiling::function]
     pub fn request_load(&self, url: impl Into<PathBuf>) -> Result<()> {
         let url = url.into();
+        info!("Loading raw asset {:?}", url);
 
         if self.should_bake_asset(&url) {
-            info!("load raw asset {:?}", url);
-
             self.request_load_raw(RawResourceLoadRequestBuilder::default()
                 .relative_path(url)
                 .build()?)
         } else {
-            info!("load asset {:?}", url);
-
             // TODO: this should be validate as AssetUrl
             let mut url = url;
             url.set_extension(MeshCollection::extension());
@@ -144,7 +141,7 @@ impl AssetManager {
         let asset_type = load_request.url.ty();
 
         let cache_asset_path = self.cache_dir.join(&load_request.url);
-        info!("Try to load baked asset: {:?}", cache_asset_path);
+        info!("Loading baked asset: {:?}", cache_asset_path);
 
         // TODO: load dependencies
         // TODO: notice a 1-to-1 mapping between AssetType and static asset type, further abstract the deserialize logic
