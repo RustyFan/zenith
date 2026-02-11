@@ -2,9 +2,8 @@ use std::sync::Arc;
 use winit::event::{DeviceEvent, WindowEvent};
 use winit::window::Window;
 use zenith_core::cli::EngineArgs;
-use zenith_rhi::{RenderDevice, Swapchain, Texture};
+use zenith_rhi::{RenderDevice, Swapchain, Texture, vk};
 use zenith_rendergraph::{RenderGraphBuilder};
-use crate::rhi::vk;
 
 pub trait App: Sized + 'static {
     fn new(args: &EngineArgs) -> anyhow::Result<Self>;
@@ -16,6 +15,7 @@ pub trait App: Sized + 'static {
 /// All contexts needed to render.
 pub struct RenderContext<'a> {
     builder: &'a mut RenderGraphBuilder,
+    device: &'a RenderDevice,
     swapchain: &'a Swapchain,
     frame_index: usize,
 }
@@ -23,11 +23,13 @@ pub struct RenderContext<'a> {
 impl<'a> RenderContext<'a> {
     pub fn new(
         builder: &'a mut RenderGraphBuilder,
+        device: &'a RenderDevice,
         swapchain: &'a Swapchain,
         frame_index: usize
     ) -> Self {
         Self {
             builder,
+            device,
             swapchain,
             frame_index,
         }
@@ -35,6 +37,9 @@ impl<'a> RenderContext<'a> {
 
     #[inline]
     pub fn builder(&mut self) -> &mut RenderGraphBuilder { self.builder }
+
+    #[inline]
+    pub fn device(&self) -> &RenderDevice { self.device }
 
     #[inline]
     pub fn swapchain_texture(&self) -> Arc<Texture> { self.swapchain.swapchain_texture(self.frame_index).clone() }

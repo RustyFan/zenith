@@ -9,7 +9,7 @@ use crate::resource::{
 use log::warn;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use zenith_rhi::{vk, ColorAttachmentDesc, DepthStencilDesc, GraphicPipelineDesc, GraphicPipelineState, GraphicShaderInput, GraphicPipelineAttachments};
+use zenith_rhi::{vk, GraphicPipelineDesc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResourceAccessStorage {
@@ -58,6 +58,15 @@ impl RenderGraphBuilder {
     }
 
     #[must_use]
+    pub fn import_simplified<R: GraphImportExportResource>(
+        &mut self,
+        import_resource: Arc<R>,
+        access: <R as GraphResource>::State,
+    ) -> RenderGraphResource<R> {
+        GraphImportExportResource::import(import_resource, self, access)
+    }
+
+    #[must_use]
     pub fn import<R: GraphImportExportResource>(
         &mut self,
         import_resource: Arc<R>,
@@ -84,9 +93,7 @@ impl RenderGraphBuilder {
             inputs: vec![],
             outputs: vec![],
             pipeline_state: NodePipelineState::Graphic {
-                pipeline_desc: None,
-                color_attachments: vec![],
-                depth_attachment: None,
+                pipeline_descs: Vec::new(),
                 job_functor: None,
             },
         });
@@ -308,6 +315,17 @@ pub struct GraphicNodeBuilder<'node, 'res> {
 impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
     inject_common_node_builder_methods!(Srv, Rt);
 
+    /// Register a pipeline for this node and return a handle to reference it
+    pub fn register_pipeline(&mut self, desc: GraphicPipelineDesc) -> crate::node::GraphicPipelineHandle {
+        if let NodePipelineState::Graphic { pipeline_descs, .. } = &mut self.common.node.pipeline_state {
+            let handle = crate::node::GraphicPipelineHandle(pipeline_descs.len() as u32);
+            pipeline_descs.push(desc);
+            handle
+        } else {
+            unreachable!("register_pipeline called on non-graphic node");
+        }
+    }
+
     #[inline]
     pub fn execute<F>(&mut self, node_job: F)
     where
@@ -318,123 +336,6 @@ impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
         } else {
             unreachable!("Use other node execution context in graphic node: {}", self.common.node.name());
         }
-    }
-
-    pub fn pipeline(&mut self, shader: GraphicShaderInput, state: GraphicPipelineState) -> AttachmentBinder<'_, 'res> {
-        // Clear any previous attachment bindings / desc.
-        if let NodePipelineState::Graphic { pipeline_desc, color_attachments, depth_attachment, .. } =
-            &mut self.common.node.pipeline_state
-        {
-            *pipeline_desc = None;
-            color_attachments.clear();
-            *depth_attachment = None;
-        } else {
-            unreachable!();
-        }
-
-        AttachmentBinder {
-            node: self.common.node,
-            resources: self.common.resources,
-            shader: Some(shader),
-            state: Some(state),
-            finished: false,
-        }
-    }
-}
-
-pub struct AttachmentBinder<'node, 'res> {
-    node: &'node mut RenderGraphNode,
-    resources: &'res Vec<InitialResourceStorage>,
-    shader: Option<GraphicShaderInput>,
-    state: Option<GraphicPipelineState>,
-    finished: bool,
-}
-
-impl<'node, 'res> AttachmentBinder<'node, 'res> {
-    pub fn push_color(
-        &mut self,
-        rt: RenderGraphResourceAccess<crate::interface::Texture, Rt>,
-        desc: ColorAttachmentDesc,
-    ) -> &mut Self {
-        if let NodePipelineState::Graphic { color_attachments, .. } = &mut self.node.pipeline_state {
-            color_attachments.push((rt.id, desc));
-        } else {
-            unreachable!();
-        }
-        self
-    }
-
-    pub fn depth(
-        &mut self,
-        rt: RenderGraphResourceAccess<crate::interface::Texture, Rt>,
-        desc: DepthStencilDesc,
-    ) -> &mut Self {
-        if let NodePipelineState::Graphic { depth_attachment, .. } = &mut self.node.pipeline_state {
-            *depth_attachment = Some((rt.id, desc));
-        } else {
-            unreachable!();
-        }
-        self
-    }
-
-    pub fn finish(mut self) -> GraphicPipelineDesc {
-        let desc = self.finalize();
-        self.finished = true;
-        desc
-    }
-
-    fn finalize(&mut self) -> GraphicPipelineDesc {
-        let shader = self.shader.take().expect("AttachmentBinder finalized twice");
-        let mut state = self.state.take().expect("AttachmentBinder finalized twice");
-
-        let (color_ids, color_descs, depth_id, depth_desc) = match &mut self.node.pipeline_state {
-            NodePipelineState::Graphic { color_attachments, depth_attachment, .. } => {
-                let (ids, descs): (Vec<_>, Vec<_>) = color_attachments.iter().cloned().unzip();
-                let (depth_id, depth_desc) = depth_attachment.clone().map(|(id, d)| (Some(id), Some(d))).unwrap_or((None, None));
-                (ids, descs, depth_id, depth_desc)
-            }
-            _ => unreachable!(),
-        };
-
-        // Attachments formats (dynamic rendering order).
-        let mut attachments = GraphicPipelineAttachments::default();
-        attachments.color_formats = color_ids
-            .iter()
-            .map(|id| texture_format(self.resources, *id))
-            .collect();
-        attachments.depth_format = depth_id.map(|id| texture_format(self.resources, id));
-        attachments.stencil_format = None;
-
-        // Populate state attachment descs used for blend state + begin_rendering.
-        state.color_blend.attachments = color_descs;
-        if let Some(ds) = depth_desc {
-            state.depth_stencil = Some(ds);
-        }
-
-        let pipeline_desc = GraphicPipelineDesc::new(shader, state, attachments);
-
-        if let NodePipelineState::Graphic { pipeline_desc: slot, .. } = &mut self.node.pipeline_state {
-            *slot = Some(pipeline_desc.clone());
-        }
-
-        pipeline_desc
-    }
-}
-
-impl Drop for AttachmentBinder<'_, '_> {
-    fn drop(&mut self) {
-        if !self.finished {
-            let _ = self.finalize();
-        }
-    }
-}
-
-fn texture_format(resources: &Vec<InitialResourceStorage>, id: GraphResourceId) -> vk::Format {
-    let storage = resources.get(id as usize).expect("Graph resource id out of bound!");
-    match storage {
-        InitialResourceStorage::ManagedTexture(desc) => desc.format,
-        InitialResourceStorage::ImportedTexture(tex, _) => tex.format(),
-        _ => panic!("AttachmentBinder expects a texture resource id."),
     }
 }
 

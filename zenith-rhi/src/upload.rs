@@ -152,7 +152,6 @@ impl<'a> UploadPool<'a> {
         let batch = self.current.as_mut().expect("UploadPool current batch missing");
         batch.staging
             .as_range((src_offset as u64)..((src_offset + size) as u64))
-            .map_err(Self::map_vk_error)?
             .write(data)
             .map_err(Self::map_vk_error)?;
         self.write_head += size;
@@ -203,7 +202,6 @@ impl<'a> UploadPool<'a> {
         let batch = self.current.as_mut().expect("UploadPool current batch missing");
         batch.staging
             .as_range((src_offset as u64)..((src_offset + size) as u64))
-            .map_err(Self::map_vk_error)?
             .write(data)
             .map_err(Self::map_vk_error)?;
         self.write_head += size;
@@ -242,7 +240,7 @@ impl<'a> UploadPool<'a> {
                 // Staging: HOST_WRITE -> TRANSFER_READ (as TRANSFER_SRC)
                 pre.push(
                     BufferBarrier::new(
-                        staging.as_range(..).unwrap(),
+                        staging.as_range(..),
                         BufferState::HostWrite,
                         BufferState::TransferSrc,
                         PipelineStage::Host.into(),
@@ -255,7 +253,7 @@ impl<'a> UploadPool<'a> {
                 // Dst buffers: Undefined -> TransferDst
                 for p in pending.iter() {
                     pre.push(BufferBarrier::new(
-                        p.dst.buffer().as_range(..).unwrap(),
+                        p.dst.buffer().as_range(..),
                         BufferState::Undefined,
                         BufferState::TransferDst,
                         PipelineStages::empty(),
@@ -271,9 +269,7 @@ impl<'a> UploadPool<'a> {
                     let mut pre_img: Vec<TextureBarrier> = Vec::with_capacity(pending_textures.len());
                     for p in pending_textures.iter() {
                         pre_img.push(TextureBarrier::new(
-                            p.dst.texture()
-                                .as_range(TextureLayout::Undefined, .., ..)
-                                .unwrap(),
+                            p.dst.texture().as_range(TextureLayout::Undefined, .., ..),
                             TextureState::Undefined,
                             TextureState::TransferDst,
                             PipelineStages::empty(),
@@ -330,7 +326,7 @@ impl<'a> UploadPool<'a> {
                         BufferState::Uniform | BufferState::StorageRead | BufferState::StorageWrite | BufferState::Undefined => PipelineStage::AllCommands.into(),
                     };
                     post.push(BufferBarrier::new(
-                        p.dst.buffer().as_range(..).unwrap(),
+                        p.dst.buffer().as_range(..),
                         BufferState::TransferDst,
                         p.final_state,
                         PipelineStage::Transfer.into(),
@@ -346,9 +342,7 @@ impl<'a> UploadPool<'a> {
                     for p in pending_textures.iter() {
                         let dst_stage = texture_state_to_dst_stage(p.final_state);
                         post_img.push(TextureBarrier::new(
-                            p.dst.texture()
-                                .as_range(TextureLayout::TransferDst, .., ..)
-                                .unwrap(),
+                            p.dst.texture().as_range(TextureLayout::TransferDst, .., ..),
                             TextureState::TransferDst,
                             p.final_state,
                             PipelineStage::Transfer.into(),

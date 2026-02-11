@@ -2,18 +2,17 @@
 
 use crate::interface::{Buffer, BufferState, ResourceState, Texture, TextureState};
 use crate::node::{NodePipelineState, RenderGraphNode};
-use crate::resource::{GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess};
+use crate::resource::{GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess, Rt};
 use std::cell::Cell;
 use std::sync::{Arc};
+use bytemuck::NoUninit;
 use parking_lot::Mutex;
 use zenith_core::collections::SmallVec;
 use zenith_core::color;
-use zenith_rhi::{BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout};
-use zenith_rhi::{
-    vk, GraphicPipeline, GraphicPipelineDesc, PipelineCache, RenderDevice,
-    DescriptorSetBinder, Swapchain,
-};
-use bytemuck::NoUninit;
+use zenith_rhi::{BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout, ColorAttachmentDesc, DepthStencilAttachmentDesc, GraphicPipeline, DescriptorBindingError, DescriptorSetBinder};
+use zenith_rhi::{vk, RenderDevice, Swapchain};
+use zenith_rhi::descriptor::BindableResource;
+use crate::GraphicPipelineHandle;
 
 pub enum ResourceStorage {
     ManagedBuffer {
@@ -104,7 +103,7 @@ impl RenderGraph {
     pub fn compile(
         mut self,
         device: &mut RenderDevice,
-        pipeline_cache: &mut PipelineCache,
+        pipeline_cache: &mut zenith_rhi::PipelineCache,
     ) -> CompiledRenderGraph {
         // Create resources from initial resource descriptors
         let resources: Vec<ResourceStorage> = self.initial_resources
@@ -143,29 +142,10 @@ impl RenderGraph {
             })
             .collect();
 
-        let mut graphic_pipelines = vec![];
-
+        // Validate nodes
         for node in &mut self.nodes {
             if !node.pipeline_state.valid() {
                 log::warn!("Incomplete information for render graph node [{}]. Skipped.", node.name);
-                continue;
-            }
-
-            match &mut node.pipeline_state {
-                NodePipelineState::Graphic { pipeline_desc, .. } => {
-                    let Some(pipeline_desc) = pipeline_desc.as_mut() else {
-                        graphic_pipelines.push(None);
-                        continue;
-                    };
-
-                    let pipeline = pipeline_cache
-                        .get_or_create(&format!("pipeline.{}", node.name), device, pipeline_desc)
-                        .expect("Failed to create graphics pipeline");
-
-                    graphic_pipelines.push(Some(pipeline));
-                }
-                NodePipelineState::Compute { .. } => unimplemented!(),
-                NodePipelineState::Lambda { .. } => {}
             }
         }
 
@@ -195,14 +175,61 @@ impl RenderGraph {
             (self.nodes, vec![])
         };
 
+        let serial_nodes_count = serial_nodes.len();
+
+        // Create pipelines for all nodes
+        let node_pipelines = Self::create_node_pipelines(&serial_nodes, &present_nodes, device, pipeline_cache);
+
         CompiledRenderGraph {
             serial_nodes,
             present_nodes,
             resources,
-            graphic_pipe_index: 0,
-            graphic_pipelines,
             swapchain_tex_id,
+            node_pipelines,
+            serial_nodes_count,
         }
+    }
+
+    fn create_node_pipelines(
+        serial_nodes: &[RenderGraphNode],
+        present_nodes: &[RenderGraphNode],
+        device: &RenderDevice,
+        pipeline_cache: &mut zenith_rhi::PipelineCache,
+    ) -> Vec<Vec<Arc<GraphicPipeline>>> {
+        let total_nodes = serial_nodes.len() + present_nodes.len();
+        let mut node_pipelines = Vec::with_capacity(total_nodes);
+
+        for node in serial_nodes.iter().chain(present_nodes.iter()) {
+            match &node.pipeline_state {
+                NodePipelineState::Graphic { pipeline_descs, .. } => {
+                    let mut pipelines = Vec::with_capacity(pipeline_descs.len());
+
+                    for (handle_idx, desc) in pipeline_descs.iter().enumerate() {
+                        let name = format!("{}.pipeline{}", node.name, handle_idx);
+                        match pipeline_cache.get_or_create(&name, device, desc) {
+                            Ok(pipeline) => {
+                                pipelines.push(pipeline);
+                            },
+                            Err(e) => {
+                                log::error!("Failed to create pipeline {} for node {}: {:?}",
+                                           handle_idx, node.name, e);
+                                // Continue with empty pipeline - will cause panic when accessed
+                            }
+                        }
+                    }
+
+                    node_pipelines.push(pipelines);
+                }
+                NodePipelineState::Compute { .. } => {
+                    node_pipelines.push(Vec::new());  // No pipelines for compute yet
+                }
+                NodePipelineState::Lambda { .. } => {
+                    node_pipelines.push(Vec::new());  // No pipelines for lambda nodes
+                }
+            }
+        }
+
+        node_pipelines
     }
 }
 
@@ -210,9 +237,9 @@ pub struct CompiledRenderGraph {
     serial_nodes: Vec<RenderGraphNode>,
     present_nodes: Vec<RenderGraphNode>,
     resources: Vec<ResourceStorage>,
-    graphic_pipe_index: u32,
-    graphic_pipelines: Vec<Option<Arc<GraphicPipeline>>>,
     swapchain_tex_id: GraphResourceId,
+    node_pipelines: Vec<Vec<Arc<GraphicPipeline>>>,
+    serial_nodes_count: usize,
 }
 
 impl CompiledRenderGraph {
@@ -224,7 +251,7 @@ impl CompiledRenderGraph {
         encoder.begin_debug_label("render_graph::execution", color::LIGHT_GREEN);
 
         let nodes = std::mem::take(&mut self.serial_nodes);
-        self.record_nodes(device, &encoder, nodes);
+        self.record_nodes(device, &encoder, nodes, 0);
 
         encoder.end_debug_label();
         encoder.end()?;
@@ -260,7 +287,8 @@ impl CompiledRenderGraph {
         encoder.begin_debug_label("render_graph::present", color::LIGHT_YELLOW);
 
         let nodes = std::mem::take(&mut self.present_nodes);
-        self.record_nodes(device, &encoder, nodes);
+        let serial_nodes_count = self.serial_nodes_count;
+        self.record_nodes(device, &encoder, nodes, serial_nodes_count);
 
         // make sure the swapchain texture has the right image layout for presentation
         Self::transition_resources(
@@ -295,8 +323,10 @@ impl CompiledRenderGraph {
         device: &RenderDevice,
         encoder: &CommandEncoder,
         nodes: Vec<RenderGraphNode>,
+        node_start_index: usize,
     ) {
-        for node in nodes {
+        for (node_offset, node) in nodes.into_iter().enumerate() {
+            let node_idx = node_start_index + node_offset;
             let transition_resources = |reflection| {
                 profiling::scope!("rendergraph::barriers");
                 let output_iter = node.outputs.iter()
@@ -311,37 +341,23 @@ impl CompiledRenderGraph {
             };
 
             match node.pipeline_state {
-                NodePipelineState::Graphic { pipeline_desc, color_attachments, depth_attachment, mut job_functor } => {
-                    transition_resources(pipeline_desc.as_ref().map(|desc| &desc.shader.merged_reflection));
+                NodePipelineState::Graphic { ref pipeline_descs, mut job_functor } => {
+                    let reflection = ShaderReflection::merge(&pipeline_descs.iter()
+                        .map(|pipe| &pipe.shader.merged_reflection)
+                        .collect::<Vec<_>>());
+                    transition_resources(Some(&reflection));
 
-                    let pipeline_desc = pipeline_desc.as_ref();
                     let name = node.name;
-                    let pipeline = self.graphic_pipelines.get(self.graphic_pipe_index as usize).unwrap();
-                    let pipeline = pipeline.as_ref().map(|pipe| pipe.as_ref());
-
-                    let color_attachment_ids: SmallVec<[GraphResourceId; 8]> =
-                        color_attachments.iter().map(|(id, _)| *id).collect();
-                    let depth_attachment_id: Option<GraphResourceId> =
-                        depth_attachment.as_ref().map(|(id, _)| *id);
-                    self.graphic_pipe_index += 1;
 
                     if let Some(record) = job_functor.take() {
                         encoder.begin_debug_label(&name, color::LIGHT_BLUE);
                         profiling::scope!("rendergraph::node_recording", &name);
 
-                        let Some(pipeline_desc) = pipeline_desc else {
-                            encoder.end_debug_label();
-                            continue;
-                        };
-
                         let mut ctx = GraphicNodeExecutionContext {
-                            pipeline_desc,
                             device,
                             resources: &self.resources,
-                            pipeline,
                             encoder,
-                            color_attachment_ids,
-                            depth_attachment_id,
+                            node_pipelines: &self.node_pipelines[node_idx],
                         };
                         let result = record(&mut ctx);
                         encoder.end_debug_label();
@@ -385,9 +401,8 @@ impl CompiledRenderGraph {
         let mut image_barriers: Vec<TextureBarrier> = Vec::new();
         let mut buffer_barriers: Vec<BufferBarrier> = Vec::new();
 
-        let queue = device.graphics_queue();
-
-        let combined_shader_stage = merged_reflection
+        // merge all binding's stage together as a fallback stage
+        let all_resource_stage_flags = merged_reflection
             .map(|reflection| {
                 reflection.bindings
                     .iter()
@@ -396,16 +411,26 @@ impl CompiledRenderGraph {
             .map(shader_stage_to_pipeline_stage)
             .unwrap_or(vk::PipelineStageFlags2::ALL_COMMANDS);
 
+        let queue = device.graphics_queue();
+
         for (id, access, stage_hint) in resources_to_transition {
             let storage = utility::resource_storage_ref(resource_storage, id);
 
             match storage {
                 ResourceStorage::ManagedBuffer { resource, state_tracker, .. } => {
+                    let stage = merged_reflection
+                        .map(|reflection| reflection.bindings.iter()
+                            .find(|binding| binding.name.as_str() == resource.name())
+                            .map(|binding| binding.stage_flags)
+                            .map(shader_stage_to_pipeline_stage)
+                            .unwrap_or(all_resource_stage_flags)
+                        ).unwrap_or(all_resource_stage_flags);
+
                     let ResourceState::Buffer(next_state) = access else { continue; };
                     let prev_state = state_tracker.current_access();
                     if prev_state == next_state { continue; }
 
-                    let dst_stage_vk = stage_hint.unwrap_or(combined_shader_stage);
+                    let dst_stage_vk = stage_hint.unwrap_or(stage);
                     let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
                     let dst_stage = PipelineStages::from_vk(dst_stage_vk);
                     if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
@@ -413,7 +438,7 @@ impl CompiledRenderGraph {
                     }
 
                     buffer_barriers.push(BufferBarrier::new(
-                        resource.as_range(..).unwrap(),
+                        resource.as_range(..),
                         prev_state,
                         next_state,
                         src_stage,
@@ -424,11 +449,19 @@ impl CompiledRenderGraph {
                     state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
                 ResourceStorage::ImportedBuffer { resource, state_tracker } => {
+                    let stage = merged_reflection
+                        .map(|reflection| reflection.bindings.iter()
+                            .find(|binding| binding.name.as_str() == resource.name())
+                            .map(|binding| binding.stage_flags)
+                            .map(shader_stage_to_pipeline_stage)
+                            .unwrap_or(all_resource_stage_flags)
+                        ).unwrap_or(all_resource_stage_flags);
+
                     let ResourceState::Buffer(next_state) = access else { continue; };
                     let prev_state = state_tracker.current_access();
                     if prev_state == next_state { continue; }
 
-                    let dst_stage_vk = stage_hint.unwrap_or(combined_shader_stage);
+                    let dst_stage_vk = stage_hint.unwrap_or(stage);
                     let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
                     let dst_stage = PipelineStages::from_vk(dst_stage_vk);
                     if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
@@ -436,7 +469,7 @@ impl CompiledRenderGraph {
                     }
 
                     buffer_barriers.push(BufferBarrier::new(
-                        resource.as_range(..).unwrap(),
+                        resource.as_range(..),
                         prev_state,
                         next_state,
                         src_stage,
@@ -447,11 +480,19 @@ impl CompiledRenderGraph {
                     state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
                 ResourceStorage::ManagedTexture { resource, state_tracker, .. } => {
+                    let stage = merged_reflection
+                        .map(|reflection| reflection.bindings.iter()
+                            .find(|binding| binding.name.as_str() == resource.name())
+                            .map(|binding| binding.stage_flags)
+                            .map(shader_stage_to_pipeline_stage)
+                            .unwrap_or(all_resource_stage_flags)
+                        ).unwrap_or(all_resource_stage_flags);
+
                     let ResourceState::Texture(next_state) = access else { continue; };
                     let prev_state = state_tracker.current_access();
                     if prev_state == next_state { continue; }
 
-                    let dst_stage_vk = stage_hint.unwrap_or(combined_shader_stage);
+                    let dst_stage_vk = stage_hint.unwrap_or(stage);
                     let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
                     let dst_stage = PipelineStages::from_vk(dst_stage_vk);
                     if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
@@ -459,7 +500,7 @@ impl CompiledRenderGraph {
                     }
 
                     image_barriers.push(TextureBarrier::new(
-                        resource.as_range(TextureLayout::from(prev_state), .., ..).unwrap(),
+                        resource.as_range(TextureLayout::from(prev_state), .., ..),
                         prev_state,
                         next_state,
                         src_stage,
@@ -471,11 +512,19 @@ impl CompiledRenderGraph {
                     state_tracker.transition_to(next_state, next_state.into_pipeline_stage(dst_stage_vk));
                 }
                 ResourceStorage::ImportedTexture { resource, state_tracker } => {
+                    let stage = merged_reflection
+                        .map(|reflection| reflection.bindings.iter()
+                            .find(|binding| binding.name.as_str() == resource.name())
+                            .map(|binding| binding.stage_flags)
+                            .map(shader_stage_to_pipeline_stage)
+                            .unwrap_or(all_resource_stage_flags)
+                        ).unwrap_or(all_resource_stage_flags);
+
                     let ResourceState::Texture(next_state) = access else { continue; };
                     let prev_state = state_tracker.current_access();
                     if prev_state == next_state { continue; }
 
-                    let dst_stage_vk = stage_hint.unwrap_or(combined_shader_stage);
+                    let dst_stage_vk = stage_hint.unwrap_or(stage);
                     let src_stage = PipelineStages::from_vk(state_tracker.current_stage());
                     let dst_stage = PipelineStages::from_vk(dst_stage_vk);
                     if dst_stage_vk == vk::PipelineStageFlags2::ALL_COMMANDS {
@@ -483,7 +532,7 @@ impl CompiledRenderGraph {
                     }
 
                     image_barriers.push(TextureBarrier::new(
-                        resource.as_range(TextureLayout::from(prev_state), .., ..).unwrap(),
+                        resource.as_range(TextureLayout::from(prev_state), .., ..),
                         prev_state,
                         next_state,
                         src_stage,
@@ -530,14 +579,59 @@ fn shader_stage_to_pipeline_stage(stage_flags: vk::ShaderStageFlags) -> vk::Pipe
     result
 }
 
+pub struct PipelineResourceBinder<'a> {
+    device: &'a RenderDevice,
+    encoder: &'a CommandEncoder<'a>,
+    binder: Option<DescriptorSetBinder<'a>>,
+    bind_point: vk::PipelineBindPoint,
+    layout: vk::PipelineLayout,
+}
+
+impl<'a> Drop for PipelineResourceBinder<'a> {
+    fn drop(&mut self) {
+        let (base_set, sets) = self.binder.take().unwrap().finish(self.device).unwrap();
+        self.encoder.bind_descriptor_sets(
+            self.bind_point,
+            self.layout.clone(),
+            base_set,
+            &sets,
+            &[],
+        );
+    }
+}
+
+impl<'a> PipelineResourceBinder<'a> {
+    pub fn bind<T: BindableResource>(
+        &mut self,
+        name: &str,
+        res: T,
+    ) -> Result<&mut Self, DescriptorBindingError> {
+        self.binder.as_mut().unwrap().bind(name, res)?;
+        Ok(self)
+    }
+
+    pub fn bind_raw(
+        &mut self,
+        base_set: u32,
+        sets: &[vk::DescriptorSet],
+        dynamic_offsets: &[u32],
+    ) -> &mut Self {
+        self.encoder.bind_descriptor_sets(
+            self.bind_point,
+            self.layout.clone(),
+            base_set,
+            sets,
+            dynamic_offsets,
+        );
+        self
+    }
+}
+
 pub struct GraphicNodeExecutionContext<'node> {
-    pipeline_desc: &'node GraphicPipelineDesc,
     device: &'node RenderDevice,
     resources: &'node Vec<ResourceStorage>,
-    pipeline: Option<&'node GraphicPipeline>,
     encoder: &'node CommandEncoder<'node>,
-    color_attachment_ids: SmallVec<[GraphResourceId; 8]>,
-    depth_attachment_id: Option<GraphResourceId>,
+    node_pipelines: &'node [Arc<GraphicPipeline>],
 }
 
 impl<'node> GraphicNodeExecutionContext<'node> {
@@ -564,81 +658,91 @@ impl<'node> GraphicNodeExecutionContext<'node> {
         }
     }
 
-    pub fn bind_pipeline(&self) {
-        if let Some(pipeline) = self.pipeline {
-            self.encoder.bind_graphics_pipeline(pipeline.handle());
-        }
-    }
-
     #[inline]
     pub fn device(&self) -> &RenderDevice { self.device }
 
     #[inline]
     pub fn encoder(&self) -> &CommandEncoder<'node> { self.encoder }
 
-    pub fn push_constants<T: NoUninit>(&self, offset: u32, data: &T) {
-        if let Some(layout) = self.pipeline.map(|pipe| pipe.layout()) {
-            self.encoder.push_constants(
-                layout,
-                vk::ShaderStageFlags::ALL_GRAPHICS,
-                offset,
-                data,
-            );
+    #[inline]
+    fn get_pipeline(&self, handle: GraphicPipelineHandle) -> &GraphicPipeline {
+        &self.node_pipelines.get(handle.0 as usize).unwrap()
+    }
+
+    pub fn bind_pipeline(&self, handle: GraphicPipelineHandle) -> PipelineResourceBinder {
+        let pipeline = self.get_pipeline(handle);
+
+        let binder = DescriptorSetBinder::new(
+            self.device,
+            &pipeline.desc().shader.merged_reflection,
+            pipeline.descriptor_layouts(),
+        );
+
+        self.encoder.bind_pipeline(
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline.handle(),
+        );
+
+        PipelineResourceBinder {
+            device: self.device,
+            encoder: self.encoder,
+            binder: Some(binder),
+            bind_point: vk::PipelineBindPoint::GRAPHICS,
+            layout: pipeline.layout(),
         }
     }
 
-    pub fn begin_rendering(&self, extent: vk::Extent2D) {
-        let color_infos = &self.pipeline_desc.state.color_blend.attachments;
-        if self.color_attachment_ids.len() != color_infos.len() {
-            panic!(
-                "begin_rendering: node has {} color targets but pipeline state has {} color attachments",
-                self.color_attachment_ids.len(),
-                color_infos.len()
-            );
-        }
+    pub fn push_constants<T: NoUninit>(&self, handle: GraphicPipelineHandle, offset: u32, data: &T) {
+        let pipeline = self.get_pipeline(handle);
 
-        let color_attachments: SmallVec<[vk::RenderingAttachmentInfo; 8]> = self
-            .color_attachment_ids
-            .iter()
-            .zip(color_infos.iter())
-            .map(|(id, info)| {
-                let texture = utility::resource_storage_ref(self.resources, *id).as_texture();
+        self.encoder.push_constants(
+            pipeline.layout(),
+            vk::ShaderStageFlags::ALL_GRAPHICS,
+            offset,
+            data,
+        );
+    }
+
+    pub fn begin_rendering(
+        &self,
+        extent: (u32, u32),
+        color_attachments: &[(RenderGraphResourceAccess<Texture, Rt>, ColorAttachmentDesc)],
+        depth_attachment: Option<(RenderGraphResourceAccess<Texture, Rt>, DepthStencilAttachmentDesc)>,
+    ) {
+        let color_attachments: SmallVec<[vk::RenderingAttachmentInfo; 8]> = color_attachments.iter()
+            .map(|(access, desc)| {
+                let texture = utility::resource_storage_ref(self.resources, access.id).as_texture();
+
                 vk::RenderingAttachmentInfo::default()
-                    .image_view(texture.as_range(TextureLayout::Color, .., ..).unwrap().view().expect("Texture view not created"))
+                    .image_view(texture.as_range(TextureLayout::Color, .., ..).view().expect("Texture view not created"))
                     .image_layout(TextureLayout::Color.to_vk())
-                    .load_op(info.load_op)
-                    .store_op(info.store_op)
+                    .load_op(desc.load_op)
+                    .store_op(desc.store_op)
                     .clear_value(vk::ClearValue {
                         color: vk::ClearColorValue {
-                            float32: info.clear_value,
+                            float32: desc.clear_value,
                         },
                     })
             })
             .collect();
 
-        let depth_attachment = match (
-            self.depth_attachment_id,
-            self.pipeline_desc.state.depth_stencil.as_ref(),
-        ) {
-            (Some(id), Some(info)) => {
-                let texture = utility::resource_storage_ref(self.resources, id).as_texture();
-                Some(
-                    vk::RenderingAttachmentInfo::default()
-                        .image_view(texture.as_range(TextureLayout::DepthStencil, .., ..).unwrap().view().expect("Texture view not created"))
-                        .image_layout(TextureLayout::DepthStencil.to_vk())
-                        .load_op(info.depth_load_op)
-                        .store_op(info.depth_store_op)
-                        .clear_value(vk::ClearValue {
-                            depth_stencil: vk::ClearDepthStencilValue {
-                                depth: info.depth_clear_value,
-                                stencil: info.stencil_clear_value,
-                            },
-                        }),
-                )
-            }
-            _ => None,
-        };
+        let depth_attachment = depth_attachment.map(|(access, desc)| {
+            let texture = utility::resource_storage_ref(self.resources, access.id).as_texture();
 
+            vk::RenderingAttachmentInfo::default()
+                .image_view(texture.as_range(TextureLayout::DepthStencil, .., ..).view().expect("Texture view not created"))
+                .image_layout(TextureLayout::DepthStencil.to_vk())
+                .load_op(desc.depth_load_op)
+                .store_op(desc.depth_store_op)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: desc.depth_clear_value,
+                        stencil: desc.stencil_clear_value,
+                    },
+                })
+        });
+
+        let extent = vk::Extent2D { width: extent.0, height: extent.1 };
         let mut rendering_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent })
             .layer_count(1)
@@ -649,35 +753,29 @@ impl<'node> GraphicNodeExecutionContext<'node> {
         }
 
         self.encoder.begin_rendering(&rendering_info);
+
+        // TODO: multi-viewport and scissors is not support for now
+        let viewport = vk::Viewport {
+            x: 0.0,
+            // Flip Y in rasterization (Vulkan supports negative viewport height).
+            // This avoids baking Y-flip into the projection matrix.
+            y: extent.height as f32,
+            width: extent.width as f32,
+            height: -(extent.height as f32),
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        self.encoder.set_viewport(0, &[viewport]);
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        };
+        self.encoder.set_scissor(0, &[scissor]);
     }
 
+    #[inline]
     pub fn end_rendering(&self) {
         self.encoder.end_rendering();
-    }
-
-    /// Create a shader resource binder for this node's pipeline.
-    /// Returns None if the pipeline has no descriptor bindings.
-    pub fn create_binder(&self) -> DescriptorSetBinder<'_> {
-        DescriptorSetBinder::new(
-            self.device,
-            self.pipeline.unwrap(),
-            &self.pipeline_desc.shader.merged_reflection
-        ).unwrap()
-    }
-
-    /// Bind descriptor sets to the pipeline.
-    pub fn bind_descriptor_sets(&self, first_set: u32, sets: &[vk::DescriptorSet]) {
-        if let Some(pipeline) = self.pipeline {
-            if !sets.is_empty() {
-                self.encoder.bind_descriptor_sets(
-                    vk::PipelineBindPoint::GRAPHICS,
-                    pipeline.layout(),
-                    first_set,
-                    sets,
-                    &[],
-                );
-            }
-        }
     }
 }
 
@@ -700,7 +798,7 @@ impl<'node> LambdaNodeExecutionContext<'node> {
         match self.resources.get(resource.id as usize).expect("Graph resource index out of bound!") {
             ResourceStorage::ManagedBuffer { resource, .. } => unsafe { std::mem::transmute(resource) },
             ResourceStorage::ManagedTexture { resource, .. } => unsafe { std::mem::transmute(resource) },
-            ResourceStorage::ImportedBuffer { resource, .. } => { 
+            ResourceStorage::ImportedBuffer { resource, .. } => {
                 let res: &Buffer = resource.as_ref();
                 unsafe { std::mem::transmute(res) }
             },

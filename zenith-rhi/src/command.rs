@@ -152,13 +152,8 @@ impl<'a> CommandEncoder<'a> {
     #[cfg(not(debug_assertions))]
     pub fn end_debug_label(&self) {}
 
-    // Pipeline commands
     pub fn bind_pipeline(&self, bind_point: vk::PipelineBindPoint, pipeline: vk::Pipeline) {
         unsafe { self.device.handle().cmd_bind_pipeline(self.cmd, bind_point, pipeline) }
-    }
-
-    pub fn bind_graphics_pipeline(&self, pipeline: vk::Pipeline) {
-        self.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline);
     }
 
     pub fn bind_descriptor_sets(

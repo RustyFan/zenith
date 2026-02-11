@@ -9,7 +9,7 @@ use ash::vk::Handle;
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindLocation, DescriptorBindingCollector, LayoutBinding};
+use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindLocation, DescriptorWriter, LayoutBinding};
 use crate::{DescriptorBindingError, DescriptorPool, DescriptorSetLayout, RenderDevice, ShaderBinding};
 use std::sync::Arc;
 
@@ -46,7 +46,7 @@ impl BindlessHandle {
     const INDEX_BITS: u32 = 32 - Self::TY_BITS;
     const INDEX_MASK: u32 = (1u32 << Self::INDEX_BITS) - 1;
 
-    const INVALID: Self = Self { packed: u32::MAX };
+    pub const INVALID: Self = Self { packed: u32::MAX };
 
     pub fn new(ty: ResourceType, index: u32) -> Self {
         // encode ty to the most-significant bit use 3 bit.
@@ -150,7 +150,7 @@ struct BindlessPoolState {
 }
 
 pub struct BindlessPool {
-    collector: DescriptorBindingCollector,
+    writer: DescriptorWriter,
     _pool: DescriptorPool,
     set_layout: Arc<DescriptorSetLayout>,
     set: vk::DescriptorSet,
@@ -246,7 +246,7 @@ impl BindlessPool {
         let set = pool.allocate(&set_layout)?;
 
         Ok(Self {
-            collector: Default::default(),
+            writer: Default::default(),
             _pool: pool,
             set_layout,
             set,
@@ -274,14 +274,14 @@ impl BindlessPool {
                 };
 
                 if is_new {
-                    self.collector.begin_binding("__bindless_buffers".to_string(), DescriptorBindLocation {
+                    self.writer.begin_binding("__bindless_buffers".to_string(), DescriptorBindLocation {
                         set: 0,
                         binding: ResourceType::Buffer.binding_index(),
                         array_index: index,
                         ty: vk::DescriptorType::STORAGE_BUFFER,
                     });
-                    res.bind_to(&mut self.collector)?;
-                    self.collector.end_binding();
+                    self.writer.end_binding();
+                    res.bind_to(&mut self.writer)?;
                 }
 
                 (index, ResourceType::Buffer)
@@ -292,14 +292,14 @@ impl BindlessPool {
                 };
 
                 if is_new {
-                    self.collector.begin_binding("__bindless_textures".to_string(), DescriptorBindLocation {
+                    self.writer.begin_binding("__bindless_textures".to_string(), DescriptorBindLocation {
                         set: 0,
                         binding: ResourceType::Texture2D.binding_index(),
                         array_index: index,
                         ty: vk::DescriptorType::SAMPLED_IMAGE,
                     });
-                    res.bind_to(&mut self.collector)?;
-                    self.collector.end_binding();
+                    res.bind_to(&mut self.writer)?;
+                    self.writer.end_binding();
                 }
 
                 (index, ResourceType::Texture2D)
@@ -328,20 +328,20 @@ impl BindlessPool {
         }
         self.state._samplers.keys_by_index[index as usize] = Some(key);
 
-        self.collector.begin_binding("__bindless_samplers".to_string(), DescriptorBindLocation {
+        self.writer.begin_binding("__bindless_samplers".to_string(), DescriptorBindLocation {
             set: 0,
             binding: ResourceType::Sampler.binding_index(),
             array_index: index,
             ty: vk::DescriptorType::SAMPLER,
         });
         // Note: a SAMPLER descriptor uses only `sampler`; image_view/layout are ignored.
-        self.collector.bind_texture(
+        self.writer.bind_texture(
             vk::DescriptorImageInfo::default()
                 .sampler(sampler)
                 .image_view(vk::ImageView::null())
                 .image_layout(vk::ImageLayout::UNDEFINED)
         )?;
-        self.collector.end_binding();
+        self.writer.end_binding();
 
         Ok(())
     }
@@ -360,13 +360,13 @@ impl BindlessPool {
 
     /// Flush pending descriptor writes into the pool's internal set.
     pub fn flush(&mut self, device: &RenderDevice) {
-        if self.collector.num_bindings() == 0 {
+        if self.writer.num_bindings() == 0 {
             return;
         }
-        let writes = self.collector.write_to(0, std::slice::from_ref(&self.set));
+        let writes = self.writer.write_to(0, std::slice::from_ref(&self.set));
         unsafe {
             device.handle().update_descriptor_sets(&writes, &[]);
         }
-        self.collector.clear();
+        self.writer.clear();
     }
 }

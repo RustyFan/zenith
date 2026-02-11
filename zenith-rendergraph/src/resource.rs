@@ -105,8 +105,8 @@ impl<R: GraphResource, V: GraphResourceView> RenderGraphResourceAccess<R, V> {
 }
 
 pub trait GraphImportExportResource: GraphResource {
-    fn import(shared_resource: impl Into<Arc<Self>>, builder: &mut crate::builder::RenderGraphBuilder, access: impl Into<ResourceState>) -> RenderGraphResource<Self>;
-    fn export(resource: RenderGraphResource<Self>, builder: &mut crate::builder::RenderGraphBuilder, access: impl Into<ResourceState>) -> ExportedRenderGraphResource<Self>;
+    fn import(shared_resource: impl Into<Arc<Self>>, builder: &mut RenderGraphBuilder, access: impl Into<ResourceState>) -> RenderGraphResource<Self>;
+    fn export(resource: RenderGraphResource<Self>, builder: &mut RenderGraphBuilder, access: impl Into<ResourceState>) -> ExportedRenderGraphResource<Self>;
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]

@@ -74,7 +74,6 @@ pub struct GraphicShaderInput {
     pub vertex_attributes: Vec<VertexAttribute>,
 
     pub merged_reflection: ShaderReflection,
-    // pub descriptor_set_layouts: Vec<Arc<DescriptorSetLayout>>,
     pub push_constant_size: u32,
 }
 
@@ -94,8 +93,6 @@ impl GraphicShaderInput {
         }
 
         let merged_reflection = ShaderReflection::merge(&reflections);
-        // let descriptor_set_layouts = crate::shader::create_layouts_from_reflection(vertex_shader.device(), &merged_reflection)
-        //     .map_err(GraphicShaderInputBuildError::DescriptorLayoutCreationFailed)?;
 
         Ok(Self {
             vertex_shader,
@@ -104,7 +101,6 @@ impl GraphicShaderInput {
             vertex_attributes,
             push_constant_size: merged_reflection.push_constant_size,
             merged_reflection,
-            // descriptor_set_layouts,
         })
     }
 
@@ -335,15 +331,6 @@ pub trait VertexLayout {
 #[derive(Clone, Debug, Builder)]
 #[builder(setter(into), default)]
 pub struct ColorAttachmentDesc {
-    pub blend_enable: bool,
-    pub src_color_blend: vk::BlendFactor,
-    pub dst_color_blend: vk::BlendFactor,
-    pub color_blend_op: vk::BlendOp,
-    pub src_alpha_blend: vk::BlendFactor,
-    pub dst_alpha_blend: vk::BlendFactor,
-    pub alpha_blend_op: vk::BlendOp,
-    pub write_mask: vk::ColorComponentFlags,
-
     pub load_op: vk::AttachmentLoadOp,
     pub store_op: vk::AttachmentStoreOp,
     pub clear_value: [f32; 4],
@@ -352,33 +339,10 @@ pub struct ColorAttachmentDesc {
 impl Default for ColorAttachmentDesc {
     fn default() -> Self {
         Self {
-            blend_enable: false,
-            src_color_blend: vk::BlendFactor::ONE,
-            dst_color_blend: vk::BlendFactor::ZERO,
-            color_blend_op: vk::BlendOp::ADD,
-            src_alpha_blend: vk::BlendFactor::ONE,
-            dst_alpha_blend: vk::BlendFactor::ZERO,
-            alpha_blend_op: vk::BlendOp::ADD,
-            write_mask: vk::ColorComponentFlags::RGBA,
             load_op: vk::AttachmentLoadOp::CLEAR,
             store_op: vk::AttachmentStoreOp::STORE,
             clear_value: [0.0, 0.0, 0.0, 1.0],
         }
-    }
-}
-
-impl ColorAttachmentDesc {
-    #[inline]
-    pub fn to_vk_blend_attachment(&self) -> vk::PipelineColorBlendAttachmentState {
-        vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(self.blend_enable)
-            .src_color_blend_factor(self.src_color_blend)
-            .dst_color_blend_factor(self.dst_color_blend)
-            .color_blend_op(self.color_blend_op)
-            .src_alpha_blend_factor(self.src_alpha_blend)
-            .dst_alpha_blend_factor(self.dst_alpha_blend)
-            .alpha_blend_op(self.alpha_blend_op)
-            .color_write_mask(self.write_mask)
     }
 }
 
@@ -397,55 +361,92 @@ impl ColorAttachmentDescBuilder {
         self.store_op.replace(vk::AttachmentStoreOp::DONT_CARE);
         self
     }
-
-    pub fn translucent(&mut self) -> &mut Self {
-        self.blend_enable.replace(true);
-        self.src_color_blend.replace(vk::BlendFactor::SRC_ALPHA);
-        self.dst_color_blend.replace(vk::BlendFactor::DST_ALPHA);
-        self.color_blend_op.replace(vk::BlendOp::ADD);
-        self.src_alpha_blend.replace(vk::BlendFactor::ZERO);
-        self.dst_alpha_blend.replace(vk::BlendFactor::SRC_ALPHA);
-        self
-    }
 }
 
 #[derive(Clone, Debug, Builder)]
 #[builder(setter(into), default)]
-pub struct DepthStencilDesc {
-    pub depth_test_enable: bool,
-    pub depth_write_enable: bool,
-    pub depth_compare_op: vk::CompareOp,
-    pub depth_bounds_test_enable: bool,
-
+pub struct DepthStencilAttachmentDesc {
     pub depth_load_op: vk::AttachmentLoadOp,
     pub depth_store_op: vk::AttachmentStoreOp,
     pub depth_clear_value: f32,
-
-    pub stencil_test_enable: bool,
-    pub stencil_front: vk::StencilOpState,
-    pub stencil_back: vk::StencilOpState,
 
     pub stencil_load_op: vk::AttachmentLoadOp,
     pub stencil_store_op: vk::AttachmentStoreOp,
     pub stencil_clear_value: u32,
 }
 
-impl Default for DepthStencilDesc {
+impl Default for DepthStencilAttachmentDesc {
+    fn default() -> Self {
+        Self {
+            depth_load_op: vk::AttachmentLoadOp::CLEAR,
+            depth_store_op: vk::AttachmentStoreOp::STORE,
+            // reverse z
+            depth_clear_value: 0.0,
+
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            stencil_clear_value: 0,
+        }
+    }
+}
+
+impl DepthStencilAttachmentDescBuilder {
+    pub fn discard_depth_input(&mut self) -> &mut Self {
+        self.depth_load_op.replace(vk::AttachmentLoadOp::DONT_CARE);
+        self
+    }
+
+    pub fn discard_stencil_input(&mut self) -> &mut Self {
+        self.stencil_load_op.replace(vk::AttachmentLoadOp::DONT_CARE);
+        self
+    }
+
+    pub fn clear_depth_input(&mut self) -> &mut Self {
+        self.depth_load_op.replace(vk::AttachmentLoadOp::CLEAR);
+        self
+    }
+
+    pub fn clear_stencil_input(&mut self) -> &mut Self {
+        self.stencil_load_op.replace(vk::AttachmentLoadOp::CLEAR);
+        self
+    }
+
+    pub fn discard_depth_output(&mut self) -> &mut Self {
+        self.depth_store_op.replace(vk::AttachmentStoreOp::DONT_CARE);
+        self
+    }
+
+    pub fn discard_stencil_output(&mut self) -> &mut Self {
+        self.stencil_store_op.replace(vk::AttachmentStoreOp::DONT_CARE);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Builder)]
+#[builder(setter(into), default)]
+pub struct DepthStencilState {
+    pub depth_test_enable: bool,
+    pub depth_write_enable: bool,
+    pub depth_compare_op: vk::CompareOp,
+    pub depth_bounds_test_enable: bool,
+
+    pub stencil_test_enable: bool,
+    pub stencil_front: vk::StencilOpState,
+    pub stencil_back: vk::StencilOpState,
+}
+
+impl Default for DepthStencilState {
     fn default() -> Self {
         Self {
             depth_test_enable: false,
             depth_write_enable: false,
-            depth_compare_op: vk::CompareOp::LESS,
+            // reverse z
+            depth_compare_op: vk::CompareOp::GREATER_OR_EQUAL,
             depth_bounds_test_enable: false,
-            depth_load_op: vk::AttachmentLoadOp::CLEAR,
-            depth_store_op: vk::AttachmentStoreOp::STORE,
-            depth_clear_value: 1.0,
+
             stencil_test_enable: false,
             stencil_front: vk::StencilOpState::default(),
             stencil_back: vk::StencilOpState::default(),
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            stencil_clear_value: 0,
         }
     }
 }
@@ -457,7 +458,7 @@ pub struct InputAssemblyState {
     pub primitive_restart: bool,
 }
 
-impl DepthStencilDesc {
+impl DepthStencilState {
     #[inline]
     pub fn test_enabled(&self) -> bool {
         self.depth_test_enable || self.stencil_test_enable
@@ -611,18 +612,100 @@ impl MultisampleState {
     }
 }
 
+#[derive(Clone, Debug, Builder)]
+#[builder(setter(into), default)]
+pub struct BlendState {
+    pub blend_enable: bool,
+    pub src_color_blend: vk::BlendFactor,
+    pub dst_color_blend: vk::BlendFactor,
+    pub color_blend_op: vk::BlendOp,
+    pub src_alpha_blend: vk::BlendFactor,
+    pub dst_alpha_blend: vk::BlendFactor,
+    pub alpha_blend_op: vk::BlendOp,
+    pub write_mask: vk::ColorComponentFlags,
+}
+
+impl BlendState {
+    #[inline]
+    pub fn to_vk_blend_attachment(&self) -> vk::PipelineColorBlendAttachmentState {
+        vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(self.blend_enable)
+            .src_color_blend_factor(self.src_color_blend)
+            .dst_color_blend_factor(self.dst_color_blend)
+            .color_blend_op(self.color_blend_op)
+            .src_alpha_blend_factor(self.src_alpha_blend)
+            .dst_alpha_blend_factor(self.dst_alpha_blend)
+            .alpha_blend_op(self.alpha_blend_op)
+            .color_write_mask(self.write_mask)
+    }
+}
+
+impl BlendStateBuilder {
+    pub fn translucent(&mut self) -> &mut Self {
+        self.blend_enable.replace(true);
+        self.src_color_blend.replace(vk::BlendFactor::SRC_ALPHA);
+        self.dst_color_blend.replace(vk::BlendFactor::DST_ALPHA);
+        self.color_blend_op.replace(vk::BlendOp::ADD);
+        self.src_alpha_blend.replace(vk::BlendFactor::ZERO);
+        self.dst_alpha_blend.replace(vk::BlendFactor::SRC_ALPHA);
+        self
+    }
+}
+
+impl Default for BlendState {
+    fn default() -> Self {
+        Self {
+            blend_enable: false,
+            src_color_blend: vk::BlendFactor::ONE,
+            dst_color_blend: vk::BlendFactor::ZERO,
+            color_blend_op: vk::BlendOp::ADD,
+            src_alpha_blend: vk::BlendFactor::ONE,
+            dst_alpha_blend: vk::BlendFactor::ZERO,
+            alpha_blend_op: vk::BlendOp::ADD,
+            write_mask: vk::ColorComponentFlags::RGBA,
+        }
+    }
+}
+
+impl Hash for BlendState {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.blend_enable.hash(state);
+        (self.src_color_blend.as_raw() as i32).hash(state);
+        (self.dst_color_blend.as_raw() as i32).hash(state);
+        (self.color_blend_op.as_raw() as i32).hash(state);
+        (self.src_alpha_blend.as_raw() as i32).hash(state);
+        (self.dst_alpha_blend.as_raw() as i32).hash(state);
+        (self.alpha_blend_op.as_raw() as i32).hash(state);
+        self.write_mask.as_raw().hash(state);
+    }
+}
+
+impl PartialEq for BlendState {
+    fn eq(&self, other: &Self) -> bool {
+        self.blend_enable == other.blend_enable
+            && self.src_color_blend == other.src_color_blend
+            && self.dst_color_blend == other.dst_color_blend
+            && self.color_blend_op == other.color_blend_op
+            && self.src_alpha_blend == other.src_alpha_blend
+            && self.dst_alpha_blend == other.dst_alpha_blend
+            && self.alpha_blend_op == other.alpha_blend_op
+            && self.write_mask == other.write_mask
+    }
+}
+
+impl Eq for BlendState {}
 
 #[derive(Clone, Debug, Builder)]
 #[builder(setter(into), default)]
 pub struct ColorBlendState {
-    pub attachments: Vec<ColorAttachmentDesc>,
+    pub blend_states: Vec<BlendState>,
     pub blend_constants: [i32; 4],
 }
 
 impl Default for ColorBlendState {
     fn default() -> Self {
         Self {
-            attachments: Vec::new(),
+            blend_states: Vec::new(),
             blend_constants: [0; 4],
         }
     }
@@ -631,21 +714,8 @@ impl Default for ColorBlendState {
 impl Hash for ColorBlendState {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Hash full attachment behavior + clear value for cache key
-        for a in &self.attachments {
-            a.blend_enable.hash(state);
-            (a.src_color_blend.as_raw() as i32).hash(state);
-            (a.dst_color_blend.as_raw() as i32).hash(state);
-            (a.color_blend_op.as_raw() as i32).hash(state);
-            (a.src_alpha_blend.as_raw() as i32).hash(state);
-            (a.dst_alpha_blend.as_raw() as i32).hash(state);
-            (a.alpha_blend_op.as_raw() as i32).hash(state);
-            a.write_mask.as_raw().hash(state);
-            (a.load_op.as_raw() as i32).hash(state);
-            (a.store_op.as_raw() as i32).hash(state);
-            a.clear_value[0].to_bits().hash(state);
-            a.clear_value[1].to_bits().hash(state);
-            a.clear_value[2].to_bits().hash(state);
-            a.clear_value[3].to_bits().hash(state);
+        for a in &self.blend_states {
+            a.hash(state);
         }
         self.blend_constants.hash(state);
     }
@@ -656,13 +726,13 @@ impl PartialEq for ColorBlendState {
         if self.blend_constants != other.blend_constants {
             return false;
         }
-        if self.attachments.len() != other.attachments.len() {
+        if self.blend_states.len() != other.blend_states.len() {
             return false;
         }
 
-        self.attachments
+        self.blend_states
             .iter()
-            .zip(other.attachments.iter())
+            .zip(other.blend_states.iter())
             .all(|(a, b)| {
                 a.blend_enable == b.blend_enable
                     && a.src_color_blend == b.src_color_blend
@@ -672,12 +742,6 @@ impl PartialEq for ColorBlendState {
                     && a.dst_alpha_blend == b.dst_alpha_blend
                     && a.alpha_blend_op == b.alpha_blend_op
                     && a.write_mask == b.write_mask
-                    && a.load_op == b.load_op
-                    && a.store_op == b.store_op
-                    && a.clear_value[0].to_bits() == b.clear_value[0].to_bits()
-                    && a.clear_value[1].to_bits() == b.clear_value[1].to_bits()
-                    && a.clear_value[2].to_bits() == b.clear_value[2].to_bits()
-                    && a.clear_value[3].to_bits() == b.clear_value[3].to_bits()
             })
     }
 }
@@ -687,7 +751,7 @@ impl Eq for ColorBlendState {}
 impl ColorBlendState {
     #[inline]
     pub fn to_vk_attachments(&self) -> Vec<vk::PipelineColorBlendAttachmentState> {
-        self.attachments.iter().map(|a| a.to_vk_blend_attachment()).collect()
+        self.blend_states.iter().map(|a| a.to_vk_blend_attachment()).collect()
     }
 
     #[inline]
@@ -715,7 +779,7 @@ pub struct GraphicPipelineState {
     pub rasterization: RasterizationState,
     pub multisample: MultisampleState,
 
-    pub depth_stencil: Option<DepthStencilDesc>,
+    pub depth_stencil: Option<DepthStencilState>,
     pub color_blend: ColorBlendState,
 
     pub dynamic_states: Vec<vk::DynamicState>,
@@ -745,13 +809,7 @@ impl Hash for GraphicPipelineState {
             ds.depth_write_enable.hash(state);
             (ds.depth_compare_op.as_raw() as i32).hash(state);
             ds.depth_bounds_test_enable.hash(state);
-            (ds.depth_load_op.as_raw() as i32).hash(state);
-            (ds.depth_store_op.as_raw() as i32).hash(state);
-            ds.depth_clear_value.to_bits().hash(state);
             ds.stencil_test_enable.hash(state);
-            (ds.stencil_load_op.as_raw() as i32).hash(state);
-            (ds.stencil_store_op.as_raw() as i32).hash(state);
-            ds.stencil_clear_value.hash(state);
 
             // front/back stencil op state
             hash_vk_stencil_op_state(&ds.stencil_front, state);
@@ -805,8 +863,8 @@ impl GraphicPipelineStateBuilder {
         self
     }
 
-    pub fn push_color_attachment(mut self, a: ColorAttachmentDesc) -> Self {
-        self.state.color_blend.attachments.push(a);
+    pub fn push_blend_state(mut self, blend: BlendState) -> Self {
+        self.state.color_blend.blend_states.push(blend);
         self
     }
 
@@ -815,7 +873,7 @@ impl GraphicPipelineStateBuilder {
         self
     }
 
-    pub fn depth_stencil(mut self, ds: DepthStencilDesc) -> Self {
+    pub fn depth_stencil(mut self, ds: DepthStencilState) -> Self {
         self.state.depth_stencil = Some(ds);
         self
     }
@@ -850,7 +908,7 @@ fn eq_vk_stencil_op_state(a: &vk::StencilOpState, b: &vk::StencilOpState) -> boo
         && a.reference == b.reference
 }
 
-fn eq_depth_stencil_opt(a: &Option<DepthStencilDesc>, b: &Option<DepthStencilDesc>) -> bool {
+fn eq_depth_stencil_opt(a: &Option<DepthStencilState>, b: &Option<DepthStencilState>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(a), Some(b)) => {
@@ -858,13 +916,7 @@ fn eq_depth_stencil_opt(a: &Option<DepthStencilDesc>, b: &Option<DepthStencilDes
                 && a.depth_write_enable == b.depth_write_enable
                 && a.depth_compare_op == b.depth_compare_op
                 && a.depth_bounds_test_enable == b.depth_bounds_test_enable
-                && a.depth_load_op == b.depth_load_op
-                && a.depth_store_op == b.depth_store_op
-                && a.depth_clear_value.to_bits() == b.depth_clear_value.to_bits()
                 && a.stencil_test_enable == b.stencil_test_enable
-                && a.stencil_load_op == b.stencil_load_op
-                && a.stencil_store_op == b.stencil_store_op
-                && a.stencil_clear_value == b.stencil_clear_value
                 && eq_vk_stencil_op_state(&a.stencil_front, &b.stencil_front)
                 && eq_vk_stencil_op_state(&a.stencil_back, &b.stencil_back)
         }
@@ -875,6 +927,7 @@ fn eq_depth_stencil_opt(a: &Option<DepthStencilDesc>, b: &Option<DepthStencilDes
 /// Hashable graphics pipeline description.
 #[derive(Clone)]
 pub struct GraphicPipelineDesc {
+    pub name: String,
     pub shader: GraphicShaderInput,
     pub state: GraphicPipelineState,
     pub attachments: GraphicPipelineAttachments,
@@ -896,8 +949,13 @@ pub struct VertexAttribute {
 }
 
 impl GraphicPipelineDesc {
-    pub fn new(shader: GraphicShaderInput, state: GraphicPipelineState, attachments: GraphicPipelineAttachments) -> Self {
-        Self { shader, state, attachments }
+    pub fn new(
+        name: &str,
+        shader: GraphicShaderInput,
+        state: GraphicPipelineState,
+        attachments: GraphicPipelineAttachments
+    ) -> Self {
+        Self { name: name.to_owned(), shader, state, attachments }
     }
 }
 
@@ -1079,8 +1137,9 @@ impl DebuggableObject for CommonPipeline {
 
 /// Graphics pipeline using dynamic rendering (Vulkan 1.3+).
 pub struct GraphicPipeline {
+    desc: GraphicPipelineDesc,
     pipeline: CommonPipeline,
-    pub(crate) descriptor_layouts: Vec<Arc<DescriptorSetLayout>>,
+    descriptor_layouts: Vec<Arc<DescriptorSetLayout>>,
 }
 
 impl GraphicPipeline {
@@ -1104,17 +1163,23 @@ impl GraphicPipeline {
     ) -> Result<Self, vk::Result> {
         let descriptor_layout_refs = descriptor_layouts.iter().map(|l| l.as_ref()).collect::<Vec<_>>();
         let pipeline = CommonPipeline::new_graphic(name, device, desc, cache, &descriptor_layout_refs)?;
+
         Ok(Self {
+            desc: desc.clone(),
             descriptor_layouts: descriptor_layouts.into(),
             pipeline
         })
     }
 
     #[inline]
-    pub fn handle(&self) -> vk::Pipeline {
-        self.pipeline.pipeline
-    }
+    pub fn handle(&self) -> vk::Pipeline { self.pipeline.pipeline }
 
     #[inline]
     pub fn layout(&self) -> vk::PipelineLayout { self.pipeline.layout }
+
+    #[inline]
+    pub fn descriptor_layouts(&self) -> &[Arc<DescriptorSetLayout>] { &self.descriptor_layouts }
+
+    #[inline]
+    pub fn desc(&self) -> &GraphicPipelineDesc { &self.desc }
 }

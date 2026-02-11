@@ -3,8 +3,10 @@
 use ash::{vk};
 use std::collections::HashMap;
 use std::default::Default;
+use std::ops::{Range};
+use std::sync::Arc;
 use zenith_rhi_derive::DeviceObject;
-use crate::{GraphicPipeline, RenderDevice};
+use crate::{RenderDevice};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 use crate::shader::{ShaderBinding, ShaderReflection};
@@ -244,25 +246,27 @@ impl std::error::Error for DescriptorBindingError {}
 /// Shader resource binder that binds resources by name using shader reflection.
 pub struct DescriptorSetBinder<'a> {
     device: &'a RenderDevice,
-    pipeline: &'a GraphicPipeline,
     reflection: &'a ShaderReflection,
+    layouts: &'a [Arc<DescriptorSetLayout>],
     resource_ty_sizes: HashMap<vk::DescriptorType, u32>,
-    collector: DescriptorBindingCollector,
+    writer: DescriptorWriter,
+    set_range: Range<usize>,
 }
 
 impl<'a> DescriptorSetBinder<'a> {
     pub fn new(
         device: &'a RenderDevice,
-        pipeline: &'a GraphicPipeline,
         reflection: &'a ShaderReflection,
-    ) -> Result<Self, DescriptorBindingError> {
-        Ok(Self {
+        layouts: &'a [Arc<DescriptorSetLayout>],
+    ) -> Self {
+        Self {
             device,
-            pipeline,
             reflection,
+            layouts,
             resource_ty_sizes: Default::default(),
-            collector: Default::default(),
-        })
+            writer: Default::default(),
+            set_range: usize::MAX..0,
+        }
     }
 
     pub fn bind<T: BindableResource>(
@@ -274,21 +278,23 @@ impl<'a> DescriptorSetBinder<'a> {
             .ok_or_else(|| DescriptorBindingError::BindingNotFound(name.to_string()))?;
 
         // TODO: every binding will clone the name, try to avoid frequently cloning
-        self.collector.begin_binding(binding.name.clone(), DescriptorBindLocation {
+        self.writer.begin_binding(binding.name.clone(), DescriptorBindLocation {
             set: binding.set,
             binding: binding.binding,
             // TODO: support fixed-size array binding
             array_index: 0,
             ty: binding.descriptor_type,
         });
-        res.bind_to(&mut self.collector)?;
-        self.collector.end_binding();
+        res.bind_to(&mut self.writer)?;
+        self.writer.end_binding();
 
         *self.resource_ty_sizes.entry(binding.descriptor_type).or_insert(0) += 1;
+        self.set_range.start = self.set_range.start.min(binding.set as usize);
+        self.set_range.end = self.set_range.end.max((binding.set + 1) as usize);
         Ok(self)
     }
 
-    pub fn finish(self, device: &RenderDevice, first_set: u32) -> anyhow::Result<Vec<vk::DescriptorSet>, DescriptorBindingError> {
+    pub fn finish(self, device: &RenderDevice) -> anyhow::Result<(u32, Vec<vk::DescriptorSet>), DescriptorBindingError> {
          let pool_sizes = self.resource_ty_sizes.into_iter()
             .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
                 ty,
@@ -296,25 +302,26 @@ impl<'a> DescriptorSetBinder<'a> {
             })
             .collect::<Vec<_>>();
 
-        let layouts = &self.pipeline.descriptor_layouts[first_set as usize..];
+        let base_set = self.set_range.start as u32;
+        let layouts = &self.layouts[self.set_range];
         let pool = DescriptorPool::new("descriptor_pool", self.device, layouts.len() as u32, &pool_sizes, vk::DescriptorPoolCreateFlags::empty())
             .map_err(|e| DescriptorBindingError::AllocationFailed(e))?;
-        let descriptor_sets: Result<Vec<_>, _> = layouts.iter()
+        let sets: Result<Vec<_>, _> = layouts.iter()
             .map(|layout| {
                 pool.allocate(layout).map_err(DescriptorBindingError::AllocationFailed)
             })
             .collect();
         device.defer_release(pool);
-        let descriptor_sets = descriptor_sets?;
+        let sets = sets?;
 
-        let writes = self.collector.write_to(first_set, &descriptor_sets);
+        let writes = self.writer.write_to(base_set, &sets);
         if !writes.is_empty() {
             unsafe {
                 self.device.handle().update_descriptor_sets(&writes, &[]);
             }
         }
 
-        Ok(descriptor_sets)
+        Ok((base_set, sets))
     }
 }
 
@@ -327,13 +334,13 @@ pub(crate) struct DescriptorBindLocation {
 }
 
 #[derive(Debug, Default)]
-pub struct DescriptorBindingCollector {
+pub struct DescriptorWriter {
     current_binding: Option<(String, DescriptorBindLocation)>,
     buffer_bindings: HashMap<DescriptorBindLocation, vk::DescriptorBufferInfo>,
     texture_bindings: HashMap<DescriptorBindLocation, vk::DescriptorImageInfo>,
 }
 
-impl DescriptorBindingCollector {
+impl DescriptorWriter {
     #[inline]
     pub(crate) fn begin_binding(&mut self, debug_name: String, location: DescriptorBindLocation) {
         self.current_binding = Some((debug_name, location));
@@ -423,7 +430,7 @@ pub enum BindableResourceType {
 }
 
 pub trait BindableResource {
-    fn bind_to(&self, collector: &mut DescriptorBindingCollector) -> anyhow::Result<(), DescriptorBindingError>;
+    fn bind_to(&self, writer: &mut DescriptorWriter) -> anyhow::Result<(), DescriptorBindingError>;
     fn bind_key(&self) -> u64;
     fn ty(&self) -> BindableResourceType;
 }

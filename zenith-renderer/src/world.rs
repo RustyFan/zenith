@@ -5,23 +5,16 @@ use glam::{Mat4};
 use zenith_asset::{AssetHandle};
 use zenith_asset::material::Material;
 use zenith_asset::mesh::{MeshCollection, Mesh};
-use zenith_asset::texture::TextureFormat;
 use zenith_core::camera::{Camera, ViewData, WORLD_SPACE_UP};
 use zenith_core::math::{Degree};
-use zenith_rhi::{
-    vk, RenderDevice,
-    Buffer, BufferDesc, BufferState,
-    Shader, Texture, TextureDesc, TextureLayout, TextureState,
-    ImmediateCommandEncoder, UploadPool,
-    Sampler, SamplerDesc,
-};
-use zenith_rhi::pipeline::RasterizationStateBuilder;
+use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, BufferState, Shader, Texture, TextureDesc, TextureLayout, TextureState, ImmediateCommandEncoder, UploadPool, Sampler, SamplerDesc, GraphicPipelineDesc, GraphicPipelineAttachments, DepthStencilAttachmentDescBuilder, DepthStencilStateBuilder, BindlessHandle};
+use zenith_rhi::pipeline::{BlendStateBuilder};
 use zenith_rendergraph::{
-    ColorAttachmentDescBuilder, DepthStencilDesc,
+    ColorAttachmentDescBuilder,
     RenderGraphBuilder, RenderGraphResource, VertexLayout,
     GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
 };
-use crate::defer_shading::GBuffer;
+use crate::defer_shading::SceneTextures;
 use crate::lighting::DirectLightingRenderer;
 
 #[repr(C)]
@@ -35,21 +28,12 @@ pub struct Vertex {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct PushConstants {
-    // Column-major 4x4 (matches glam::Mat4::to_cols_array()).
     model: [f32; 16],
     base_color_factor: [f32; 4],
     base_color_tex: u32,
     mra_tex: u32,
     normal_tex: u32,
-    sampler_kind: u32,
-    flags: u32,
-    keep_normal_scale: f32,
 }
-
-const INVALID_BINDLESS: u32 = u32::MAX;
-const FLAG_HAS_BASE_COLOR_TEX: u32 = 1 << 0;
-const FLAG_HAS_MRA_TEX: u32 = 1 << 1;
-const FLAG_HAS_NORMAL_TEX: u32 = 1 << 2;
 
 #[derive(Clone)]
 struct GpuMaterial {
@@ -58,6 +42,10 @@ struct GpuMaterial {
     mra_tex: Option<Arc<Texture>>,
     normal_tex: Option<Arc<Texture>>,
     emissive_tex: Option<Arc<Texture>>,
+    base_color_tex_handle: BindlessHandle,
+    mra_tex_handle: BindlessHandle,
+    normal_tex_handle: BindlessHandle,
+    _emissive_tex_handle: BindlessHandle,
 }
 
 #[derive(Clone)]
@@ -79,9 +67,8 @@ pub struct WorldRenderer {
     meshes: Vec<GpuMesh>,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    // Fixed bindless sampler heap indices:
     // 0=LinearRepeat, 1=LinearClamp, 2=NearestRepeat, 3=NearestClamp
-    samplers: [Arc<Sampler>; 4],
+    _samplers: Vec<Arc<Sampler>>,
 
     direct_lighting_renderer: DirectLightingRenderer,
 }
@@ -133,13 +120,20 @@ impl WorldRenderer {
         let nearest_repeat = Arc::new(Sampler::new(device, &SamplerDesc::nearest())?);
         let nearest_clamp = Arc::new(Sampler::new(device, &SamplerDesc::nearest().with_address_mode(vk::SamplerAddressMode::CLAMP_TO_EDGE))?);
 
+        let mut pool = device.bindless_pool().lock();
+        pool.bind_sampler_at(0, linear_repeat.handle())?;
+        pool.bind_sampler_at(1, linear_clamp.handle())?;
+        pool.bind_sampler_at(2, nearest_repeat.handle())?;
+        pool.bind_sampler_at(3, nearest_clamp.handle())?;
+        pool.flush(device);
+
         Ok(Self {
             vertex_shader: Arc::new(vertex_shader),
             fragment_shader: Arc::new(fragment_shader),
             meshes: Vec::new(),
             width,
             height,
-            samplers: [linear_repeat, linear_clamp, nearest_repeat, nearest_clamp],
+            _samplers: vec![linear_repeat, linear_clamp, nearest_repeat, nearest_clamp],
             direct_lighting_renderer: DirectLightingRenderer::new(device, width, height)?,
         })
     }
@@ -203,12 +197,11 @@ impl WorldRenderer {
                         .get()
                         .ok_or_else(|| anyhow!("Texture not loaded: {:?}", tex_url.as_ref()))?;
 
-                    let format = texture_format_to_vk(&tex.format);
                     let desc = TextureDesc::new_2d(
                         &format!("world.tex.{name}"),
                         tex.width,
                         tex.height,
-                        format,
+                        tex.format.to_vk(),
                     ).with_transfer_dst_usage();
 
                     Ok(Some(Arc::new(Texture::new(device, &desc)?)))
@@ -224,12 +217,61 @@ impl WorldRenderer {
                 mat.emissive_tex.clone(),
             ];
 
+            let base_color_tex = create_texture("base_color", tex_urls[0].as_ref())?;
+            let mra_tex = create_texture("mra", tex_urls[1].as_ref())?;
+            let normal_tex = create_texture("normal", tex_urls[2].as_ref())?;
+            let emissive_tex = create_texture("emissive", tex_urls[3].as_ref())?;
+
+            let mut bindless_pool = device.bindless_pool().lock();
+
+            let base_color_tex_handle = if let Some(tex) = &base_color_tex {
+                let handle = bindless_pool.bind(
+                    tex.as_range(TextureLayout::ShaderReadOnly, .., ..),
+                )?;
+                handle
+            } else {
+                BindlessHandle::INVALID
+            };
+
+            let mra_tex_handle = if let Some(tex) = &mra_tex {
+                let handle = bindless_pool.bind(
+                    tex.as_range(TextureLayout::ShaderReadOnly, .., ..),
+                )?;
+                handle
+            } else {
+                BindlessHandle::INVALID
+            };
+
+            let normal_tex_handle = if let Some(tex) = &normal_tex {
+                let handle = bindless_pool.bind(
+                    tex.as_range(TextureLayout::ShaderReadOnly, .., ..),
+                )?;
+                handle
+            } else {
+                BindlessHandle::INVALID
+            };
+
+            let emissive_tex_handle = if let Some(tex) = &emissive_tex {
+                let handle = bindless_pool.bind(
+                    tex.as_range(TextureLayout::ShaderReadOnly, .., ..),
+                )?;
+                handle
+            } else {
+                BindlessHandle::INVALID
+            };
+
+            bindless_pool.flush(device);
+
             let material = GpuMaterial {
                 base_color_factor: mat.base_color,
-                base_color_tex: create_texture("base_color", tex_urls[0].as_ref())?,
-                mra_tex: create_texture("mra", tex_urls[1].as_ref())?,
-                normal_tex: create_texture("normal", tex_urls[2].as_ref())?,
-                emissive_tex: create_texture("emissive", tex_urls[3].as_ref())?,
+                base_color_tex,
+                mra_tex,
+                normal_tex,
+                emissive_tex,
+                base_color_tex_handle,
+                mra_tex_handle,
+                normal_tex_handle,
+                _emissive_tex_handle: emissive_tex_handle,
             };
 
             pending.push(PendingMeshUpload {
@@ -248,7 +290,6 @@ impl WorldRenderer {
         // 2. Upload data to gpu
         //------------------------------------------------------------------------------------------------
 
-        let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
         let mut upload_pool = UploadPool::new()?;
 
         let validate_texture_data_size = |tex: &zenith_asset::texture::Texture| -> anyhow::Result<()> {
@@ -273,8 +314,8 @@ impl WorldRenderer {
                 .get()
                 .ok_or_else(|| anyhow!("Mesh not loaded: {:?}", p.mesh_url.as_ref()))?;
 
-            upload_pool.enqueue_copy_buffer(device, p.gpu.vertex_buffer.as_range(..)?, mesh.vertices_bytes(), BufferState::Vertex)?;
-            upload_pool.enqueue_copy_buffer(device, p.gpu.index_buffer.as_range(..)?, mesh.indices_bytes(), BufferState::Index)?;
+            upload_pool.enqueue_copy_buffer(device, p.gpu.vertex_buffer.as_range(..), mesh.vertices_bytes(), BufferState::Vertex)?;
+            upload_pool.enqueue_copy_buffer(device, p.gpu.index_buffer.as_range(..), mesh.indices_bytes(), BufferState::Index)?;
 
             if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.base_color_tex, p.tex_urls[0].as_ref()) {
                 let tex_handle = AssetHandle::<zenith_asset::texture::Texture>::new(url.clone());
@@ -285,7 +326,7 @@ impl WorldRenderer {
                 validate_texture_data_size(&tex)?;
                 upload_pool.enqueue_upload_texture(
                     device,
-                    gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
+                    gpu_tex.as_range(TextureLayout::Undefined, .., ..),
                     tex.pixels.as_slice(),
                     TextureState::Sampled,
                 )?;
@@ -299,7 +340,7 @@ impl WorldRenderer {
                 validate_texture_data_size(&tex)?;
                 upload_pool.enqueue_upload_texture(
                     device,
-                    gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
+                    gpu_tex.as_range(TextureLayout::Undefined, .., ..),
                     tex.pixels.as_slice(),
                     TextureState::Sampled,
                 )?;
@@ -313,7 +354,7 @@ impl WorldRenderer {
                 validate_texture_data_size(&tex)?;
                 upload_pool.enqueue_upload_texture(
                     device,
-                    gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
+                    gpu_tex.as_range(TextureLayout::Undefined, .., ..),
                     tex.pixels.as_slice(),
                     TextureState::Sampled,
                 )?;
@@ -327,13 +368,14 @@ impl WorldRenderer {
                 validate_texture_data_size(&tex)?;
                 upload_pool.enqueue_upload_texture(
                     device,
-                    gpu_tex.as_range(TextureLayout::Undefined, .., ..)?,
+                    gpu_tex.as_range(TextureLayout::Undefined, .., ..),
                     tex.pixels.as_slice(),
                     TextureState::Sampled,
                 )?;
             }
         }
 
+        let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
         upload_pool.flush(&immediate, device)?;
         self.meshes.extend(pending.into_iter().map(|p| p.gpu));
 
@@ -350,8 +392,8 @@ impl WorldRenderer {
             BufferDesc::uniform("view", size_of::<GpuViewData>() as _)
         );
 
-        let (gbuffer, scene_depth) = self.render_meshes(builder, camera, &view);
-        self.direct_lighting_renderer.render(builder, gbuffer, scene_depth, &view, output);
+        let scene_textures = self.render_meshes(builder, camera, &view);
+        self.direct_lighting_renderer.render(builder, scene_textures, &view, output);
     }
 
     fn render_meshes(
@@ -359,13 +401,32 @@ impl WorldRenderer {
         builder: &mut RenderGraphBuilder,
         camera: &Camera,
         view: &RenderGraphResource<Buffer>,
-    ) -> (GBuffer, RenderGraphResource<Texture>) {
-        let mut depth = builder.create(
-            TextureDesc::new_depth("scene.depth", self.width, self.height)
-                .with_additional_usage(vk::ImageUsageFlags::SAMPLED)
-        );
+    ) -> SceneTextures {
+        let mut scene_textures = SceneTextures::new(builder, self.width, self.height);
 
-        let mut gbuffer = GBuffer::new(builder, self.width, self.height);
+        let shader = GraphicShaderInputBuilder::default()
+            .vertex_shader(self.vertex_shader.clone())
+            .fragment_shader(self.fragment_shader.clone())
+            .vertex_layout::<Vertex>()
+            .build()
+            .unwrap();
+
+        let state = GraphicPipelineStateBuilder::default()
+            .depth_stencil(DepthStencilStateBuilder::default()
+                .depth_test_enable(true)
+                .depth_write_enable(true)
+                .build().unwrap())
+            .push_blend_state(BlendStateBuilder::default().build().unwrap())
+            .push_blend_state(BlendStateBuilder::default().build().unwrap())
+            .build();
+
+        let attachments = GraphicPipelineAttachments {
+            color_formats: vec![vk::Format::R8G8B8A8_UNORM, vk::Format::R8G8B8A8_UNORM],
+            depth_format: Some(vk::Format::D32_SFLOAT),
+            stencil_format: None,
+        };
+
+        let pipeline_desc = GraphicPipelineDesc::new("gbuffer", shader, state, attachments);
 
         // Import buffers first (RenderGraphBuilder is mutably borrowed when a node builder exists).
         let mut imported = Vec::with_capacity(self.meshes.len());
@@ -377,10 +438,13 @@ impl WorldRenderer {
 
         let mut node = builder.add_graphic_node("gbuffer");
 
-        let view = node.read(&view, BufferState::Uniform);
-        let gbuffer_base_rt = node.write(&mut gbuffer.base_color, TextureState::Color);
-        let gbuffer_nmr_rt = node.write(&mut gbuffer.normal_mra, TextureState::Color);
-        let depth_rt = node.write(&mut depth, TextureState::DepthStencil);
+        // Register pipeline and get handle
+        let pipeline_handle = node.register_pipeline(pipeline_desc.clone());
+
+        let view = node.read(&view, BufferState::StorageRead);
+        let gbuffer_base_rt = node.write(&mut scene_textures.base_color, TextureState::Color);
+        let gbuffer_nmr_rt = node.write(&mut scene_textures.normal_mra, TextureState::Color);
+        let depth_rt = node.write(&mut scene_textures.depth, TextureState::DepthStencil);
 
         // Import buffers and capture per-mesh draw info.
         let mut draws = Vec::with_capacity(self.meshes.len());
@@ -391,173 +455,44 @@ impl WorldRenderer {
             draws.push((vb, ib, index_count, model, material));
         }
 
-        let shader = GraphicShaderInputBuilder::default()
-            .vertex_shader(self.vertex_shader.clone())
-            .fragment_shader(self.fragment_shader.clone())
-            .vertex_layout::<Vertex>()
-            .build()
-            .unwrap();
-
-        let base_color_info = ColorAttachmentDescBuilder::default()
-            .clear_input()
-            .clear_value([0.05, 0.05, 0.05, 1.0])
-            .build()
-            .unwrap();
-        let normal_info = ColorAttachmentDescBuilder::default()
-            .clear_input()
-            .clear_value([0.5, 0.5, 1.0, 1.0])
-            .build()
-            .unwrap();
-
-        let depth_info = DepthStencilDesc {
-            depth_test_enable: true,
-            depth_write_enable: true,
-            // zenith-core camera uses reverse-Z projection -> GREATER with clear=0
-            depth_compare_op: vk::CompareOp::GREATER,
-            depth_load_op: vk::AttachmentLoadOp::CLEAR,
-            depth_store_op: vk::AttachmentStoreOp::STORE,
-            depth_clear_value: 0.0,
-            ..Default::default()
-        };
-
-        let state = GraphicPipelineStateBuilder::default()
-            .rasterization(RasterizationStateBuilder::default().build().unwrap())
-            .depth_stencil(depth_info.clone())
-            .build();
-
-        {
-            let mut binder = node.pipeline(shader, state);
-            binder.push_color(gbuffer_base_rt, base_color_info);
-            binder.push_color(gbuffer_nmr_rt, normal_info);
-            binder.depth(depth_rt, depth_info);
-            binder.finish();
-        }
-
-        let samplers = self.samplers.clone();
-
         let view_data = GpuViewData::from_view_data(&camera.view_data());
         let width = self.width;
         let height = self.height;
         node.execute(move |ctx| {
-            let extent = vk::Extent2D { width, height };
+            let view_range = ctx.get(&view).as_range(..);
+            view_range.write(bytemuck::bytes_of(&view_data))
+                .map_err(|e| anyhow!("failed to write view buffer: {e:?}"))?;
+
+            ctx.bind_pipeline(pipeline_handle)
+                .bind_raw(0, &[ctx.device().bindless_pool().lock().set()], &[])
+                .bind("view", view_range)?;
+
+            ctx.begin_rendering(
+                (width, height),
+                &[
+                    (gbuffer_base_rt, ColorAttachmentDescBuilder::default()
+                        .clear_input().clear_value([0.05, 0.05, 0.05, 1.0])
+                        .build().unwrap()),
+                    (gbuffer_nmr_rt, ColorAttachmentDescBuilder::default()
+                        .clear_input().clear_value([0.5, 0.5, 1.0, 1.0])
+                        .build().unwrap())
+                ],
+                Some((depth_rt, DepthStencilAttachmentDescBuilder::default().clear_depth_input().build().unwrap())),
+            );
+
             let encoder = ctx.encoder();
-
-            // Bind all bindless resources via direct pool access (set0 bound at command buffer start).
-            let mut draw_state: Vec<(u32, Mat4, [f32; 4], u32, u32, u32, u32)> = Vec::with_capacity(draws.len());
-            {
-                let mut pool = ctx.device().bindless_pool().lock();
-
-                // Ensure our fixed samplers exist in heap[0..3].
-                pool.bind_sampler_at(0, samplers[0].handle())?;
-                pool.bind_sampler_at(1, samplers[1].handle())?;
-                pool.bind_sampler_at(2, samplers[2].handle())?;
-                pool.bind_sampler_at(3, samplers[3].handle())?;
-
-                // Bind textures (idempotent).
-                for (_vb, _ib, index_count, model, material) in draws.iter() {
-                    let mut flags = 0;
-                    let mut base_color_tex = INVALID_BINDLESS;
-                    let mut mra_tex = INVALID_BINDLESS;
-                    let mut normal_tex = INVALID_BINDLESS;
-
-                    if let Some(t) = &material.base_color_tex {
-                        let handle = pool.bind(
-                            t.as_range(TextureLayout::ShaderReadOnly, .., ..)
-                                .map_err(|e| anyhow!("failed to create base_color texture range: {e:?}"))?,
-                        )?;
-                        base_color_tex = *handle;
-                        flags |= FLAG_HAS_BASE_COLOR_TEX;
-                    }
-
-                    if let Some(t) = &material.mra_tex {
-                        let handle = pool.bind(
-                            t.as_range(TextureLayout::ShaderReadOnly, .., ..)
-                                .map_err(|e| anyhow!("failed to create mra texture range: {e:?}"))?,
-                        )?;
-                        mra_tex = *handle;
-                        flags |= FLAG_HAS_MRA_TEX;
-                    }
-                    if let Some(t) = &material.normal_tex {
-                        let handle = pool.bind(
-                            t.as_range(TextureLayout::ShaderReadOnly, .., ..)
-                                .map_err(|e| anyhow!("failed to create normal texture range: {e:?}"))?,
-                        )?;
-                        normal_tex = *handle;
-                        flags |= FLAG_HAS_NORMAL_TEX;
-                    }
-                    if let Some(t) = &material.emissive_tex {
-                        let _ = pool.bind(
-                            t.as_range(TextureLayout::ShaderReadOnly, .., ..)
-                                .map_err(|e| anyhow!("failed to create emissive texture range: {e:?}"))?,
-                        )?;
-                    }
-
-                    draw_state.push((
-                        *index_count,
-                        *model,
-                        material.base_color_factor,
-                        base_color_tex,
-                        mra_tex,
-                        normal_tex,
-                        flags,
-                    ));
-                }
-
-                // Flush all pending descriptor writes into the pool-owned bindless set.
-                pool.flush(ctx.device());
-                ctx.bind_descriptor_sets(0, std::slice::from_ref(&pool.set()));
-            }
-
-            // Write and bind view buffer.
-            let view = ctx.get(&view)
-                .as_range(..)
-                .map_err(|e| anyhow::anyhow!("failed to create view buffer range: {:?}", e))?;
-            view.write(bytemuck::bytes_of(&view_data))
-                .map_err(|e| anyhow::anyhow!("failed to write view buffer: {:?}", e))?;
-
-            let mut binder = ctx.create_binder();
-            binder.bind("view", view)?;
-            // first_set=1: skip set 0 (bindless, managed by BindlessPool)
-            let sets = binder.finish(ctx.device(), 1).map_err(|e| anyhow::anyhow!("descriptor set finish failed: {e}"))?;
-            ctx.bind_descriptor_sets(1, &sets);
-
-            ctx.begin_rendering(extent);
-            ctx.bind_pipeline();
-
-            let viewport = vk::Viewport {
-                x: 0.0,
-                // Flip Y in rasterization (Vulkan supports negative viewport height).
-                // This avoids baking Y-flip into the projection matrix.
-                y: height as f32,
-                width: width as f32,
-                height: -(height as f32),
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            encoder.set_viewport(0, &[viewport]);
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            };
-            encoder.set_scissor(0, &[scissor]);
-
-            for (i, (index_count, model, base_color_factor, base_color_tex, mra_tex, normal_tex, flags)) in draw_state.into_iter().enumerate() {
-                let (vb_acc, ib_acc, _, _, _) = &draws[i];
-
+            for (vb, ib, index_count, model, material) in draws.into_iter() {
                 let pc = PushConstants {
                     model: model.to_cols_array(),
-                    base_color_factor,
-                    base_color_tex,
-                    mra_tex,
-                    normal_tex,
-                    sampler_kind: 0, // LinearRepeat
-                    flags,
-                    keep_normal_scale: 0.0,
+                    base_color_factor: material.base_color_factor,
+                    base_color_tex: material.base_color_tex_handle.raw(),
+                    mra_tex: material.mra_tex_handle.raw(),
+                    normal_tex: material.normal_tex_handle.raw(),
                 };
-                ctx.push_constants(0, &pc);
+                ctx.push_constants(pipeline_handle, 0, &pc);
 
-                encoder.bind_vertex_buffers(0, &[ctx.get(vb_acc).handle()], &[0]);
-                encoder.bind_index_buffer(ctx.get(ib_acc).handle(), 0, vk::IndexType::UINT32);
+                encoder.bind_vertex_buffers(0, &[ctx.get(&vb).handle()], &[0]);
+                encoder.bind_index_buffer(ctx.get(&ib).handle(), 0, vk::IndexType::UINT32);
                 encoder.draw_indexed(index_count, 1, 0, 0, 0);
             }
 
@@ -565,22 +500,6 @@ impl WorldRenderer {
             Ok(())
         });
 
-        (gbuffer, depth)
+        scene_textures
     }
 }
-
-fn texture_format_to_vk(format: &TextureFormat) -> vk::Format {
-    match *format {
-        TextureFormat::R8 => vk::Format::R8_UNORM,
-        TextureFormat::R8G8 => vk::Format::R8G8_UNORM,
-        TextureFormat::R8G8B8A8 => vk::Format::R8G8B8A8_SRGB,
-        TextureFormat::R16 => vk::Format::R16_UNORM,
-        TextureFormat::R16G16 => vk::Format::R16G16_UNORM,
-        TextureFormat::R16G16B16A16 => vk::Format::R16G16B16A16_UNORM,
-        TextureFormat::R32G32B32A32Float => vk::Format::R32G32B32A32_SFLOAT,
-        TextureFormat::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
-        TextureFormat::Bc7Unorm => vk::Format::BC7_UNORM_BLOCK,
-        TextureFormat::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
-    }
-}
-

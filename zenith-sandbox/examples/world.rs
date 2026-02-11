@@ -133,7 +133,7 @@ impl RenderableApp for WorldApp {
         self.world_renderer
             .as_mut()
             .unwrap()
-            .render(builder, &self.camera, &mut output,);
+            .render(builder, &self.camera, &mut output);
     }
 }
 

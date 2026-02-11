@@ -1,29 +1,18 @@
-use zenith_rhi::{ColorAttachmentDesc, DepthStencilDesc, GraphicPipelineDesc};
-use crate::resource::GraphResourceId;
+use zenith_rhi::{GraphicPipelineDesc};
 use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext};
 use crate::builder::ResourceAccessStorage;
 
-#[derive(Default, Debug)]
-pub struct ComputePipelineDescriptor {
-}
-
-impl ComputePipelineDescriptor {
-    #[allow(dead_code)]
-    pub fn name(&self) -> &str {
-        "Unknown"
-    }
-}
+/// Handle to a registered pipeline within a node
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GraphicPipelineHandle(pub(crate) u32);
 
 pub(crate) enum NodePipelineState {
     Graphic {
-        pipeline_desc: Option<GraphicPipelineDesc>,
-        color_attachments: Vec<(GraphResourceId, ColorAttachmentDesc)>,
-        depth_attachment: Option<(GraphResourceId, DepthStencilDesc)>,
+        pipeline_descs: Vec<GraphicPipelineDesc>,
         job_functor: Option<Box<dyn FnOnce(&mut GraphicNodeExecutionContext) -> anyhow::Result<()>>>,
     },
     #[allow(dead_code)]
     Compute {
-        pipeline_desc: ComputePipelineDescriptor,
         job_functor: Option<Box<dyn FnOnce(&mut GraphicNodeExecutionContext) -> anyhow::Result<()>>>,
     },
     Lambda {
@@ -34,7 +23,9 @@ pub(crate) enum NodePipelineState {
 impl NodePipelineState {
     pub(crate) fn valid(&self) -> bool {
         match self {
-            NodePipelineState::Graphic { pipeline_desc, job_functor, .. } => pipeline_desc.is_some() && job_functor.is_some(),
+            NodePipelineState::Graphic { pipeline_descs, job_functor, .. } => {
+                !pipeline_descs.is_empty() && job_functor.is_some()
+            }
             NodePipelineState::Compute { .. } => {
                 false
             }

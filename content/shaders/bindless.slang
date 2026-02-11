@@ -13,6 +13,10 @@ func bindless_type(uint handle) -> uint {
     return handle >> BINDLESS_TYPE_SHIFT;
 }
 
+func is_valid_bindless_handle(uint handle) -> bool {
+    return handle != (~0);
+}
+
 [[vk::binding(0, 0)]]
 Texture2D bindless_texture_heap[];
 
@@ -49,9 +53,13 @@ enum SamplerKind : uint {
     NearestClamp  = 3,
 };
 
+func get_sampler(kind: SamplerKind) -> SamplerState {
+    return bindless_sampler_heap[NonUniformResourceIndex((uint)kind)];
+}
+
 func sample_bindless_texture(uint handle, SamplerKind sampler_kind, float2 uv) -> float4 {
     const uint index = bindless_index(handle);
     const Texture2D tex = bindless_texture_heap[NonUniformResourceIndex(index)];
-    const SamplerState samp = bindless_sampler_heap[NonUniformResourceIndex((uint)sampler_kind)];
-    return tex.Sample(samp, uv);
+    const SamplerState sampler = bindless_sampler_heap[NonUniformResourceIndex((uint)sampler_kind)];
+    return tex.Sample(sampler, uv);
 }

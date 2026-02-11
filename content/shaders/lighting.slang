@@ -27,17 +27,17 @@ VSOutput main(VSInput input) {
     return output;
 }
 
-struct PushConstants {
-    uint gbuffer_base;
-    uint gbuffer_nmr;
-    uint scene_depth;
-};
-
-[[vk::push_constant]]
-ConstantBuffer<PushConstants> constant;
-
 [[vk::binding(0, 1)]]
 ConstantBuffer<ViewData> view;
+
+[[vk::binding(1, 1)]]
+Texture2D<float4> base_color_tex;
+
+[[vk::binding(2, 1)]]
+Texture2D<float4> normal_mra_tex;
+
+[[vk::binding(3, 1)]]
+Texture2D<float> depth_tex;
 
 struct PSOutput {
     float4 output : SV_Target;
@@ -45,13 +45,14 @@ struct PSOutput {
 
 [shader("fragment")]
 PSOutput main(PSInput input) {
-    let depth = sample_bindless_texture(constant.scene_depth, SamplerKind::NearestClamp, input.uv).r;
+    let depth = depth_tex.Sample(get_sampler(SamplerKind::NearestClamp), input.uv).r;
     if (depth == 0.0) {
         discard;
     }
 
-    let base = sample_bindless_texture(constant.gbuffer_base, SamplerKind::LinearClamp, input.uv);
-    let nmr = sample_bindless_texture(constant.gbuffer_nmr, SamplerKind::LinearClamp, input.uv);
+    let sampler = get_sampler(SamplerKind::LinearClamp);
+    let base = base_color_tex.Sample(sampler, input.uv);
+    let nmr = normal_mra_tex.Sample(sampler, input.uv);
 
     float3 n;
     float metallic;

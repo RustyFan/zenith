@@ -7,7 +7,7 @@ use std::ops::RangeBounds;
 use ash::vk::Handle;
 use zenith_core::collections::DefaultHasher;
 use zenith_rhi_derive::DeviceObject;
-use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindingCollector};
+use crate::descriptor::{BindableResource, BindableResourceType, DescriptorWriter};
 use crate::{RenderDevice, DescriptorBindingError};
 use crate::device::{DebuggableObject};
 use crate::utility::{find_memory_type, normalize_range_u64};
@@ -211,16 +211,15 @@ impl Buffer {
         Ok(buf)
     }
 
-    pub fn as_range<R: RangeBounds<u64>>(&self, range: R) -> Result<BufferRange<'_>, vk::Result> {
-        let (offset, size) = normalize_range_u64(range, self.desc.size as u64)?;
-        Ok(BufferRange {
+    pub fn as_range<R: RangeBounds<u64>>(&self, range: R) -> BufferRange<'_> {
+        let (offset, size) = normalize_range_u64(range, self.desc.size as u64).unwrap();
+        BufferRange {
             buffer: self,
             offset,
             size,
-        })
+        }
     }
 
-    /// Get buffer device address (requires BUFFER_DEVICE_ADDRESS usage flag).
     pub fn device_address(&self) -> vk::DeviceAddress {
         let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
         unsafe { self.device.get_buffer_device_address(&info) }
@@ -335,8 +334,8 @@ impl<'a> Hash for BufferRange<'a> {
 }
 
 impl BindableResource for BufferRange<'_> {
-    fn bind_to(&self, collector: &mut DescriptorBindingCollector) -> anyhow::Result<(), DescriptorBindingError> {
-        collector.bind_buffer(
+    fn bind_to(&self, writer: &mut DescriptorWriter) -> anyhow::Result<(), DescriptorBindingError> {
+        writer.bind_buffer(
             vk::DescriptorBufferInfo::default()
                 .buffer(self.buffer.handle())
                 .offset(self.offset)

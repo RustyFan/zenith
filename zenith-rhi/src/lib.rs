@@ -42,7 +42,8 @@ pub use descriptor::{
 pub use device::RenderDevice;
 pub use pipeline::{
     ColorAttachmentDesc, ColorAttachmentDescBuilder, ColorAttachmentDescBuilderError,
-    DepthStencilDesc, DepthStencilDescBuilder, DepthStencilDescBuilderError,
+    DepthStencilState, DepthStencilStateBuilder, DepthStencilStateBuilderError,
+    DepthStencilAttachmentDesc, DepthStencilAttachmentDescBuilder, DepthStencilAttachmentDescBuilderError,
     GraphicPipeline, GraphicPipelineDesc, GraphicPipelineState, GraphicPipelineStateBuilder,
     GraphicShaderInput, GraphicShaderInputBuilder, GraphicShaderInputBuildError,
     GraphicPipelineAttachments,

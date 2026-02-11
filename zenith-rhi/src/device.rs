@@ -159,8 +159,15 @@ impl RenderDevice {
         const MAX_INDEX_29: u32 = (1u32 << 29) - 1;
         let clamp29 = |v: u32| v.min(MAX_INDEX_29);
 
+        // Per-stage limit: total sampled images across ALL descriptor sets in a stage must be <= this.
+        // Bindless set uses part of it; reserve some for other sets (e.g. material/camera bindings).
+        const RESERVE_PER_STAGE_SAMPLED: u32 = 32;
+        let max_per_stage_sampled = desc_index_props.max_per_stage_descriptor_update_after_bind_sampled_images;
+        let max_textures_capped = clamp29(desc_index_props.max_descriptor_set_update_after_bind_sampled_images)
+            .min(max_per_stage_sampled.saturating_sub(RESERVE_PER_STAGE_SAMPLED));
+
         let bindless_caps = BindlessCaps {
-            max_textures: clamp29(desc_index_props.max_descriptor_set_update_after_bind_sampled_images),
+            max_textures: max_textures_capped,
             max_uniform_buffers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_uniform_buffers),
             max_storage_buffers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_storage_buffers),
             max_samplers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_samplers),

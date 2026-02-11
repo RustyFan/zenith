@@ -21,19 +21,12 @@ struct VSOutput {
     PSInput psout;
 };
 
-static const uint FLAG_HAS_BASE_COLOR_TEX = 1u << 0;
-static const uint FLAG_HAS_MRA_TEX = 1u << 1;
-static const uint FLAG_HAS_NORMAL_TEX = 1u << 2;
-
 struct PushConstants {
     float4x4 model;
     float4 base_color_factor;
     uint base_color_tex;
     uint mra_tex;
     uint normal_tex;
-    uint sampler_kind;
-    uint flags;
-    float keep_normal_scale;
 };
 
 [[vk::push_constant]]
@@ -61,20 +54,19 @@ struct PSOutput {
 [shader("fragment")]
 PSOutput main(PSInput input) {
     var base = constant.base_color_factor;
-
-    if ((constant.flags & FLAG_HAS_BASE_COLOR_TEX) != 0u) {
+    if (is_valid_bindless_handle(constant.base_color_tex)) {
         base *= sample_bindless_texture(constant.base_color_tex, SamplerKind::LinearRepeat, input.uv);
     }
 
     var normal_ws = normalize(input.normal);
-    if ((constant.flags & FLAG_HAS_NORMAL_TEX) != 0u) {
+    if (is_valid_bindless_handle(constant.normal_tex)) {
         float2 packed_normal = sample_bindless_texture(constant.normal_tex, SamplerKind::LinearRepeat, input.uv).xy;
         normal_ws = decode_normal_rg(packed_normal);
     }
 
     var metallic = 0.0;
     var roughness = 1.0;
-    if ((constant.flags & FLAG_HAS_MRA_TEX) != 0u) {
+    if (is_valid_bindless_handle(constant.mra_tex)) {
         float3 mra = sample_bindless_texture(constant.mra_tex, SamplerKind::LinearRepeat, input.uv).rgb;
         metallic = mra.b;
         roughness = mra.g;

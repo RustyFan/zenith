@@ -10,7 +10,7 @@ use zenith_core::collections::DefaultHasher;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_rhi_derive::DeviceObject;
 use crate::{DescriptorBindingError, RenderDevice, TextureLayout};
-use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindingCollector};
+use crate::descriptor::{BindableResource, BindableResourceType, DescriptorWriter};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 use crate::utility::{find_memory_type, normalize_range_u32};
@@ -382,11 +382,11 @@ impl Texture {
         texture
     }
 
-    pub fn as_range<R: RangeBounds<u32>>(&self, layout: TextureLayout, mipmaps: R, levels: R) -> Result<TextureRange<'_>, vk::Result> {
-        let (base_mip, num_mips) = normalize_range_u32(mipmaps, self.desc.mip_levels)?;
-        let (base_layer, num_layers) = normalize_range_u32(levels, self.desc.array_layers)?;
+    pub fn as_range<R: RangeBounds<u32>>(&self, layout: TextureLayout, mipmaps: R, levels: R) -> TextureRange<'_> {
+        let (base_mip, num_mips) = normalize_range_u32(mipmaps, self.desc.mip_levels).unwrap();
+        let (base_layer, num_layers) = normalize_range_u32(levels, self.desc.array_layers).unwrap();
 
-        Ok(TextureRange {
+        TextureRange {
             texture: self,
             layout,
             subresource: TextureSubresource {
@@ -395,7 +395,7 @@ impl Texture {
                 base_layer,
                 num_layers,
             },
-        })
+        }
     }
 
     #[inline]
@@ -525,7 +525,6 @@ impl<'a> TextureRange<'a> {
     pub fn texture(&self) -> &'a Texture { self.texture }
 
     pub fn view(&self) -> Result<vk::ImageView, vk::Result> {
-        // Cached per-subresource view.
         if let Some(v) = { self.texture.views.borrow().get(&self.subresource).copied() } {
             return Ok(v);
         }
@@ -573,8 +572,8 @@ impl<'a> Hash for TextureRange<'a> {
 }
 
 impl BindableResource for TextureRange<'_> {
-    fn bind_to(&self, collector: &mut DescriptorBindingCollector) -> anyhow::Result<(), DescriptorBindingError> {
-        collector.bind_texture(
+    fn bind_to(&self, writer: &mut DescriptorWriter) -> anyhow::Result<(), DescriptorBindingError> {
+        writer.bind_texture(
             vk::DescriptorImageInfo::default()
                 .image_view(self.view().map_err(|err| DescriptorBindingError::MissingTextureView(err, self.texture.desc.name.to_owned()))?)
                 .sampler(vk::Sampler::null())

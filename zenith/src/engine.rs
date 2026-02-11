@@ -103,6 +103,7 @@ impl Engine {
         let mut builder = RenderGraphBuilder::new();
         let render_context = RenderContext::new(
             &mut builder,
+            &self.render_device,
             &self.swapchain,
             frame_index,
         );
