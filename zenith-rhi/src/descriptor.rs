@@ -1,10 +1,12 @@
 //! Vulkan Descriptor - descriptor pool, layout, and resource binding.
 
 use ash::{vk};
-use std::collections::HashMap;
+use zenith_core::collections::HashMap;
 use std::default::Default;
+use std::hash::{Hash, Hasher};
 use std::ops::{Range};
 use std::sync::Arc;
+use ash::vk::Handle;
 use zenith_rhi_derive::DeviceObject;
 use crate::{RenderDevice};
 use crate::device::DebuggableObject;
@@ -223,7 +225,6 @@ impl DebuggableObject for DescriptorPool {
 #[derive(Debug)]
 pub enum DescriptorBindingError {
     BindingNotFound(String),
-    TypeMismatch { name: String, expected: vk::DescriptorType },
     MissingTextureView(vk::Result, String),
     AllocationFailed(vk::Result),
 }
@@ -232,9 +233,6 @@ impl std::fmt::Display for DescriptorBindingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DescriptorBindingError::BindingNotFound(name) => write!(f, "Binding '{}' not found in shader reflection", name),
-            DescriptorBindingError::TypeMismatch { name, expected } => {
-                write!(f, "Type mismatch for '{}': expected {:?}", name, expected)
-            }
             DescriptorBindingError::MissingTextureView(e, name) => { write!(f, "Missing texture view for: {:?}. {:?}", name, e) }
             DescriptorBindingError::AllocationFailed(e) => write!(f, "Descriptor set allocation failed: {:?}", e),
         }
@@ -272,21 +270,16 @@ impl<'a> DescriptorSetBinder<'a> {
     pub fn bind<T: BindableResource>(
         &mut self,
         name: &str,
-        res: T,
+        res: &T,
     ) -> Result<&mut Self, DescriptorBindingError> {
         let binding = self.reflection.find_binding(name)
             .ok_or_else(|| DescriptorBindingError::BindingNotFound(name.to_string()))?;
 
-        // TODO: every binding will clone the name, try to avoid frequently cloning
-        self.writer.begin_binding(binding.name.clone(), DescriptorBindLocation {
+        self.writer.add_binding(DescriptorBindLocation {
             set: binding.set,
             binding: binding.binding,
-            // TODO: support fixed-size array binding
-            array_index: 0,
-            ty: binding.descriptor_type,
-        });
-        res.bind_to(&mut self.writer)?;
-        self.writer.end_binding();
+            expected_ty: binding.descriptor_type,
+        }, res);
 
         *self.resource_ty_sizes.entry(binding.descriptor_type).or_insert(0) += 1;
         self.set_range.start = self.set_range.start.min(binding.set as usize);
@@ -326,131 +319,134 @@ impl<'a> DescriptorSetBinder<'a> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
-pub(crate) struct DescriptorBindLocation {
-    pub(crate) set: u32,
-    pub(crate) binding: u32,
-    pub(crate) array_index: u32,
-    pub(crate) ty: vk::DescriptorType,
+pub struct DescriptorBindLocation {
+    pub set: u32,
+    pub binding: u32,
+    pub expected_ty: vk::DescriptorType,
 }
 
 #[derive(Debug, Default)]
 pub struct DescriptorWriter {
-    current_binding: Option<(String, DescriptorBindLocation)>,
-    buffer_bindings: HashMap<DescriptorBindLocation, vk::DescriptorBufferInfo>,
-    texture_bindings: HashMap<DescriptorBindLocation, vk::DescriptorImageInfo>,
+    bindings: Vec<(DescriptorBindLocation, ResourceBinding)>,
 }
 
 impl DescriptorWriter {
-    #[inline]
-    pub(crate) fn begin_binding(&mut self, debug_name: String, location: DescriptorBindLocation) {
-        self.current_binding = Some((debug_name, location));
+    pub fn add_binding<T: BindableResource>(&mut self, location: DescriptorBindLocation, res: &T) {
+        let binding = res.as_binding();
+        self.add_binding_raw(location, binding);
+    }
+
+    pub fn add_binding_raw(&mut self, location: DescriptorBindLocation, binding: ResourceBinding) {
+        self.bindings.push((location, binding));
     }
 
     #[inline]
-    pub(crate) fn end_binding(&mut self) {
-        self.current_binding = None;
-    }
-
-    pub fn bind_buffer(&mut self, info: vk::DescriptorBufferInfo) -> anyhow::Result<(), DescriptorBindingError> {
-        if let Some((name, context)) = &self.current_binding {
-            if !is_buffer(context.ty) {
-                return Err(DescriptorBindingError::TypeMismatch {
-                    name: name.clone(),
-                    expected: context.ty,
-                });
-            }
-
-            *self.buffer_bindings.entry(context.clone()).or_insert(info) = info;
-        }
-        Ok(())
-    }
-
-    pub fn bind_texture(&mut self, info: vk::DescriptorImageInfo) -> anyhow::Result<(), DescriptorBindingError> {
-        if let Some((name, context)) = &self.current_binding {
-            if !is_texture(context.ty) {
-                return Err(DescriptorBindingError::TypeMismatch {
-                    name: name.clone(),
-                    expected: context.ty,
-                });
-            }
-
-            *self.texture_bindings.entry(context.clone()).or_insert(info) = info;
-        }
-        Ok(())
-    }
-
     pub fn num_bindings(&self) -> usize {
-        self.buffer_bindings.len() + self.texture_bindings.len()
+        self.bindings.len()
     }
 
+    #[inline]
     pub fn clear(&mut self) {
-        self.end_binding();
-        self.buffer_bindings.clear();
-        self.texture_bindings.clear();
+        self.bindings.clear();
     }
 
     // TODO: buffer descriptor infos and texture descriptor infos will have N-to-1 relationship for fixed-sized descriptor array
-    pub fn write_to(&self, base_set: u32, descriptor_sets: &[vk::DescriptorSet]) -> Vec<vk::WriteDescriptorSet> {
-        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::with_capacity(self.buffer_bindings.len() + self.texture_bindings.len());
+    pub fn write_to<'a>(&'a self, base_set: u32, descriptor_sets: &[vk::DescriptorSet]) -> Vec<vk::WriteDescriptorSet<'a>> {
+        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::with_capacity(self.num_bindings());
 
-        for (location, info) in &self.buffer_bindings {
+        for (location, info) in &self.bindings {
             assert!(location.set - base_set < descriptor_sets.len() as _);
 
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_sets[(location.set - base_set) as usize])
-                .dst_binding(location.binding)
-                .dst_array_element(location.array_index)
-                .descriptor_type(location.ty)
-                .buffer_info(std::slice::from_ref(&info));
-
-            writes.push(write);
-        }
-
-        for (location, info) in &self.texture_bindings {
-            assert!(location.set - base_set < descriptor_sets.len() as _);
-
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_sets[(location.set - base_set) as usize])
-                .dst_binding(location.binding)
-                .dst_array_element(location.array_index)
-                .descriptor_type(location.ty)
-                .image_info(std::slice::from_ref(&info));
-
-            writes.push(write);
+            match info {
+                ResourceBinding::Buffer(buf_info) => {
+                    let write = vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_sets[(location.set - base_set) as usize])
+                        .dst_binding(location.binding)
+                        .dst_array_element(0)
+                        .descriptor_type(location.expected_ty)
+                        .buffer_info(std::slice::from_ref(&buf_info));
+                    writes.push(write);
+                }
+                ResourceBinding::Texture(tex_info) |
+                ResourceBinding::Sampler(tex_info) => {
+                    let write = vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_sets[(location.set - base_set) as usize])
+                        .dst_binding(location.binding)
+                        .dst_array_element(0)
+                        .descriptor_type(location.expected_ty)
+                        .image_info(std::slice::from_ref(&tex_info));
+                    writes.push(write);
+                }
+                ResourceBinding::BufferArray(base, infos) => {
+                    let write = vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_sets[(location.set - base_set) as usize])
+                        .dst_binding(location.binding)
+                        .dst_array_element(*base)
+                        .descriptor_type(location.expected_ty)
+                        .buffer_info(&infos);
+                    writes.push(write);
+                }
+                ResourceBinding::TextureArray(base, infos) => {
+                    let write = vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_sets[(location.set - base_set) as usize])
+                        .dst_binding(location.binding)
+                        .dst_array_element(*base)
+                        .descriptor_type(location.expected_ty)
+                        .image_info(&infos);
+                    writes.push(write);
+                }
+            }
         }
 
         writes
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BindableResourceType {
-    Buffer,
-    Texture,
+#[derive(Debug, Clone)]
+pub enum ResourceBinding {
+    Buffer(vk::DescriptorBufferInfo),
+    /// (base array index, array of resources)
+    BufferArray(u32, Vec<vk::DescriptorBufferInfo>),
+    Texture(vk::DescriptorImageInfo),
+    /// (base array index, array of resources)
+    TextureArray(u32, Vec<vk::DescriptorImageInfo>),
+    Sampler(vk::DescriptorImageInfo)
+}
+
+impl Hash for ResourceBinding {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            ResourceBinding::Buffer(buf_info) => {
+                state.write_u64(buf_info.buffer.as_raw());
+                buf_info.range.hash(state);
+                buf_info.offset.hash(state);
+            }
+            ResourceBinding::BufferArray(base, infos) => {
+                state.write_u32(*base);
+                for info in infos {
+                    state.write_u64(info.buffer.as_raw());
+                    info.range.hash(state);
+                    info.offset.hash(state);
+                }
+            }
+            ResourceBinding::Texture(tex_info) |
+            ResourceBinding::Sampler(tex_info) => {
+                state.write_u64(tex_info.sampler.as_raw());
+                state.write_u64(tex_info.image_view.as_raw());
+                tex_info.image_layout.hash(state);
+            }
+            ResourceBinding::TextureArray(base, infos) => {
+                state.write_u32(*base);
+                for info in infos {
+                    state.write_u64(info.sampler.as_raw());
+                    state.write_u64(info.image_view.as_raw());
+                    info.image_layout.hash(state);
+                }
+            }
+        }
+    }
 }
 
 pub trait BindableResource {
-    fn bind_to(&self, writer: &mut DescriptorWriter) -> anyhow::Result<(), DescriptorBindingError>;
-    fn bind_key(&self) -> u64;
-    fn ty(&self) -> BindableResourceType;
-}
-
-fn is_buffer(ty: vk::DescriptorType) -> bool {
-    matches!(
-        ty,
-        vk::DescriptorType::UNIFORM_BUFFER
-            | vk::DescriptorType::STORAGE_BUFFER
-            | vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
-            | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
-    )
-}
-
-fn is_texture(ty: vk::DescriptorType) -> bool {
-    matches!(
-        ty,
-        vk::DescriptorType::COMBINED_IMAGE_SAMPLER
-            | vk::DescriptorType::SAMPLED_IMAGE
-            | vk::DescriptorType::STORAGE_IMAGE
-            | vk::DescriptorType::SAMPLER
-    )
+    fn as_binding(&self) -> ResourceBinding;
 }

@@ -22,4 +22,5 @@ pub use node::{
 pub use graph::{
     RenderGraph, CompiledRenderGraph, RetiredRenderGraph,
     GraphicNodeExecutionContext, LambdaNodeExecutionContext,
+    ColorAttachment, DepthStencilAttachment,
 };

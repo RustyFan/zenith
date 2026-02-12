@@ -85,7 +85,7 @@ impl RenderGraphBuilder {
     }
 
     #[must_use]
-    pub fn add_graphic_node(&mut self, name: &str) -> GraphicNodeBuilder<'_, '_> {
+    pub fn add_graphic_node(&mut self, name: &str) -> GraphicNodeBuilder<'_> {
         let index = self.nodes.len();
 
         self.nodes.push(RenderGraphNode {
@@ -107,7 +107,7 @@ impl RenderGraphBuilder {
     }
 
     #[must_use]
-    pub fn add_lambda_node(&mut self, name: &str) -> LambdaNodeBuilder<'_, '_> {
+    pub fn add_lambda_node(&mut self, name: &str) -> LambdaNodeBuilder<'_> {
         let index = self.nodes.len();
 
         self.nodes.push(RenderGraphNode {
@@ -149,12 +149,12 @@ impl RenderGraphBuilder {
     }
 }
 
-pub struct CommonNodeBuilder<'node, 'res> {
-    node: &'node mut RenderGraphNode,
-    resources: &'res Vec<InitialResourceStorage>,
+pub struct CommonNodeBuilder<'builder> {
+    node: &'builder mut RenderGraphNode,
+    resources: &'builder Vec<InitialResourceStorage>,
 }
 
-impl CommonNodeBuilder<'_, '_> {
+impl CommonNodeBuilder<'_> {
     #[must_use]
     fn read<R: GraphResource, V: GraphResourceView>(
         &mut self,
@@ -274,6 +274,8 @@ macro_rules! inject_common_node_builder_methods {
             self.common.read(resource, access)
         }
 
+        /// Read resource with pipeline stage hint.
+        /// Stage hint will overwrite the shader reflection stages.
         #[must_use]
         #[inline]
         pub fn read_hint<R: GraphResource>(
@@ -295,6 +297,8 @@ macro_rules! inject_common_node_builder_methods {
             self.common.write(resource, access)
         }
 
+        /// Write resource with pipeline stage hint.
+        /// Stage hint will overwrite the shader reflection stages.
         #[must_use]
         #[inline]
         pub fn write_hint<R: GraphResource>(
@@ -308,11 +312,11 @@ macro_rules! inject_common_node_builder_methods {
     };
 }
 
-pub struct GraphicNodeBuilder<'node, 'res> {
-    common: CommonNodeBuilder<'node, 'res>,
+pub struct GraphicNodeBuilder<'builder> {
+    common: CommonNodeBuilder<'builder>,
 }
 
-impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
+impl<'builder> GraphicNodeBuilder<'builder> {
     inject_common_node_builder_methods!(Srv, Rt);
 
     /// Register a pipeline for this node and return a handle to reference it
@@ -327,7 +331,7 @@ impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
     }
 
     #[inline]
-    pub fn execute<F>(&mut self, node_job: F)
+    pub fn execute<F>(self, node_job: F)
     where
         F: FnOnce(&mut GraphicNodeExecutionContext) -> anyhow::Result<()> + 'static
     {
@@ -339,15 +343,15 @@ impl<'node, 'res> GraphicNodeBuilder<'node, 'res> {
     }
 }
 
-pub struct LambdaNodeBuilder<'node, 'res> {
-    common: CommonNodeBuilder<'node, 'res>,
+pub struct LambdaNodeBuilder<'builder> {
+    common: CommonNodeBuilder<'builder>,
 }
 
-impl<'node, 'res> LambdaNodeBuilder<'node, 'res> {
+impl<'builder> LambdaNodeBuilder<'builder> {
     inject_common_node_builder_methods!(Srv, Uav);
 
     #[inline]
-    pub fn execute<F>(&mut self, node_job: F)
+    pub fn execute<F>(self, node_job: F)
     where
         F: FnOnce(&mut LambdaNodeExecutionContext) -> anyhow::Result<()> + 'static
     {
@@ -358,4 +362,3 @@ impl<'node, 'res> LambdaNodeBuilder<'node, 'res> {
         }
     }
 }
-

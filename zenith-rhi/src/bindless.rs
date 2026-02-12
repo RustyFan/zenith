@@ -5,13 +5,14 @@
 //! the resources alive while GPU work may reference them.
 
 use ash::vk;
-use ash::vk::Handle;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
-use crate::descriptor::{BindableResource, BindableResourceType, DescriptorBindLocation, DescriptorWriter, LayoutBinding};
+use crate::descriptor::{BindableResource, ResourceBinding, DescriptorBindLocation, DescriptorWriter, LayoutBinding};
 use crate::{DescriptorBindingError, DescriptorPool, DescriptorSetLayout, RenderDevice, ShaderBinding};
 use std::sync::Arc;
+use zenith_core::collections::DefaultHasher;
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone)]
@@ -146,7 +147,7 @@ pub struct BindlessCaps {
 struct BindlessPoolState {
     textures: SlotMap,
     buffers: SlotMap,
-    _samplers: SlotMap,
+    samplers: SlotMap,
 }
 
 pub struct BindlessPool {
@@ -264,89 +265,65 @@ impl BindlessPool {
     #[inline]
     pub fn caps(&self) -> BindlessCaps { self.caps }
 
-    pub fn bind<T: BindableResource>(&mut self, res: T) -> anyhow::Result<BindlessHandle, DescriptorBindingError> {
-        let key = res.bind_key();
+    pub fn upload<T: BindableResource>(&mut self, res: &T) -> anyhow::Result<BindlessHandle, DescriptorBindingError> {
+        let binding = res.as_binding();
+        let mut hasher = DefaultHasher::new();
+        binding.hash(&mut hasher);
+        let key = hasher.finish();
 
-        let (index, ty) = match res.ty() {
-            BindableResourceType::Buffer => {
+        let (index, ty) = match binding {
+            ResourceBinding::Buffer(buf_info) => {
                 let Some((index, is_new)) = self.state.buffers.get_or_alloc(key, self.caps.max_storage_buffers) else {
                     panic!("bindless buffer capacity exceeded (max={})", self.caps.max_storage_buffers);
                 };
 
                 if is_new {
-                    self.writer.begin_binding("__bindless_buffers".to_string(), DescriptorBindLocation {
-                        set: 0,
+                    self.writer.add_binding_raw(DescriptorBindLocation {
+                        set: Self::SET_INDEX,
                         binding: ResourceType::Buffer.binding_index(),
-                        array_index: index,
-                        ty: vk::DescriptorType::STORAGE_BUFFER,
-                    });
-                    self.writer.end_binding();
-                    res.bind_to(&mut self.writer)?;
+                        expected_ty: vk::DescriptorType::STORAGE_BUFFER,
+                    }, ResourceBinding::BufferArray(index, vec![buf_info]));
                 }
 
                 (index, ResourceType::Buffer)
             }
-            BindableResourceType::Texture => {
+            ResourceBinding::Texture(tex_info) => {
                 let Some((index, is_new)) = self.state.textures.get_or_alloc(key, self.caps.max_textures) else {
                     panic!("bindless texture capacity exceeded (max={})", self.caps.max_textures);
                 };
 
                 if is_new {
-                    self.writer.begin_binding("__bindless_textures".to_string(), DescriptorBindLocation {
-                        set: 0,
+                    self.writer.add_binding_raw(DescriptorBindLocation {
+                        set: Self::SET_INDEX,
                         binding: ResourceType::Texture2D.binding_index(),
-                        array_index: index,
-                        ty: vk::DescriptorType::SAMPLED_IMAGE,
-                    });
-                    res.bind_to(&mut self.writer)?;
-                    self.writer.end_binding();
+                        expected_ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    }, ResourceBinding::TextureArray(index, vec![tex_info]));
                 }
 
                 (index, ResourceType::Texture2D)
             }
+            ResourceBinding::Sampler(samp_info) => {
+                let Some((index, is_new)) = self.state.samplers.get_or_alloc(key, self.caps.max_samplers) else {
+                    panic!("bindless sampler capacity exceeded (max={})", self.caps.max_samplers);
+                };
+
+                if is_new {
+                    self.writer.add_binding_raw(DescriptorBindLocation {
+                        set: Self::SET_INDEX,
+                        binding: ResourceType::Sampler.binding_index(),
+                        expected_ty: vk::DescriptorType::SAMPLER,
+                    }, ResourceBinding::TextureArray(index, vec![samp_info]));
+                }
+
+                (index, ResourceType::Sampler)
+            }
+            _ => unimplemented!(),
         };
 
         Ok(BindlessHandle::new(ty, index))
     }
 
-    /// Bind a sampler into the bindless sampler heap at a **fixed index**.
-    ///
-    /// Intended usage: define a small shader-side enum (e.g. LinearRepeat=0...) and
-    /// keep the mapping stable across the engine.
-    pub fn bind_sampler_at(&mut self, index: u32, sampler: vk::Sampler) -> anyhow::Result<(), DescriptorBindingError> {
-        if index >= self.caps.max_samplers {
-            panic!("bindless sampler index out of range (index={}, max={})", index, self.caps.max_samplers);
-        }
-
-        let key = sampler.as_raw() as u64;
-        // Track the last key written into this slot to avoid redundant descriptor writes.
-        if (index as usize) >= self.state._samplers.keys_by_index.len() {
-            self.state._samplers.keys_by_index.resize((index as usize) + 1, None);
-        }
-        if self.state._samplers.keys_by_index[index as usize] == Some(key) {
-            return Ok(());
-        }
-        self.state._samplers.keys_by_index[index as usize] = Some(key);
-
-        self.writer.begin_binding("__bindless_samplers".to_string(), DescriptorBindLocation {
-            set: 0,
-            binding: ResourceType::Sampler.binding_index(),
-            array_index: index,
-            ty: vk::DescriptorType::SAMPLER,
-        });
-        // Note: a SAMPLER descriptor uses only `sampler`; image_view/layout are ignored.
-        self.writer.bind_texture(
-            vk::DescriptorImageInfo::default()
-                .sampler(sampler)
-                .image_view(vk::ImageView::null())
-                .image_layout(vk::ImageLayout::UNDEFINED)
-        )?;
-        self.writer.end_binding();
-
-        Ok(())
-    }
-
-    pub fn unbind(&mut self, handle: BindlessHandle) {
+    pub fn unload(&mut self, handle: BindlessHandle) {
         match handle.ty() {
             ResourceType::Texture2D => {
                 let _ = self.state.textures.free_by_index(handle.index());
@@ -354,7 +331,9 @@ impl BindlessPool {
             ResourceType::Buffer => {
                 let _ = self.state.buffers.free_by_index(handle.index());
             }
-            ResourceType::Sampler => unimplemented!(),
+            ResourceType::Sampler => {
+                let _ = self.state.samplers.free_by_index(handle.index());
+            }
         }
     }
 
@@ -363,7 +342,7 @@ impl BindlessPool {
         if self.writer.num_bindings() == 0 {
             return;
         }
-        let writes = self.writer.write_to(0, std::slice::from_ref(&self.set));
+        let writes = self.writer.write_to(Self::SET_INDEX, std::slice::from_ref(&self.set));
         unsafe {
             device.handle().update_descriptor_sets(&writes, &[]);
         }

@@ -6,13 +6,14 @@ pub type SmallVec<A> = smallvec::SmallVec<A>;
 
 pub struct DefaultHasher(FoldHasher);
 
+pub type HashMap<K, V> = hashbrown::HashMap<K, V>;
+pub type HashSet<T> = hashbrown::HashSet<T>;
+
 pub mod hashmap {
-    pub type HashMap<K, V> = hashbrown::HashMap<K, V>;
     pub use hashbrown::hash_map::*;
 }
 
 pub mod hashset {
-    pub type HashSet<T> = hashbrown::HashSet<T>;
     pub use hashbrown::hash_set::*;
 }
 

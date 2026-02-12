@@ -7,13 +7,9 @@ use zenith_asset::material::Material;
 use zenith_asset::mesh::{MeshCollection, Mesh};
 use zenith_core::camera::{Camera, ViewData, WORLD_SPACE_UP};
 use zenith_core::math::{Degree};
-use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, BufferState, Shader, Texture, TextureDesc, TextureLayout, TextureState, ImmediateCommandEncoder, UploadPool, Sampler, SamplerDesc, GraphicPipelineDesc, GraphicPipelineAttachments, DepthStencilAttachmentDescBuilder, DepthStencilStateBuilder, BindlessHandle};
+use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, BufferState, Shader, Texture, TextureDesc, TextureLayout, TextureState, ImmediateCommandEncoder, UploadPool, Sampler, SamplerDesc, GraphicPipelineDesc, GraphicPipelineAttachments, DepthStencilStateBuilder, BindlessHandle, BindlessPool};
 use zenith_rhi::pipeline::{BlendStateBuilder};
-use zenith_rendergraph::{
-    ColorAttachmentDescBuilder,
-    RenderGraphBuilder, RenderGraphResource, VertexLayout,
-    GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
-};
+use zenith_rendergraph::{RenderGraphBuilder, RenderGraphResource, VertexLayout, GraphicShaderInputBuilder, GraphicPipelineStateBuilder, ColorAttachment, DepthStencilAttachment};
 use crate::defer_shading::SceneTextures;
 use crate::lighting::DirectLightingRenderer;
 
@@ -121,10 +117,10 @@ impl WorldRenderer {
         let nearest_clamp = Arc::new(Sampler::new(device, &SamplerDesc::nearest().with_address_mode(vk::SamplerAddressMode::CLAMP_TO_EDGE))?);
 
         let mut pool = device.bindless_pool().lock();
-        pool.bind_sampler_at(0, linear_repeat.handle())?;
-        pool.bind_sampler_at(1, linear_clamp.handle())?;
-        pool.bind_sampler_at(2, nearest_repeat.handle())?;
-        pool.bind_sampler_at(3, nearest_clamp.handle())?;
+        pool.upload(&*linear_repeat)?;
+        pool.upload(&*linear_clamp)?;
+        pool.upload(&*nearest_repeat)?;
+        pool.upload(&*nearest_clamp)?;
         pool.flush(device);
 
         Ok(Self {
@@ -225,37 +221,25 @@ impl WorldRenderer {
             let mut bindless_pool = device.bindless_pool().lock();
 
             let base_color_tex_handle = if let Some(tex) = &base_color_tex {
-                let handle = bindless_pool.bind(
-                    tex.as_range(TextureLayout::ShaderReadOnly, .., ..),
-                )?;
-                handle
+                bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
             } else {
                 BindlessHandle::INVALID
             };
 
             let mra_tex_handle = if let Some(tex) = &mra_tex {
-                let handle = bindless_pool.bind(
-                    tex.as_range(TextureLayout::ShaderReadOnly, .., ..),
-                )?;
-                handle
+                bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
             } else {
                 BindlessHandle::INVALID
             };
 
             let normal_tex_handle = if let Some(tex) = &normal_tex {
-                let handle = bindless_pool.bind(
-                    tex.as_range(TextureLayout::ShaderReadOnly, .., ..),
-                )?;
-                handle
+                bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
             } else {
                 BindlessHandle::INVALID
             };
 
             let emissive_tex_handle = if let Some(tex) = &emissive_tex {
-                let handle = bindless_pool.bind(
-                    tex.as_range(TextureLayout::ShaderReadOnly, .., ..),
-                )?;
-                handle
+                bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
             } else {
                 BindlessHandle::INVALID
             };
@@ -441,7 +425,7 @@ impl WorldRenderer {
         // Register pipeline and get handle
         let pipeline_handle = node.register_pipeline(pipeline_desc.clone());
 
-        let view = node.read(&view, BufferState::StorageRead);
+        let view = node.read(&view, BufferState::Uniform);
         let gbuffer_base_rt = node.write(&mut scene_textures.base_color, TextureState::Color);
         let gbuffer_nmr_rt = node.write(&mut scene_textures.normal_mra, TextureState::Color);
         let depth_rt = node.write(&mut scene_textures.depth, TextureState::DepthStencil);
@@ -459,28 +443,24 @@ impl WorldRenderer {
         let width = self.width;
         let height = self.height;
         node.execute(move |ctx| {
-            let view_range = ctx.get(&view).as_range(..);
-            view_range.write(bytemuck::bytes_of(&view_data))
+            ctx.get(&view)
+                .as_range(..)
+                .write(bytemuck::bytes_of(&view_data))
                 .map_err(|e| anyhow!("failed to write view buffer: {e:?}"))?;
 
             ctx.bind_pipeline(pipeline_handle)
-                .bind_raw(0, &[ctx.device().bindless_pool().lock().set()], &[])
-                .bind("view", view_range)?;
+                .bind_raw(BindlessPool::SET_INDEX, &[ctx.device().bindless_pool().lock().set()], &[])
+                .bind("view", view)?;
 
             ctx.begin_rendering(
                 (width, height),
                 &[
-                    (gbuffer_base_rt, ColorAttachmentDescBuilder::default()
-                        .clear_input().clear_value([0.05, 0.05, 0.05, 1.0])
-                        .build().unwrap()),
-                    (gbuffer_nmr_rt, ColorAttachmentDescBuilder::default()
-                        .clear_input().clear_value([0.5, 0.5, 1.0, 1.0])
-                        .build().unwrap())
+                    ColorAttachment::new(gbuffer_base_rt).clear_input().clear_value([0.05, 0.05, 0.05, 1.0]),
+                    ColorAttachment::new(gbuffer_nmr_rt).clear_input().clear_value([0.5, 0.5, 1.0, 1.0]),
                 ],
-                Some((depth_rt, DepthStencilAttachmentDescBuilder::default().clear_depth_input().build().unwrap())),
+                Some(DepthStencilAttachment::new(depth_rt).clear_depth_input()),
             );
 
-            let encoder = ctx.encoder();
             for (vb, ib, index_count, model, material) in draws.into_iter() {
                 let pc = PushConstants {
                     model: model.to_cols_array(),
@@ -491,9 +471,9 @@ impl WorldRenderer {
                 };
                 ctx.push_constants(pipeline_handle, 0, &pc);
 
-                encoder.bind_vertex_buffers(0, &[ctx.get(&vb).handle()], &[0]);
-                encoder.bind_index_buffer(ctx.get(&ib).handle(), 0, vk::IndexType::UINT32);
-                encoder.draw_indexed(index_count, 1, 0, 0, 0);
+                ctx.bind_vertex_buffers(vb, 0, &[0]);
+                ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT32);
+                ctx.draw_indexed(0..index_count, 0..1, 0);
             }
 
             ctx.end_rendering();

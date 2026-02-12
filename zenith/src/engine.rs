@@ -22,6 +22,14 @@ pub struct Engine {
     should_exit: bool,
 }
 
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.render_device.wait_until_idle().unwrap();
+
+        zenith_renderer::deinitialize();
+    }
+}
+
 impl Engine {
     pub fn new(main_window: Arc<Window>) -> Result<Self, anyhow::Error> {
         // let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
@@ -64,6 +72,8 @@ impl Engine {
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .unzip();
+
+        zenith_renderer::initialize(&device)?;
 
         Ok(Self {
             execute_command_pools,

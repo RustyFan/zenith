@@ -3,10 +3,7 @@ use std::time::Instant;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
 use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, Shader, TextureState, BufferState, Texture, ImmediateCommandEncoder, UploadPool, GraphicPipelineDesc, GraphicPipelineAttachments};
-use zenith_rendergraph::{
-    ColorAttachmentDescBuilder, RenderGraphBuilder, RenderGraphResource, VertexLayout,
-    GraphicShaderInputBuilder, GraphicPipelineStateBuilder,
-};
+use zenith_rendergraph::{RenderGraphBuilder, RenderGraphResource, VertexLayout, GraphicShaderInputBuilder, GraphicPipelineStateBuilder, ColorAttachment};
 use zenith_rhi::pipeline::{RasterizationStateBuilder, BlendStateBuilder};
 
 #[repr(C)]
@@ -115,25 +112,23 @@ impl TriangleRenderer {
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
         node.execute(move |ctx| {
-            let time_buffer = ctx.get(&tb).as_range(..);
-            time_buffer.write(bytemuck::bytes_of(&elapsed))
+            ctx.get(&tb)
+                .as_range(..)
+                .write(bytemuck::bytes_of(&elapsed))
                 .map_err(|e| anyhow!("Failed to write time buffer: {e:?}"))?;
 
             ctx.bind_pipeline(pipeline_handle)
-                .bind("time", time_buffer)?;
+                .bind("time", tb)?;
 
             ctx.begin_rendering(
                 (width, height),
-                &[(output_rt, ColorAttachmentDescBuilder::default()
-                    .clear_input().clear_value([0.1, 0.1, 0.1, 1.0])
-                    .build().unwrap())],
+                &[ColorAttachment::new(output_rt).clear_input().clear_value([0.1, 0.1, 0.1, 1.0])],
                 None
             );
 
-            let encoder = ctx.encoder();
-            encoder.bind_vertex_buffers(0, &[ctx.get(&vb).handle()], &[0]);
-            encoder.bind_index_buffer(ctx.get(&ib).handle(), 0, vk::IndexType::UINT16);
-            encoder.draw_indexed(3, 1, 0, 0, 0);
+            ctx.bind_vertex_buffers(vb, 0, &[0]);
+            ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT16);
+            ctx.draw_indexed(0..3, 0..1, 0);
 
             ctx.end_rendering();
             Ok(())

@@ -3,6 +3,7 @@
 use ash::{vk};
 use zenith_rhi_derive::DeviceObject;
 use crate::{RenderDevice};
+use crate::descriptor::{BindableResource, ResourceBinding};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 
@@ -135,6 +136,17 @@ impl Drop for Sampler {
         unsafe {
             self.device.destroy_sampler(self.sampler, None);
         }
+    }
+}
+
+impl BindableResource for Sampler {
+    fn as_binding(&self) -> ResourceBinding {
+        ResourceBinding::Sampler(
+            vk::DescriptorImageInfo::default()
+                .sampler(self.sampler)
+                .image_view(vk::ImageView::null())
+                .image_layout(vk::ImageLayout::UNDEFINED)
+        )
     }
 }
 

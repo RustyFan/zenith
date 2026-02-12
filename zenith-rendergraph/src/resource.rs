@@ -2,10 +2,11 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use derive_more::From;
-use zenith_rhi::vk;
+use zenith_rhi::descriptor::BindableResource;
+use zenith_rhi::{vk, TextureLayout};
 use crate::builder::ResourceAccessStorage;
 use crate::interface::{Buffer, Texture, BufferDesc, TextureDesc, BufferState, TextureState, ResourceDescriptor, ResourceState};
-use crate::RenderGraphBuilder;
+use crate::{GraphicNodeExecutionContext, RenderGraphBuilder};
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -45,7 +46,7 @@ impl GraphResourceView for Rt {}
 /// Used in the same render graph context. Should NOT be used across multiple render graph.
 pub(crate) type GraphResourceId = u32;
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RenderGraphResource<R: GraphResource> {
     pub(crate) id: GraphResourceId,
     pub(crate) _marker: PhantomData<R>,
@@ -73,7 +74,7 @@ impl<R: GraphResource> RenderGraphResource<R> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RenderGraphResourceAccess<R: GraphResource, V: GraphResourceView> {
     pub(crate) id: GraphResourceId,
     pub(crate) access: ResourceState,
@@ -83,6 +84,22 @@ pub struct RenderGraphResourceAccess<R: GraphResource, V: GraphResourceView> {
 impl<R: GraphResource, V: GraphResourceView> RenderGraphResourceAccess<R, V> {
     pub fn valid(&self) -> bool {
         self.id != u32::MAX
+    }
+
+    /// Gets the descriptor for this resource.
+    ///
+    /// # Safety
+    /// This method uses transmute which is safe because:
+    /// 1. The sealed trait ensures only Buffer and Texture implement GraphResource
+    /// 2. PhantomData<R> ensures the resource type matches the storage variant
+    /// 3. The enum discriminant is checked before transmute
+    pub fn desc(&self, builder: &RenderGraphBuilder) -> &<R as GraphResource>::Descriptor {
+        match builder.initial_resources.get(self.id as usize).unwrap() {
+            InitialResourceStorage::ManagedBuffer(desc) => unsafe { std::mem::transmute(desc) },
+            InitialResourceStorage::ManagedTexture(desc) => unsafe { std::mem::transmute(desc) },
+            InitialResourceStorage::ImportedBuffer(res, _) => unsafe { std::mem::transmute(res.desc()) },
+            InitialResourceStorage::ImportedTexture(res, _) => unsafe { std::mem::transmute(res.desc()) },
+        }
     }
 }
 
@@ -139,4 +156,36 @@ impl InitialResourceStorage {
 pub(crate) enum ExportResourceStorage {
     ExportedBuffer(BufferState),
     ExportedTexture(TextureState),
+}
+
+pub trait GraphBindableAccess {
+    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource;
+}
+
+impl GraphBindableAccess for RenderGraphResourceAccess<Buffer, Srv> {
+    #[inline]
+    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource {
+        ctx.get(&self).as_range(..)
+    }
+}
+
+impl GraphBindableAccess for RenderGraphResourceAccess<Buffer, Uav> {
+    #[inline]
+    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource {
+        ctx.get(&self).as_range(..)
+    }
+}
+
+impl GraphBindableAccess for RenderGraphResourceAccess<Texture, Srv> {
+    #[inline]
+    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource {
+        ctx.get(&self).as_range(TextureLayout::ShaderReadOnly, .., ..)
+    }
+}
+
+impl GraphBindableAccess for RenderGraphResourceAccess<Texture, Uav> {
+    #[inline]
+    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource {
+        ctx.get(&self).as_range(TextureLayout::ShaderReadOnly, .., ..)
+    }
 }

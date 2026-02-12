@@ -1,14 +1,14 @@
 //! Vulkan Buffer - GPU buffer resource management.
 
+use std::fmt::Debug;
 use ash::{vk};
 use zenith_core::log;
 use std::hash::{Hash, Hasher};
 use std::ops::RangeBounds;
 use ash::vk::Handle;
-use zenith_core::collections::DefaultHasher;
 use zenith_rhi_derive::DeviceObject;
-use crate::descriptor::{BindableResource, BindableResourceType, DescriptorWriter};
-use crate::{RenderDevice, DescriptorBindingError};
+use crate::descriptor::{BindableResource, ResourceBinding};
+use crate::RenderDevice;
 use crate::device::{DebuggableObject};
 use crate::utility::{find_memory_type, normalize_range_u64};
 use crate::device::set_debug_name_handle;
@@ -17,11 +17,8 @@ use crate::device::set_debug_name_handle;
 #[derive(Debug, Clone)]
 pub struct BufferDesc {
     pub name: String,
-    /// Size of the buffer in bytes.
     pub size: vk::DeviceSize,
-    /// Buffer usage flags (e.g., VERTEX_BUFFER, INDEX_BUFFER, UNIFORM_BUFFER).
     pub usage: vk::BufferUsageFlags,
-    /// Memory property flags for allocation.
     pub memory_flags: vk::MemoryPropertyFlags,
 }
 
@@ -165,6 +162,15 @@ pub struct Buffer {
     desc: BufferDesc,
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
+}
+
+impl Debug for Buffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
+            "Buffer {:?}",
+            self.desc,
+        ))
+    }
 }
 
 impl Buffer {
@@ -334,24 +340,28 @@ impl<'a> Hash for BufferRange<'a> {
 }
 
 impl BindableResource for BufferRange<'_> {
-    fn bind_to(&self, writer: &mut DescriptorWriter) -> anyhow::Result<(), DescriptorBindingError> {
-        writer.bind_buffer(
+    fn as_binding(&self) -> ResourceBinding {
+        ResourceBinding::Buffer(
             vk::DescriptorBufferInfo::default()
                 .buffer(self.buffer.handle())
                 .offset(self.offset)
                 .range(self.size)
-        )?;
-
-        Ok(())
+        )
     }
+}
 
-    fn bind_key(&self) -> u64 {
-        let mut hash = DefaultHasher::new();
-        self.hash(&mut hash);
-        hash.finish()
-    }
+impl BindableResource for Vec<BufferRange<'_>> {
+    fn as_binding(&self) -> ResourceBinding {
+        let bindings = self.iter()
+            .map(|range| {
+                if let ResourceBinding::Buffer(buf_info) = range.as_binding() {
+                    buf_info
+                } else {
+                    unreachable!();
+                }
+            })
+            .collect::<Vec<_>>();
 
-    fn ty(&self) -> BindableResourceType {
-        BindableResourceType::Buffer
+        ResourceBinding::BufferArray(0, bindings)
     }
 }

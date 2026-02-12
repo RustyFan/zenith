@@ -2,8 +2,10 @@
 
 use crate::interface::{Buffer, BufferState, ResourceState, Texture, TextureState};
 use crate::node::{NodePipelineState, RenderGraphNode};
-use crate::resource::{GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess, Rt};
+use crate::resource::{GraphBindableAccess, GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess, Rt, Srv};
 use std::cell::Cell;
+use std::collections::Bound;
+use std::ops::RangeBounds;
 use std::sync::{Arc};
 use bytemuck::NoUninit;
 use parking_lot::Mutex;
@@ -11,7 +13,6 @@ use zenith_core::collections::SmallVec;
 use zenith_core::color;
 use zenith_rhi::{BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout, ColorAttachmentDesc, DepthStencilAttachmentDesc, GraphicPipeline, DescriptorBindingError, DescriptorSetBinder};
 use zenith_rhi::{vk, RenderDevice, Swapchain};
-use zenith_rhi::descriptor::BindableResource;
 use crate::GraphicPipelineHandle;
 
 pub enum ResourceStorage {
@@ -177,7 +178,6 @@ impl RenderGraph {
 
         let serial_nodes_count = serial_nodes.len();
 
-        // Create pipelines for all nodes
         let node_pipelines = Self::create_node_pipelines(&serial_nodes, &present_nodes, device, pipeline_cache);
 
         CompiledRenderGraph {
@@ -211,9 +211,7 @@ impl RenderGraph {
                                 pipelines.push(pipeline);
                             },
                             Err(e) => {
-                                log::error!("Failed to create pipeline {} for node {}: {:?}",
-                                           handle_idx, node.name, e);
-                                // Continue with empty pipeline - will cause panic when accessed
+                                log::error!("Failed to create pipeline {} for node {}: {:?}", handle_idx, node.name, e);
                             }
                         }
                     }
@@ -581,7 +579,7 @@ fn shader_stage_to_pipeline_stage(stage_flags: vk::ShaderStageFlags) -> vk::Pipe
 
 pub struct PipelineResourceBinder<'a> {
     device: &'a RenderDevice,
-    encoder: &'a CommandEncoder<'a>,
+    ctx: &'a GraphicNodeExecutionContext<'a>,
     binder: Option<DescriptorSetBinder<'a>>,
     bind_point: vk::PipelineBindPoint,
     layout: vk::PipelineLayout,
@@ -590,7 +588,7 @@ pub struct PipelineResourceBinder<'a> {
 impl<'a> Drop for PipelineResourceBinder<'a> {
     fn drop(&mut self) {
         let (base_set, sets) = self.binder.take().unwrap().finish(self.device).unwrap();
-        self.encoder.bind_descriptor_sets(
+        self.ctx.encoder.bind_descriptor_sets(
             self.bind_point,
             self.layout.clone(),
             base_set,
@@ -601,12 +599,12 @@ impl<'a> Drop for PipelineResourceBinder<'a> {
 }
 
 impl<'a> PipelineResourceBinder<'a> {
-    pub fn bind<T: BindableResource>(
+    pub fn bind<A: GraphBindableAccess>(
         &mut self,
         name: &str,
-        res: T,
+        access: A,
     ) -> Result<&mut Self, DescriptorBindingError> {
-        self.binder.as_mut().unwrap().bind(name, res)?;
+        self.binder.as_mut().unwrap().bind(name, &access.into_bindable(&self.ctx))?;
         Ok(self)
     }
 
@@ -616,13 +614,105 @@ impl<'a> PipelineResourceBinder<'a> {
         sets: &[vk::DescriptorSet],
         dynamic_offsets: &[u32],
     ) -> &mut Self {
-        self.encoder.bind_descriptor_sets(
+        self.ctx.encoder.bind_descriptor_sets(
             self.bind_point,
             self.layout.clone(),
             base_set,
             sets,
             dynamic_offsets,
         );
+        self
+    }
+}
+
+/// Simple wrapper class to simplify user color render target binding
+#[derive(Debug)]
+pub struct ColorAttachment {
+    pub color: RenderGraphResourceAccess<Texture, Rt>,
+    pub desc: ColorAttachmentDesc,
+}
+
+impl ColorAttachment {
+    pub fn new(color: RenderGraphResourceAccess<Texture, Rt>) -> Self {
+        Self {
+            color,
+            desc: Default::default(),
+        }
+    }
+
+    #[inline]
+    pub fn discard_input(mut self) -> Self {
+        self.desc.load_op = vk::AttachmentLoadOp::DONT_CARE;
+        self
+    }
+
+    #[inline]
+    pub fn clear_input(mut self) -> Self {
+        self.desc.load_op = vk::AttachmentLoadOp::CLEAR;
+        self
+    }
+
+    #[inline]
+    pub fn discard_output(mut self) -> Self {
+        self.desc.store_op = vk::AttachmentStoreOp::DONT_CARE;
+        self
+    }
+
+    #[inline]
+    pub fn clear_value(mut self, clear_value: [f32; 4]) -> Self {
+        self.desc.clear_value = clear_value;
+        self
+    }
+}
+
+/// Simple wrapper class to simplify user depth/stencil render target binding
+#[derive(Debug)]
+pub struct DepthStencilAttachment {
+    pub depth: RenderGraphResourceAccess<Texture, Rt>,
+    pub desc: DepthStencilAttachmentDesc,
+}
+
+impl DepthStencilAttachment {
+    pub fn new(depth: RenderGraphResourceAccess<Texture, Rt>) -> Self {
+        Self {
+            depth,
+            desc: Default::default(),
+        }
+    }
+
+    #[inline]
+    pub fn discard_depth_input(mut self) -> Self {
+        self.desc.depth_load_op = vk::AttachmentLoadOp::DONT_CARE;
+        self
+    }
+
+    #[inline]
+    pub fn discard_stencil_input(mut self) -> Self {
+        self.desc.stencil_load_op = vk::AttachmentLoadOp::DONT_CARE;
+        self
+    }
+
+    #[inline]
+    pub fn clear_depth_input(mut self) -> Self {
+        self.desc.depth_load_op = vk::AttachmentLoadOp::CLEAR;
+        self
+    }
+
+    #[inline]
+    pub fn clear_stencil_input(mut self) -> Self {
+        self.desc.stencil_load_op = vk::AttachmentLoadOp::CLEAR;
+        self
+    }
+
+    #[inline]
+    pub fn discard_depth_output(mut self) -> Self {
+        self.desc.depth_store_op = vk::AttachmentStoreOp::DONT_CARE;
+        self
+    }
+
+    #[inline]
+    pub fn discard_stencil_output(mut self) -> Self {
+        self.desc.stencil_store_op = vk::AttachmentStoreOp::DONT_CARE;
         self
     }
 }
@@ -664,12 +754,7 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     #[inline]
     pub fn encoder(&self) -> &CommandEncoder<'node> { self.encoder }
 
-    #[inline]
-    fn get_pipeline(&self, handle: GraphicPipelineHandle) -> &GraphicPipeline {
-        &self.node_pipelines.get(handle.0 as usize).unwrap()
-    }
-
-    pub fn bind_pipeline(&self, handle: GraphicPipelineHandle) -> PipelineResourceBinder {
+    pub fn bind_pipeline<'a>(&'a self, handle: GraphicPipelineHandle) -> PipelineResourceBinder<'a> {
         let pipeline = self.get_pipeline(handle);
 
         let binder = DescriptorSetBinder::new(
@@ -685,7 +770,7 @@ impl<'node> GraphicNodeExecutionContext<'node> {
 
         PipelineResourceBinder {
             device: self.device,
-            encoder: self.encoder,
+            ctx: self,
             binder: Some(binder),
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: pipeline.layout(),
@@ -706,38 +791,38 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     pub fn begin_rendering(
         &self,
         extent: (u32, u32),
-        color_attachments: &[(RenderGraphResourceAccess<Texture, Rt>, ColorAttachmentDesc)],
-        depth_attachment: Option<(RenderGraphResourceAccess<Texture, Rt>, DepthStencilAttachmentDesc)>,
+        color_attachments: &[ColorAttachment],
+        depth_attachment: Option<DepthStencilAttachment>,
     ) {
         let color_attachments: SmallVec<[vk::RenderingAttachmentInfo; 8]> = color_attachments.iter()
-            .map(|(access, desc)| {
-                let texture = utility::resource_storage_ref(self.resources, access.id).as_texture();
+            .map(|attachment| {
+                let texture = utility::resource_storage_ref(self.resources, attachment.color.id).as_texture();
 
                 vk::RenderingAttachmentInfo::default()
                     .image_view(texture.as_range(TextureLayout::Color, .., ..).view().expect("Texture view not created"))
                     .image_layout(TextureLayout::Color.to_vk())
-                    .load_op(desc.load_op)
-                    .store_op(desc.store_op)
+                    .load_op(attachment.desc.load_op)
+                    .store_op(attachment.desc.store_op)
                     .clear_value(vk::ClearValue {
                         color: vk::ClearColorValue {
-                            float32: desc.clear_value,
+                            float32: attachment.desc.clear_value,
                         },
                     })
             })
             .collect();
 
-        let depth_attachment = depth_attachment.map(|(access, desc)| {
-            let texture = utility::resource_storage_ref(self.resources, access.id).as_texture();
+        let depth_attachment = depth_attachment.map(|attachment| {
+            let texture = utility::resource_storage_ref(self.resources, attachment.depth.id).as_texture();
 
             vk::RenderingAttachmentInfo::default()
                 .image_view(texture.as_range(TextureLayout::DepthStencil, .., ..).view().expect("Texture view not created"))
                 .image_layout(TextureLayout::DepthStencil.to_vk())
-                .load_op(desc.depth_load_op)
-                .store_op(desc.depth_store_op)
+                .load_op(attachment.desc.depth_load_op)
+                .store_op(attachment.desc.depth_store_op)
                 .clear_value(vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
-                        depth: desc.depth_clear_value,
-                        stencil: desc.stencil_clear_value,
+                        depth: attachment.desc.depth_clear_value,
+                        stencil: attachment.desc.stencil_clear_value,
                     },
                 })
         });
@@ -776,6 +861,47 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     #[inline]
     pub fn end_rendering(&self) {
         self.encoder.end_rendering();
+    }
+
+    #[inline]
+    pub fn bind_vertex_buffers(&self, buf: RenderGraphResourceAccess<Buffer, Srv>, first_binding: u32, offsets: &[u64]) {
+        self.encoder.bind_vertex_buffers(first_binding, &[self.get(&buf).handle()], offsets);
+    }
+
+    #[inline]
+    pub fn bind_index_buffer(&self, buf: RenderGraphResourceAccess<Buffer, Srv>, offset: u64, index_ty: vk::IndexType) {
+        self.encoder.bind_index_buffer(self.get(&buf).handle(), offset, index_ty);
+    }
+
+    pub fn draw_indexed<R: RangeBounds<u32>>(&self, index: R, instance: R, vertex_offset: i32) {
+        let get_offset_and_size = |range: R| {
+            let start = match range.start_bound() {
+                Bound::Included(&v) => v,
+                Bound::Excluded(&v) => v.checked_add(1).expect("Index overflow"),
+                Bound::Unbounded => 0,
+            };
+            let end_exclusive = match range.end_bound() {
+                Bound::Included(&v) => v.checked_add(1).expect("Index overflow"),
+                Bound::Excluded(&v) => v,
+                Bound::Unbounded => panic!("Range should have clear upper bound"),
+            };
+
+            if start > end_exclusive {
+                panic!("Range should have clear upper bound");
+            }
+
+            (start, end_exclusive - start)
+        };
+
+        let (first_index, index_count) = get_offset_and_size(index);
+        let (first_instance, instance_count) = get_offset_and_size(instance);
+
+        self.encoder.draw_indexed(index_count, instance_count, first_index, vertex_offset, first_instance);
+    }
+
+    #[inline]
+    fn get_pipeline(&self, handle: GraphicPipelineHandle) -> &GraphicPipeline {
+        &self.node_pipelines.get(handle.0 as usize).unwrap()
     }
 }
 

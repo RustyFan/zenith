@@ -14,7 +14,7 @@ macro_rules! render_graph_resource_interface {
             impl sealed::Sealed for $res {}
 
             impl GraphResource for $res_ty {
-                type Descriptor = $res_desc;
+                type Descriptor = $res_desc_ty;
                 type State = $res_state_ty;
             }
 
@@ -55,7 +55,7 @@ macro_rules! render_graph_resource_interface {
             )+
         }
 
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, From, TryInto)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From, TryInto)]
         pub enum ResourceState {
             $(
                 $res($res_state),

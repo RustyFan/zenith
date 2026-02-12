@@ -3,14 +3,14 @@
 use ash::{vk};
 use std::default::Default;
 use std::cell::RefCell;
+use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::RangeBounds;
 use ash::vk::Handle;
-use zenith_core::collections::DefaultHasher;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_rhi_derive::DeviceObject;
-use crate::{DescriptorBindingError, RenderDevice, TextureLayout};
-use crate::descriptor::{BindableResource, BindableResourceType, DescriptorWriter};
+use crate::{RenderDevice, TextureLayout};
+use crate::descriptor::{BindableResource, ResourceBinding};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 use crate::utility::{find_memory_type, normalize_range_u32};
@@ -295,6 +295,15 @@ pub struct Texture {
     views: RefCell<HashMap<TextureSubresource, vk::ImageView>>,
 }
 
+impl Debug for Texture {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
+            "Texture {:?}",
+            self.desc,
+        ))
+    }
+}
+
 impl Texture {
     /// Create a new texture from a descriptor (view is not created).
     pub fn new(
@@ -572,23 +581,28 @@ impl<'a> Hash for TextureRange<'a> {
 }
 
 impl BindableResource for TextureRange<'_> {
-    fn bind_to(&self, writer: &mut DescriptorWriter) -> anyhow::Result<(), DescriptorBindingError> {
-        writer.bind_texture(
+    fn as_binding(&self) -> ResourceBinding {
+        ResourceBinding::Texture(
             vk::DescriptorImageInfo::default()
-                .image_view(self.view().map_err(|err| DescriptorBindingError::MissingTextureView(err, self.texture.desc.name.to_owned()))?)
+                .image_view(self.view().unwrap())
                 .sampler(vk::Sampler::null())
                 .image_layout(self.layout.to_vk())
-        )?;
-        Ok(())
+        )
     }
+}
 
-    fn bind_key(&self) -> u64 {
-        let mut hash = DefaultHasher::new();
-        self.hash(&mut hash);
-        hash.finish()
-    }
+impl BindableResource for Vec<TextureRange<'_>> {
+    fn as_binding(&self) -> ResourceBinding {
+        let bindings = self.iter()
+            .map(|range| {
+                if let ResourceBinding::Texture(tex_info) = range.as_binding() {
+                    tex_info
+                } else {
+                    unreachable!();
+                }
+            })
+            .collect::<Vec<_>>();
 
-    fn ty(&self) -> BindableResourceType {
-        BindableResourceType::Texture
+        ResourceBinding::TextureArray(0, bindings)
     }
 }
