@@ -84,6 +84,7 @@ impl RenderableApp for WorldApp {
         let mut load_timer = Timer::new();
         load_timer.start();
         self.asset_manager.request_load("mesh/cerberus/scene.gltf")?;
+        self.asset_manager.request_load("texture/minedump_flats_4k.hdr")?;
         load_timer.stop();
         let load_ms = load_timer.elapsed_total::<Milliseconds>().value();
 
@@ -93,11 +94,21 @@ impl RenderableApp for WorldApp {
         renderer_new_timer.stop();
         let renderer_new_ms = renderer_new_timer.elapsed_total::<Milliseconds>().value();
 
-        // mesh/cerberus/scene.gltf -> mesh/cerberus/scene.mscl
         let collection = AssetHandle::<MeshCollection>::new(PathBuf::from("mesh/cerberus/scene.mscl").into());
         let mut upload_timer = Timer::new();
         upload_timer.start();
         renderer.add_mesh(render_device, collection)?;
+
+        let skybox_handle = AssetHandle::<zenith::asset::texture::Texture>::new(
+            PathBuf::from("texture/minedump_flats_4k_cubemap_2048x2048.tex").into()
+        );
+        if let Some(skybox_tex) = skybox_handle.get() {
+            renderer.set_skybox(render_device, &skybox_tex)?;
+            log::info!("Skybox loaded and set successfully");
+        } else {
+            log::warn!("Skybox texture not found after loading HDR");
+        }
+
         upload_timer.stop();
         let upload_ms = upload_timer.elapsed_total::<Milliseconds>().value();
 

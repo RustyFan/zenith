@@ -85,6 +85,39 @@ impl<'a> UploadPool<'a> {
         }
     }
 
+    /// Size in bytes of one array layer (one face for cubemap) for buffer-to-image copy.
+    fn texture_layer_size_bytes(extent: vk::Extent3D, format: vk::Format) -> vk::DeviceSize {
+        let (block_w, block_h, bytes_per_block) = match format {
+            vk::Format::BC5_UNORM_BLOCK
+            | vk::Format::BC6H_UFLOAT_BLOCK
+            | vk::Format::BC6H_SFLOAT_BLOCK
+            | vk::Format::BC7_UNORM_BLOCK
+            | vk::Format::BC7_SRGB_BLOCK => (4u32, 4, 16),
+            _ => (1, 1, Self::bytes_per_pixel(format)),
+        };
+        let blocks_x = (extent.width + block_w - 1) / block_w;
+        let blocks_y = (extent.height + block_h - 1) / block_h;
+        (blocks_x as vk::DeviceSize) * (blocks_y as vk::DeviceSize) * (bytes_per_block as vk::DeviceSize)
+    }
+
+    fn bytes_per_pixel(format: vk::Format) -> u32 {
+        use vk::Format;
+        match format {
+            Format::R8_UNORM | Format::R8_SNORM => 1,
+            Format::R8G8_UNORM | Format::R8G8_SNORM | Format::R16_UNORM | Format::R16_SFLOAT => 2,
+            Format::R8G8B8A8_UNORM
+            | Format::R8G8B8A8_SRGB
+            | Format::R32_SFLOAT
+            | Format::R16G16_UNORM
+            | Format::R16G16_SFLOAT => 4,
+            Format::R16G16B16A16_UNORM
+            | Format::R16G16B16A16_SFLOAT
+            | Format::R32G32_SFLOAT => 8,
+            Format::R32G32B32A32_SFLOAT => 16,
+            _ => 4, // fallback
+        }
+    }
+
     fn start_new_batch(&mut self, device: &RenderDevice, required_size: vk::DeviceSize) -> Result<(), UploadError> {
         if let Some(batch) = self.current.take() {
             if !batch.pending.is_empty() || !batch.pending_textures.is_empty() {
@@ -292,25 +325,33 @@ impl<'a> UploadPool<'a> {
 
                 for p in pending_textures.iter() {
                     let aspect = p.dst.texture().aspect();
-                    let region = vk::BufferImageCopy::default()
-                        .buffer_offset(p.src_offset)
-                        .buffer_row_length(0)
-                        .buffer_image_height(0)
-                        .image_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(aspect)
-                                .mip_level(p.dst.subresource().base_mip)
-                                .base_array_layer(p.dst.subresource().base_layer)
-                                .layer_count(1),
-                        )
-                        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                        .image_extent(p.dst.texture().extent());
-                    
+                    let extent = p.dst.texture().extent();
+                    let num_layers = p.dst.subresource().num_layers;
+                    let layer_size = Self::texture_layer_size_bytes(extent, p.dst.texture().format());
+
+                    let regions: Vec<vk::BufferImageCopy> = (0..num_layers)
+                        .map(|layer_idx| {
+                            vk::BufferImageCopy::default()
+                                .buffer_offset(p.src_offset + layer_idx as vk::DeviceSize * layer_size)
+                                .buffer_row_length(0)
+                                .buffer_image_height(0)
+                                .image_subresource(
+                                    vk::ImageSubresourceLayers::default()
+                                        .aspect_mask(aspect)
+                                        .mip_level(p.dst.subresource().base_mip)
+                                        .base_array_layer(p.dst.subresource().base_layer + layer_idx)
+                                        .layer_count(1),
+                                )
+                                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                                .image_extent(extent)
+                        })
+                        .collect();
+
                     encoder.copy_buffer_to_image(
                         staging,
                         p.dst.texture(),
                         TextureLayout::TransferDst,
-                        std::slice::from_ref(&region),
+                        &regions,
                     );
                 }
 

@@ -133,20 +133,24 @@ impl WorldRenderer {
             direct_lighting_renderer: DirectLightingRenderer::new(device, width, height)?,
         })
     }
-    
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        
+
         if width == self.width && height == self.height {
             return;
         }
 
         self.width = width;
         self.height = height;
-        
+
         self.direct_lighting_renderer.resize(width, height);
+    }
+
+    pub fn set_skybox(&mut self, device: &RenderDevice, skybox: &zenith_asset::texture::Texture) -> anyhow::Result<()> {
+        self.direct_lighting_renderer.set_skybox(device, skybox)
     }
 
     pub fn add_mesh(&mut self, device: &RenderDevice,  mesh_collection: AssetHandle<MeshCollection>) -> anyhow::Result<()> {

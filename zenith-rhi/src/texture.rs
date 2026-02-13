@@ -29,6 +29,7 @@ pub struct TextureDesc {
     pub array_layers: u32,
     pub samples: vk::SampleCountFlags,
     pub tiling: vk::ImageTiling,
+    pub flags: vk::ImageCreateFlags,
 }
 
 impl Default for TextureDesc {
@@ -49,6 +50,7 @@ impl Default for TextureDesc {
             array_layers: 1,
             samples: vk::SampleCountFlags::TYPE_1,
             tiling: vk::ImageTiling::OPTIMAL,
+            flags: vk::ImageCreateFlags::empty(),
         }
     }
 }
@@ -99,6 +101,7 @@ impl TextureDesc {
             image_type: vk::ImageType::TYPE_2D,
             view_type: vk::ImageViewType::CUBE,
             array_layers: 6,
+            flags: vk::ImageCreateFlags::CUBE_COMPATIBLE,
             ..Default::default()
         }
     }
@@ -313,6 +316,7 @@ impl Texture {
         let memory_properties = device.memory_properties();
         // Create image
         let image_info = vk::ImageCreateInfo::default()
+            .flags(desc.flags)
             .image_type(desc.image_type)
             .format(desc.format)
             .extent(desc.extent)
@@ -378,6 +382,7 @@ impl Texture {
             array_layers: 1,
             samples: Default::default(),
             tiling: Default::default(),
+            flags: vk::ImageCreateFlags::empty(),
         };
 
         let texture = Self {

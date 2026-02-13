@@ -1,7 +1,7 @@
 ﻿use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use zenith_rendergraph::{ColorAttachment, RenderGraphBuilder, RenderGraphResource, VertexLayout};
-use zenith_rhi::{vk, Buffer, BufferState, GraphicPipelineStateBuilder, GraphicShaderInputBuilder, RenderDevice, Shader, Texture, TextureState, GraphicPipelineDesc, ShaderStage, BindlessPool};
+use zenith_rhi::{vk, Buffer, BufferState, GraphicPipelineStateBuilder, GraphicShaderInputBuilder, RenderDevice, Shader, Texture, TextureState, GraphicPipelineDesc, ShaderStage, BindlessPool, TextureDesc, TextureLayout, UploadPool, ImmediateCommandEncoder};
 use zenith_rhi::pipeline::{GraphicPipelineAttachmentsBuilder, RasterizationStateBuilder};
 use crate::{DEFAULT_RENDER_RESOURCES};
 use crate::defer_shading::SceneTextures;
@@ -17,6 +17,8 @@ pub struct DirectLightingRenderer {
     width: u32,
     height: u32,
     lighting_fragment_shader: Arc<Shader>,
+    skybox_texture: Option<Arc<Texture>>,
+    default_cubemap: Arc<Texture>,
 }
 
 impl DirectLightingRenderer {
@@ -28,10 +30,42 @@ impl DirectLightingRenderer {
             ShaderStage::Fragment,
         )?);
 
+        // Create a default 1x1 black cubemap for when no skybox is set
+        let default_cubemap = {
+            let cubemap_tex = Texture::new(
+                device,
+                &TextureDesc::new_cube(
+                    "default_cubemap",
+                    1,
+                    vk::Format::R8G8B8A8_UNORM,
+                )
+                .with_usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            )?;
+
+            // Upload black pixels for all 6 faces (1x1x6 = 6 pixels, 4 bytes each = 24 bytes)
+            let black_pixels = vec![0u8; 24];  // 6 faces * 1 pixel * 4 channels
+            {
+                let mut upload_pool = UploadPool::new()?;
+                upload_pool.enqueue_upload_texture(
+                    device,
+                    cubemap_tex.as_range(TextureLayout::Undefined, .., ..),
+                    &black_pixels,
+                    TextureState::Sampled,
+                )?;
+
+                let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
+                upload_pool.flush(&immediate, device)?;
+            }
+
+            std::sync::Arc::new(cubemap_tex)
+        };
+
         Ok(Self {
             width,
             height,
             lighting_fragment_shader,
+            skybox_texture: None,
+            default_cubemap,
         })
     }
 
@@ -46,6 +80,36 @@ impl DirectLightingRenderer {
 
         self.width = width;
         self.height = height;
+    }
+
+    pub fn set_skybox(&mut self, device: &RenderDevice, texture_asset: &zenith_asset::texture::Texture) -> anyhow::Result<()> {
+        // Create GPU cubemap texture
+        let gpu_texture = Texture::new(
+            device,
+            &TextureDesc::new_cube(
+                "skybox_cubemap",
+                texture_asset.width,
+                texture_asset.format.to_vk(),
+            )
+            .with_usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+        )?;
+
+        // Upload texture data using immediate command encoder
+        {
+            let mut upload_pool = UploadPool::new()?;
+            upload_pool.enqueue_upload_texture(
+                device,
+                gpu_texture.as_range(TextureLayout::Undefined, .., ..),
+                &texture_asset.pixels,
+                TextureState::Sampled,
+            )?;
+
+            let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
+            upload_pool.flush(&immediate, device)?;
+        }
+
+        self.skybox_texture = Some(Arc::new(gpu_texture));
+        Ok(())
     }
 
     pub fn render(
@@ -76,6 +140,10 @@ impl DirectLightingRenderer {
         let vb = builder.import(default_res.screen_vb.clone(), BufferState::Vertex);
         let ib = builder.import(default_res.screen_ib.clone(), BufferState::Index);
 
+        // Import skybox texture (or default cubemap)
+        let skybox_to_bind = self.skybox_texture.as_ref().unwrap_or(&self.default_cubemap);
+        let skybox_res = builder.import(skybox_to_bind.clone(), TextureState::Sampled);
+
         let mut node = builder.add_graphic_node("lighting");
 
         let pipeline_handle = node.register_pipeline(pipeline_desc.clone());
@@ -86,6 +154,8 @@ impl DirectLightingRenderer {
         let gbuffer_nmr = node.read(&scene_texture.normal_mra, TextureState::Sampled);
         let scene_depth = node.read(&scene_texture.depth, TextureState::Sampled);
         let view = node.read(view, BufferState::Uniform);
+        let skybox_handle = node.read(&skybox_res, TextureState::Sampled);
+
         let output_rt = node.write(output, TextureState::Color);
 
         let width = self.width;
@@ -96,7 +166,8 @@ impl DirectLightingRenderer {
                 .bind("view", view)?
                 .bind("base_color_tex", gbuffer_base)?
                 .bind("normal_mra_tex", gbuffer_nmr)?
-                .bind("depth_tex", scene_depth)?;
+                .bind("depth_tex", scene_depth)?
+                .bind("skybox_cubemap", skybox_handle)?;
 
             ctx.begin_rendering(
                 (width, height),

@@ -1,9 +1,9 @@
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use anyhow::Result;
 use zenith_core::log::info;
 use zenith_core::workspace_root;
 use crate::gltf::{GltfLoader, RawGltfProcessor};
+use crate::hdr::{HdrLoader, RawHdrProcessor};
 use crate::{RawResourceBaker, AssetLoadRequest, AssetType, RawResourceLoadRequest, RawResourceLoader, ASSET_REGISTRY, RawResourceLoadRequestBuilder, AssetLoadRequestBuilder, Asset, AssetUrl, deserialize_asset};
 use crate::material::Material;
 use crate::mesh::{Mesh, MeshCollection};
@@ -17,7 +17,7 @@ pub struct AssetManager {
     content_dir: PathBuf,
 }
 
-const CACHE_VERSION: &str = "7f9c2e2f-9b9b-4c51-9b65-2f7a6c3e0b2d";
+const CACHE_VERSION: &str = "9def1275-2dc5-47c7-b4c4-daed2c7d3951";
 const CACHE_VERSION_FILE: &str = ".cache_version";
 
 impl AssetManager {
@@ -50,7 +50,22 @@ impl AssetManager {
                 .relative_path(url)
                 .build()?)
         } else {
-            // TODO: this should be validate as AssetUrl
+            let extension = url.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+
+            if extension == "hdr" {
+                // Load the cached cubemap texture directly
+                if let Some(cached_path) = self.find_hdr_cache_file(&url) {
+                    let cache_url: AssetUrl = cached_path.into();
+                    return self.request_load_asset(AssetLoadRequestBuilder::default()
+                        .url(cache_url)
+                        .build()?);
+                }
+                anyhow::bail!("HDR cache file not found for {:?}", url);
+            }
+
+            // Default: assume MeshCollection
             let mut url = url;
             url.set_extension(MeshCollection::extension());
 
@@ -63,42 +78,74 @@ impl AssetManager {
     #[profiling::function]
     fn should_bake_asset(&self, path: &impl AsRef<Path>) -> bool {
         let raw_path = self.content_dir.join(path.as_ref());
+        let extension = raw_path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
 
         if !self.cache_version_matches() {
             return true;
         }
 
-        let mesh_collection = MeshCollection::new(path);
-        let asset_url = mesh_collection.asset_url();
-        let cached_file_path = self.cache_dir.join(asset_url.path);
+        // For GLTF files, check the mesh collection cache
+        if extension == "gltf" {
+            let mesh_collection = MeshCollection::new(path);
+            let asset_url = mesh_collection.asset_url();
+            let cached_file_path = self.cache_dir.join(asset_url.path);
 
-        // if no cache had been found, rebake
-        if !cached_file_path.exists() {
-            return true;
+            // if no cache had been found, rebake
+            if !cached_file_path.exists() {
+                return true;
+            }
+
+            let asset_metadata = match std::fs::metadata(cached_file_path) {
+                Ok(metadata) => metadata,
+                Err(_) => return false,
+            };
+
+            let source_metadata = match std::fs::metadata(raw_path) {
+                Ok(metadata) => metadata,
+                Err(_) => return false,
+            };
+
+            let asset_last_modified_time = match asset_metadata.modified() {
+                Ok(time) => time,
+                Err(_) => return false,
+            };
+
+            let raw_last_modified_time = match source_metadata.modified() {
+                Ok(time) => time,
+                Err(_) => return false,
+            };
+
+            // if the raw asset had been modified, rebake
+            return raw_last_modified_time > asset_last_modified_time;
         }
 
-        let asset_metadata = match std::fs::metadata(cached_file_path) {
-            Ok(metadata) => metadata,
-            Err(_) => return false,
-        };
+        // For HDR files, check if a cached cubemap texture exists and is up-to-date
+        if extension == "hdr" {
+            if !raw_path.exists() {
+                return false;
+            }
 
-        let source_metadata = match std::fs::metadata(raw_path) {
-            Ok(metadata) => metadata,
-            Err(_) => return false,
-        };
+            if let Some(cached_path) = self.find_hdr_cache_file(path) {
+                let cached_abs_path = self.cache_dir.join(&cached_path);
+                let cache_modified = std::fs::metadata(&cached_abs_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+                let source_modified = std::fs::metadata(&raw_path)
+                    .and_then(|m| m.modified())
+                    .ok();
 
-        let asset_last_modified_time = match asset_metadata.modified() {
-            Ok(time) => time,
-            Err(_) => return false,
-        };
+                match (cache_modified, source_modified) {
+                    (Some(cache_time), Some(source_time)) => return source_time > cache_time,
+                    _ => return true,
+                }
+            }
 
-        let raw_last_modified_time = match source_metadata.modified() {
-            Ok(time) => time,
-            Err(_) => return false,
-        };
-
-        // if the raw asset had been modified, rebake
-        raw_last_modified_time > asset_last_modified_time
+            return true;
+        }
+        
+        true
     }
 
     fn cache_version_matches(&self) -> bool {
@@ -119,19 +166,25 @@ impl AssetManager {
 
     #[profiling::function]
     fn request_load_raw(&self, load_request: RawResourceLoadRequest) -> Result<()> {
-        // TODO: support other types of raw asset
-        assert_eq!(load_request.relative_path.extension(), Some(OsStr::new("gltf")));
+        let extension = load_request.relative_path.extension()
+            .and_then(|e| e.to_str());
 
         let raw_content_path = self.content_dir.join(&load_request.relative_path);
-
-        // Load the raw asset synchronously
-        let raw = GltfLoader::load(&raw_content_path)?;
-
-        // Bake the asset synchronously
         let asset_url = AssetUrl::from(load_request.relative_path.clone());
-        RawGltfProcessor::bake(raw, ASSET_REGISTRY.get().unwrap(), &self.cache_dir, &asset_url)?;
-        self.write_cache_version()?;
 
+        match extension {
+            Some("gltf") => {
+                let raw = GltfLoader::load(&raw_content_path)?;
+                RawGltfProcessor::bake(raw, ASSET_REGISTRY.get().unwrap(), &self.cache_dir, &asset_url)?;
+            }
+            Some("hdr") => {
+                let raw = HdrLoader::load(&raw_content_path)?;
+                RawHdrProcessor::bake(raw, ASSET_REGISTRY.get().unwrap(), &self.cache_dir, &asset_url)?;
+            }
+            _ => anyhow::bail!("Unsupported asset format: {:?}", extension),
+        }
+
+        self.write_cache_version()?;
         info!("Successfully baked asset {:?}", raw_content_path);
         Ok(())
     }
@@ -207,5 +260,25 @@ impl AssetManager {
             .get()
             .unwrap()
             .register(url, asset);
+    }
+
+    /// Find a cached cubemap texture file for a given HDR source path.
+    /// The cache file is named `{stem}_cubemap_{size}x{size}.tex`.
+    fn find_hdr_cache_file(&self, hdr_path: &impl AsRef<Path>) -> Option<PathBuf> {
+        let parent = hdr_path.as_ref().parent().unwrap_or(Path::new(""));
+        let stem = hdr_path.as_ref().file_stem()?.to_str()?;
+        let cache_parent = self.cache_dir.join(parent);
+        let prefix = format!("{}_cubemap_", stem);
+
+        let entries = std::fs::read_dir(&cache_parent).ok()?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(&prefix) && name_str.ends_with(".tex") {
+                // Return relative path (without cache_dir prefix) for use as AssetUrl
+                return Some(parent.join(name_str.into_owned()));
+            }
+        }
+        None
     }
 }

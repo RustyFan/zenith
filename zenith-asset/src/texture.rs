@@ -17,6 +17,8 @@ pub enum TextureFormat {
     Bc5Unorm,
     Bc7Unorm,
     Bc7Srgb,
+    Bc6hUfloat,
+    Bc6hSfloat,
 }
 
 impl TextureFormat {
@@ -29,24 +31,24 @@ impl TextureFormat {
             TextureFormat::R16G16 => 4,
             TextureFormat::R16G16B16A16 => 8,
             TextureFormat::R32G32B32A32Float => 16,
-            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb => 0,
+            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb | TextureFormat::Bc6hUfloat | TextureFormat::Bc6hSfloat => 0,
         }
     }
 
     pub fn is_block_compressed(&self) -> bool {
-        matches!(self, TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb)
+        matches!(self, TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb | TextureFormat::Bc6hUfloat | TextureFormat::Bc6hSfloat)
     }
 
     pub fn block_dimensions(&self) -> (u32, u32) {
         match self {
-            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb => (4, 4),
+            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb | TextureFormat::Bc6hUfloat | TextureFormat::Bc6hSfloat => (4, 4),
             _ => (1, 1),
         }
     }
 
     pub fn bytes_per_block(&self) -> u32 {
         match self {
-            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb => 16,
+            TextureFormat::Bc5Unorm | TextureFormat::Bc7Unorm | TextureFormat::Bc7Srgb | TextureFormat::Bc6hUfloat | TextureFormat::Bc6hSfloat => 16,
             _ => self.bytes_per_pixel(),
         }
     }
@@ -67,13 +69,15 @@ impl TextureFormat {
             TextureFormat::R8 => ash::vk::Format::R8_UNORM,
             TextureFormat::R8G8 => ash::vk::Format::R8G8_UNORM,
             TextureFormat::R8G8B8A8 => ash::vk::Format::R8G8B8A8_SRGB,
-            TextureFormat::R16 => ash::vk::Format::R16_UNORM,
-            TextureFormat::R16G16 => ash::vk::Format::R16G16_UNORM,
-            TextureFormat::R16G16B16A16 => ash::vk::Format::R16G16B16A16_UNORM,
+            TextureFormat::R16 => ash::vk::Format::R16_SFLOAT,
+            TextureFormat::R16G16 => ash::vk::Format::R16G16_SFLOAT,
+            TextureFormat::R16G16B16A16 => ash::vk::Format::R16G16B16A16_SFLOAT,
             TextureFormat::R32G32B32A32Float => ash::vk::Format::R32G32B32A32_SFLOAT,
             TextureFormat::Bc5Unorm => ash::vk::Format::BC5_UNORM_BLOCK,
             TextureFormat::Bc7Unorm => ash::vk::Format::BC7_UNORM_BLOCK,
             TextureFormat::Bc7Srgb => ash::vk::Format::BC7_SRGB_BLOCK,
+            TextureFormat::Bc6hUfloat => ash::vk::Format::BC6H_UFLOAT_BLOCK,
+            TextureFormat::Bc6hSfloat => ash::vk::Format::BC6H_SFLOAT_BLOCK,
         }
     }
 
@@ -86,6 +90,8 @@ pub struct Texture {
     pub height: u32,
     pub format: TextureFormat,
     pub pixels: Vec<u8>,
+    #[builder(default)]
+    pub is_cubemap: bool,
 }
 
 impl Asset for Texture {

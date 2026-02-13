@@ -16,15 +16,28 @@ Texture2D<float4> normal_mra_tex;
 [[vk::binding(3, 1)]]
 Texture2D<float> depth_tex;
 
+[[vk::binding(4, 1)]]
+TextureCube skybox_cubemap;
+
 struct PSOutput {
     float4 output : SV_Target;
 };
 
 [shader("fragment")]
 PSOutput main(PSInput input) {
+    let ndc_pos = float4((input.uv - 0.5) * float2(2.0, -2.0), 1.0, 1.0);
+    var world_pos = mul(view.inv_view_proj, ndc_pos);
+    world_pos.xyz /= world_pos.w;
+
+    let view_dir = normalize(world_pos.xyz - view.position.xyz);
+
     let depth = depth_tex.Sample(get_sampler(SamplerKind::NearestClamp), input.uv).r;
     if (depth == 0.0) {
-        discard;
+        let skybox_color = skybox_cubemap.Sample(get_sampler(SamplerKind::LinearClamp), view_dir);
+
+        PSOutput output;
+        output.output = float4(skybox_color.rgb, 1.0);
+        return output;
     }
 
     let sampler = get_sampler(SamplerKind::LinearClamp);
@@ -36,13 +49,9 @@ PSOutput main(PSInput input) {
     float roughness;
     decode_normal_mra(nmr, n, metallic, roughness);
 
-    let clip_pos = float4((input.uv - 0.5) * float2(2.0, -2.0), depth, 1.0);
-    var world_point = mul(view.inv_view_proj, clip_pos);
-    world_point.xyz /= world_point.w;
-
     let l = float3(0.0, 0.0, 1.0);
     let light_color = float3(1.0, 1.0, 1.0);
-    let v = normalize(view.position.xyz - world_point.xyz);
+    let v = -view_dir;
 
     let specular_color = lerp(float3(0.04), base.xyz, metallic);
     let diffuse_color = max(1.0 - metallic, 0.0) * base.xyz;

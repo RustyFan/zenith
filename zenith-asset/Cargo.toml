@@ -20,3 +20,4 @@ ash.workspace = true
 zenith-core = { path = "../zenith-core" }
 ispc-texcomp = "0.1.20"
 zstd = "0.13.3"
+half = "2.7.1"

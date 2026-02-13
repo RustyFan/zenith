@@ -18,6 +18,7 @@ use zenith_core::file::load_with_memory_mapping;
 pub mod mesh;
 pub mod manager;
 pub mod gltf;
+pub mod hdr;
 pub mod texture;
 pub mod material;
 
