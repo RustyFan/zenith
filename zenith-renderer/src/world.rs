@@ -7,9 +7,9 @@ use zenith_asset::material::Material;
 use zenith_asset::mesh::{MeshCollection, Mesh};
 use zenith_core::camera::{Camera, ViewData, WORLD_SPACE_UP};
 use zenith_core::math::{Degree};
-use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, BufferState, Shader, Texture, TextureDesc, TextureLayout, TextureState, ImmediateCommandEncoder, UploadPool, Sampler, SamplerDesc, GraphicPipelineDesc, GraphicPipelineAttachments, DepthStencilStateBuilder, BindlessHandle, BindlessPool};
-use zenith_rhi::pipeline::{BlendStateBuilder};
-use zenith_rendergraph::{RenderGraphBuilder, RenderGraphResource, VertexLayout, GraphicShaderInputBuilder, GraphicPipelineStateBuilder, ColorAttachment, DepthStencilAttachment};
+use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, BufferState, Shader, Texture, TextureDesc, TextureLayout, TextureState, ImmediateCommandEncoder, UploadPool, Sampler, SamplerDesc, GraphicPipelineDesc, DepthStencilStateBuilder, BindlessHandle, BindlessPool, GraphicPipelineState};
+use zenith_rhi::pipeline::{GraphicPipelineAttachmentsBuilder};
+use zenith_rendergraph::{RenderGraphBuilder, RenderGraphResource, VertexLayout, GraphicShaderInputBuilder, ColorAttachment, DepthStencilAttachment};
 use crate::defer_shading::SceneTextures;
 use crate::lighting::DirectLightingRenderer;
 
@@ -388,29 +388,22 @@ impl WorldRenderer {
     ) -> SceneTextures {
         let mut scene_textures = SceneTextures::new(builder, self.width, self.height);
 
-        let shader = GraphicShaderInputBuilder::default()
-            .vertex_shader(self.vertex_shader.clone())
-            .fragment_shader(self.fragment_shader.clone())
-            .vertex_layout::<Vertex>()
-            .build()
-            .unwrap();
-
-        let state = GraphicPipelineStateBuilder::default()
-            .depth_stencil(DepthStencilStateBuilder::default()
-                .depth_test_enable(true)
-                .depth_write_enable(true)
-                .build().unwrap())
-            .push_blend_state(BlendStateBuilder::default().build().unwrap())
-            .push_blend_state(BlendStateBuilder::default().build().unwrap())
-            .build();
-
-        let attachments = GraphicPipelineAttachments {
-            color_formats: vec![vk::Format::R8G8B8A8_UNORM, vk::Format::R8G8B8A8_UNORM],
-            depth_format: Some(vk::Format::D32_SFLOAT),
-            stencil_format: None,
-        };
-
-        let pipeline_desc = GraphicPipelineDesc::new("gbuffer", shader, state, attachments);
+        let pipeline_desc = GraphicPipelineDesc::new(
+            "gbuffer",
+            GraphicShaderInputBuilder::default()
+                .vertex_shader(self.vertex_shader.clone())
+                .fragment_shader(self.fragment_shader.clone())
+                .vertex_layout::<Vertex>()
+                .build().unwrap(),
+            GraphicPipelineState::default(),
+            GraphicPipelineAttachmentsBuilder::default()
+                .color_no_blending(scene_textures.base_color.desc(builder).format)
+                .color_no_blending(scene_textures.normal_mra.desc(builder).format)
+                .depth_stencil(scene_textures.depth.desc(builder).format, DepthStencilStateBuilder::default()
+                    .depth_test_enable(true).depth_write_enable(true)
+                    .build().unwrap())
+                .build().unwrap()
+        );
 
         // Import buffers first (RenderGraphBuilder is mutably borrowed when a node builder exists).
         let mut imported = Vec::with_capacity(self.meshes.len());
@@ -473,7 +466,7 @@ impl WorldRenderer {
 
                 ctx.bind_vertex_buffers(vb, 0, &[0]);
                 ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT32);
-                ctx.draw_indexed(0..index_count, 0..1, 0);
+                ctx.encoder().draw_indexed(0..index_count, 0..1, 0);
             }
 
             ctx.end_rendering();

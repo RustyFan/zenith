@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
-use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, Shader, TextureState, BufferState, Texture, ImmediateCommandEncoder, UploadPool, GraphicPipelineDesc, GraphicPipelineAttachments};
+use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, Shader, TextureState, BufferState, Texture, ImmediateCommandEncoder, UploadPool, GraphicPipelineDesc};
 use zenith_rendergraph::{RenderGraphBuilder, RenderGraphResource, VertexLayout, GraphicShaderInputBuilder, GraphicPipelineStateBuilder, ColorAttachment};
-use zenith_rhi::pipeline::{RasterizationStateBuilder, BlendStateBuilder};
+use zenith_rhi::pipeline::{RasterizationStateBuilder, GraphicPipelineAttachmentsBuilder};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, VertexLayout)]
@@ -76,26 +76,19 @@ impl TriangleRenderer {
         width: u32,
         height: u32,
     ) {
-        // Create pipeline descriptor
-        let shader = GraphicShaderInputBuilder::default()
-            .vertex_shader(self.vertex_shader.clone())
-            .fragment_shader(self.fragment_shader.clone())
-            .vertex_layout::<Vertex>()
-            .build()
-            .unwrap();
-
-        let state = GraphicPipelineStateBuilder::default()
-            .rasterization(RasterizationStateBuilder::default().cull_mode(vk::CullModeFlags::NONE).build().unwrap())
-            .push_blend_state(BlendStateBuilder::default().build().unwrap())
-            .build();
-
-        let attachments = GraphicPipelineAttachments {
-            color_formats: vec![output.desc(builder).format],
-            depth_format: None,
-            stencil_format: None,
-        };
-
-        let pipeline_desc = GraphicPipelineDesc::new("triangle", shader, state, attachments);
+        let pipeline_desc = GraphicPipelineDesc::new(
+            "triangle",
+            GraphicShaderInputBuilder::default()
+                .vertex_shader(self.vertex_shader.clone())
+                .fragment_shader(self.fragment_shader.clone())
+                .vertex_layout::<Vertex>()
+                .build().unwrap(),
+            GraphicPipelineStateBuilder::default()
+                .rasterization(RasterizationStateBuilder::default().cull_mode(vk::CullModeFlags::NONE).build().unwrap())
+                .build().unwrap(),
+            GraphicPipelineAttachmentsBuilder::default()
+                .color_no_blending(output.desc(builder).format)
+                .build().unwrap());
 
         let vb = builder.import(self.vertex_buffer.clone(), BufferState::Vertex);
         let ib = builder.import(self.index_buffer.clone(), BufferState::Index);
@@ -128,7 +121,7 @@ impl TriangleRenderer {
 
             ctx.bind_vertex_buffers(vb, 0, &[0]);
             ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT16);
-            ctx.draw_indexed(0..3, 0..1, 0);
+            ctx.encoder().draw_indexed(0..3, 0..1, 0);
 
             ctx.end_rendering();
             Ok(())

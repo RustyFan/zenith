@@ -233,7 +233,6 @@ impl<'a> UploadPool<'a> {
         let queue = device.graphics_queue();
         
         let submit_batch = |staging: &Buffer, pending: Vec<PendingBufferCopy<'a>>, pending_textures: Vec<PendingTextureCopy<'a>>| -> Result<(), UploadError> {
-            let staging_handle = staging.handle();
             let staging_size = staging.size() as usize;
             let result = immediate.submit_and_wait(|encoder| {
                 let mut pre: Vec<BufferBarrier> = Vec::with_capacity(1 + pending.len());
@@ -262,7 +261,7 @@ impl<'a> UploadPool<'a> {
                         queue,
                     ).with_range(p.dst.offset() as usize, p.size as usize));
                 }
-                encoder.buffer_barriers(&pre);
+                encoder.pipeline_barriers(&[], &[], &pre);
 
                 // Dst textures: Undefined -> TransferDst
                 if !pending_textures.is_empty() {
@@ -279,7 +278,7 @@ impl<'a> UploadPool<'a> {
                             true,
                         ));
                     }
-                    encoder.texture_barriers(&pre_img);
+                    encoder.pipeline_barriers(&[], &pre_img, &[]);
                 }
 
                 // Copies
@@ -288,7 +287,7 @@ impl<'a> UploadPool<'a> {
                         .src_offset(p.src_offset)
                         .dst_offset(p.dst.offset() as vk::DeviceSize)
                         .size(p.size);
-                    encoder.copy_buffer(staging_handle, p.dst.buffer().handle(), std::slice::from_ref(&region));
+                    encoder.copy_buffer(staging, p.dst.buffer(), std::slice::from_ref(&region));
                 }
 
                 for p in pending_textures.iter() {
@@ -308,9 +307,9 @@ impl<'a> UploadPool<'a> {
                         .image_extent(p.dst.texture().extent());
                     
                     encoder.copy_buffer_to_image(
-                        staging_handle,
-                        p.dst.texture().handle(),
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        staging,
+                        p.dst.texture(),
+                        TextureLayout::TransferDst,
                         std::slice::from_ref(&region),
                     );
                 }
@@ -335,7 +334,7 @@ impl<'a> UploadPool<'a> {
                         queue,
                     ).with_range(p.dst.offset() as usize, p.size as usize));
                 }
-                encoder.buffer_barriers(&post);
+                encoder.pipeline_barriers(&[], &[], &pre);
 
                 if !pending_textures.is_empty() {
                     let mut post_img: Vec<TextureBarrier> = Vec::with_capacity(pending_textures.len());
@@ -352,7 +351,7 @@ impl<'a> UploadPool<'a> {
                             false,
                         ));
                     }
-                    encoder.texture_barriers(&post_img);
+                    encoder.pipeline_barriers(&[], &post_img, &[]);
                 }
             });
             result.map_err(Self::map_vk_error)?;

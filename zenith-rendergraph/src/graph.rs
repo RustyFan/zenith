@@ -1,28 +1,28 @@
 //! Render graph execution and resource management.
 
-use crate::interface::{Buffer, BufferState, ResourceState, Texture, TextureState};
+use crate::interface::{Buffer, BufferDesc, BufferState, ResourceState, Texture, TextureDesc, TextureState};
 use crate::node::{NodePipelineState, RenderGraphNode};
 use crate::resource::{GraphBindableAccess, GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess, Rt, Srv};
 use std::cell::Cell;
-use std::collections::Bound;
-use std::ops::RangeBounds;
 use std::sync::{Arc};
 use bytemuck::NoUninit;
 use parking_lot::Mutex;
 use zenith_core::collections::SmallVec;
 use zenith_core::color;
-use zenith_rhi::{BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout, ColorAttachmentDesc, DepthStencilAttachmentDesc, GraphicPipeline, DescriptorBindingError, DescriptorSetBinder};
-use zenith_rhi::{vk, RenderDevice, Swapchain};
+use zenith_rhi::{vk, RenderDevice, Swapchain, BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier,
+                 PipelineStages, ShaderReflection, CommandPool, TextureLayout,
+                 ColorAttachmentDesc, DepthStencilAttachmentDesc, GraphicPipeline,
+                 DescriptorBindingError, DescriptorSetBinder, PipelineCache};
 use crate::GraphicPipelineHandle;
 
 pub enum ResourceStorage {
     ManagedBuffer {
-        desc: zenith_rhi::BufferDesc,
+        desc: BufferDesc,
         resource: Buffer,
         state_tracker: ResourceStateTracker<BufferState>,
     },
     ManagedTexture {
-        desc: zenith_rhi::TextureDesc,
+        desc: TextureDesc,
         resource: Texture,
         state_tracker: ResourceStateTracker<TextureState>,
     },
@@ -104,7 +104,7 @@ impl RenderGraph {
     pub fn compile(
         mut self,
         device: &mut RenderDevice,
-        pipeline_cache: &mut zenith_rhi::PipelineCache,
+        pipeline_cache: &mut PipelineCache,
     ) -> CompiledRenderGraph {
         // Create resources from initial resource descriptors
         let resources: Vec<ResourceStorage> = self.initial_resources
@@ -194,7 +194,7 @@ impl RenderGraph {
         serial_nodes: &[RenderGraphNode],
         present_nodes: &[RenderGraphNode],
         device: &RenderDevice,
-        pipeline_cache: &mut zenith_rhi::PipelineCache,
+        pipeline_cache: &mut PipelineCache,
     ) -> Vec<Vec<Arc<GraphicPipeline>>> {
         let total_nodes = serial_nodes.len() + present_nodes.len();
         let mut node_pipelines = Vec::with_capacity(total_nodes);
@@ -544,11 +544,8 @@ impl CompiledRenderGraph {
             }
         }
 
-        if !image_barriers.is_empty() {
-            encoder.texture_barriers(&image_barriers);
-        }
-        if !buffer_barriers.is_empty() {
-            encoder.buffer_barriers(&buffer_barriers);
+        if !buffer_barriers.is_empty() || !image_barriers.is_empty() {
+            encoder.pipeline_barriers(&[], &image_barriers, &buffer_barriers);
         }
     }
 }
@@ -865,38 +862,12 @@ impl<'node> GraphicNodeExecutionContext<'node> {
 
     #[inline]
     pub fn bind_vertex_buffers(&self, buf: RenderGraphResourceAccess<Buffer, Srv>, first_binding: u32, offsets: &[u64]) {
-        self.encoder.bind_vertex_buffers(first_binding, &[self.get(&buf).handle()], offsets);
+        self.encoder.bind_vertex_buffers(first_binding, &[self.get(&buf)], offsets);
     }
 
     #[inline]
     pub fn bind_index_buffer(&self, buf: RenderGraphResourceAccess<Buffer, Srv>, offset: u64, index_ty: vk::IndexType) {
-        self.encoder.bind_index_buffer(self.get(&buf).handle(), offset, index_ty);
-    }
-
-    pub fn draw_indexed<R: RangeBounds<u32>>(&self, index: R, instance: R, vertex_offset: i32) {
-        let get_offset_and_size = |range: R| {
-            let start = match range.start_bound() {
-                Bound::Included(&v) => v,
-                Bound::Excluded(&v) => v.checked_add(1).expect("Index overflow"),
-                Bound::Unbounded => 0,
-            };
-            let end_exclusive = match range.end_bound() {
-                Bound::Included(&v) => v.checked_add(1).expect("Index overflow"),
-                Bound::Excluded(&v) => v,
-                Bound::Unbounded => panic!("Range should have clear upper bound"),
-            };
-
-            if start > end_exclusive {
-                panic!("Range should have clear upper bound");
-            }
-
-            (start, end_exclusive - start)
-        };
-
-        let (first_index, index_count) = get_offset_and_size(index);
-        let (first_instance, instance_count) = get_offset_and_size(instance);
-
-        self.encoder.draw_indexed(index_count, instance_count, first_index, vertex_offset, first_instance);
+        self.encoder.bind_index_buffer(self.get(&buf), offset, index_ty);
     }
 
     #[inline]

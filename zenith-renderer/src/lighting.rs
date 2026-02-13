@@ -1,8 +1,8 @@
 ﻿use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use zenith_rendergraph::{ColorAttachment, RenderGraphBuilder, RenderGraphResource, VertexLayout};
-use zenith_rhi::{vk, Buffer, BufferState, GraphicPipelineStateBuilder, GraphicShaderInputBuilder, RenderDevice, Shader, Texture, TextureState, GraphicPipelineDesc, GraphicPipelineAttachments, ShaderStage, BindlessPool};
-use zenith_rhi::pipeline::{BlendStateBuilder, RasterizationStateBuilder};
+use zenith_rhi::{vk, Buffer, BufferState, GraphicPipelineStateBuilder, GraphicShaderInputBuilder, RenderDevice, Shader, Texture, TextureState, GraphicPipelineDesc, ShaderStage, BindlessPool};
+use zenith_rhi::pipeline::{GraphicPipelineAttachmentsBuilder, RasterizationStateBuilder};
 use crate::{DEFAULT_RENDER_RESOURCES};
 use crate::defer_shading::SceneTextures;
 
@@ -58,25 +58,20 @@ impl DirectLightingRenderer {
         let default_res = DEFAULT_RENDER_RESOURCES.get().unwrap().lock();
         let default_res = default_res.as_ref().unwrap();
 
-        let shader = GraphicShaderInputBuilder::default()
-            .vertex_shader(default_res.screen_vertex_shader.clone())
-            .fragment_shader(self.lighting_fragment_shader.clone())
-            .vertex_layout::<ScreenVertex>()
-            .build()
-            .unwrap();
-
-        let state = GraphicPipelineStateBuilder::default()
-            .rasterization(RasterizationStateBuilder::default().cull_mode(vk::CullModeFlags::NONE).build().unwrap())
-            .push_blend_state(BlendStateBuilder::default().build().unwrap())
-            .build();
-
-        let attachments = GraphicPipelineAttachments {
-            color_formats: vec![output.desc(builder).format],
-            depth_format: None,
-            stencil_format: None,
-        };
-
-        let pipeline_desc = GraphicPipelineDesc::new("lighting", shader, state, attachments);
+        let pipeline_desc = GraphicPipelineDesc::new(
+            "lighting",
+            GraphicShaderInputBuilder::default()
+                .vertex_shader(default_res.screen_vertex_shader.clone())
+                .fragment_shader(self.lighting_fragment_shader.clone())
+                .vertex_layout::<ScreenVertex>()
+                .build().unwrap(),
+            GraphicPipelineStateBuilder::default()
+                .rasterization(RasterizationStateBuilder::default().cull_mode(vk::CullModeFlags::NONE).build().unwrap())
+                .build().unwrap(),
+            GraphicPipelineAttachmentsBuilder::default()
+                .color_no_blending(output.desc(builder).format)
+                .build().unwrap()
+        );
 
         let vb = builder.import(default_res.screen_vb.clone(), BufferState::Vertex);
         let ib = builder.import(default_res.screen_ib.clone(), BufferState::Index);
@@ -111,7 +106,7 @@ impl DirectLightingRenderer {
 
             ctx.bind_vertex_buffers(vb, 0, &[0]);
             ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT16);
-            ctx.draw_indexed(0..6, 0..1, 0);
+            ctx.encoder().draw_indexed(0..6, 0..1, 0);
 
             ctx.end_rendering();
             Ok(())

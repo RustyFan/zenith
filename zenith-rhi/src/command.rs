@@ -1,12 +1,15 @@
 //! Command buffer pool and recorder.
 
 use std::cell::{Cell, RefCell};
+use std::collections::Bound;
+use std::ops::RangeBounds;
 use ash::{vk};
 use bytemuck::NoUninit;
 use glam::Vec4;
+use zenith_core::collections::SmallVec;
 use zenith_rhi_derive::DeviceObject;
 use crate::barrier::{BufferBarrier, TextureBarrier, MemoryBarrier};
-use crate::{Queue, RenderDevice};
+use crate::{Buffer, Queue, RenderDevice, Texture, TextureLayout};
 use crate::synchronization::Fence;
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
@@ -177,20 +180,27 @@ impl<'a> CommandEncoder<'a> {
     }
 
     // Vertex/Index buffer commands
-    pub fn bind_vertex_buffers(&self, first_binding: u32, buffers: &[vk::Buffer], offsets: &[vk::DeviceSize]) {
-        unsafe { self.device.handle().cmd_bind_vertex_buffers(self.cmd, first_binding, buffers, offsets) }
+    pub fn bind_vertex_buffers(&self, first_binding: u32, buffers: &[&Buffer], offsets: &[vk::DeviceSize]) {
+        let buffers = buffers.iter().map(|buf| buf.handle()).collect::<SmallVec<[_; 4]>>();
+        unsafe { self.device.handle().cmd_bind_vertex_buffers(self.cmd, first_binding, &buffers, offsets) }
     }
 
-    pub fn bind_index_buffer(&self, buffer: vk::Buffer, offset: vk::DeviceSize, index_type: vk::IndexType) {
-        unsafe { self.device.handle().cmd_bind_index_buffer(self.cmd, buffer, offset, index_type) }
+    pub fn bind_index_buffer(&self, buffer: &Buffer, offset: vk::DeviceSize, index_type: vk::IndexType) {
+        unsafe { self.device.handle().cmd_bind_index_buffer(self.cmd, buffer.handle(), offset, index_type) }
     }
 
     // Draw commands
-    pub fn draw(&self, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
+    pub fn draw<R: RangeBounds<u32>>(&self, vertex: R, instance: R) {
+        let (first_vertex, vertex_count) = Self::extract_offset_and_size(vertex);
+        let (first_instance, instance_count) = Self::extract_offset_and_size(instance);
+
         unsafe { self.device.handle().cmd_draw(self.cmd, vertex_count, instance_count, first_vertex, first_instance) }
     }
 
-    pub fn draw_indexed(&self, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) {
+    pub fn draw_indexed<R: RangeBounds<u32>>(&self, index: R, instance: R, vertex_offset: i32) {
+        let (first_index, index_count) = Self::extract_offset_and_size(index);
+        let (first_instance, instance_count) = Self::extract_offset_and_size(instance);
+
         unsafe { self.device.handle().cmd_draw_indexed(self.cmd, index_count, instance_count, first_index, vertex_offset, first_instance) }
     }
 
@@ -217,46 +227,45 @@ impl<'a> CommandEncoder<'a> {
     pub fn end_rendering(&self) {
         unsafe { self.device.handle().cmd_end_rendering(self.cmd) }
     }
-    
-    pub fn buffer_barriers<'b>(&self, barriers: &[BufferBarrier<'b>]) {
-        if barriers.is_empty() {
-            return;
-        }
-        let vk_barriers: Vec<vk::BufferMemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
-        let dep = vk::DependencyInfo::default().buffer_memory_barriers(&vk_barriers);
-        unsafe { self.device.handle().cmd_pipeline_barrier2(self.cmd, &dep) }
-    }
 
-    pub fn texture_barriers<'b>(&self, barriers: &[TextureBarrier<'b>]) {
-        if barriers.is_empty() {
-            return;
-        }
-        let vk_barriers: Vec<vk::ImageMemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
-        let dep = vk::DependencyInfo::default().image_memory_barriers(&vk_barriers);
-        unsafe { self.device.handle().cmd_pipeline_barrier2(self.cmd, &dep) }
-    }
-
-    pub fn memory_barrier(&self, barriers: &[MemoryBarrier]) {
-        if barriers.is_empty() {
-            return;
-        }
-        let vk_barriers: Vec<vk::MemoryBarrier2> = barriers.iter().map(|b| b.to_vk()).collect();
-        let dep = vk::DependencyInfo::default().memory_barriers(&vk_barriers);
+    pub fn pipeline_barriers(&self,
+                             mem_barriers: &[MemoryBarrier], 
+                             tex_barriers: &[TextureBarrier], 
+                             buf_barriers: &[BufferBarrier],
+    ) {
+        let vk_buf_barriers = buf_barriers.iter().map(|b| b.to_vk()).collect::<SmallVec<[_; 8]>>();
+        let vk_tex_barriers = tex_barriers.iter().map(|b| b.to_vk()).collect::<SmallVec<[_; 8]>>();
+        let vk_mem_barriers = mem_barriers.iter().map(|b| b.to_vk()).collect::<SmallVec<[_; 2]>>();
+        
+        let dep = vk::DependencyInfo::default()
+            .buffer_memory_barriers(&vk_buf_barriers)
+            .image_memory_barriers(&vk_tex_barriers)
+            .memory_barriers(&vk_mem_barriers);
+        
         unsafe { self.device.handle().cmd_pipeline_barrier2(self.cmd, &dep) }
     }
 
     // Copy commands
-    pub fn copy_buffer(&self, src: vk::Buffer, dst: vk::Buffer, regions: &[vk::BufferCopy]) {
-        unsafe { self.device.handle().cmd_copy_buffer(self.cmd, src, dst, regions) }
+    pub fn copy_buffer(&self, src: &Buffer, dst: &Buffer, regions: &[vk::BufferCopy]) {
+        unsafe { self.device.handle().cmd_copy_buffer(self.cmd, src.handle(), dst.handle(), regions) }
     }
 
-    pub fn copy_buffer_to_image(&self, src: vk::Buffer, dst: vk::Image, layout: vk::ImageLayout, regions: &[vk::BufferImageCopy]) {
-        unsafe { self.device.handle().cmd_copy_buffer_to_image(self.cmd, src, dst, layout, regions) }
+    pub fn copy_buffer_to_image(&self, src: &Buffer, dst: &Texture, layout: TextureLayout, regions: &[vk::BufferImageCopy]) {
+        unsafe { self.device.handle().cmd_copy_buffer_to_image(self.cmd, src.handle(), dst.handle(), layout.to_vk(), regions) }
     }
 
     // Blit
-    pub fn blit_image(&self, src: vk::Image, src_layout: vk::ImageLayout, dst: vk::Image, dst_layout: vk::ImageLayout, regions: &[vk::ImageBlit], filter: vk::Filter) {
-        unsafe { self.device.handle().cmd_blit_image(self.cmd, src, src_layout, dst, dst_layout, regions, filter) }
+    pub fn blit_image(&self, 
+                      src: &Texture, src_layout: TextureLayout,
+                      dst: &Texture, dst_layout: TextureLayout,
+                      regions: &[vk::ImageBlit], filter: vk::Filter
+    ) {
+        unsafe {
+            self.device.handle().cmd_blit_image(self.cmd, 
+                                                src.handle(), src_layout.to_vk(), 
+                                                dst.handle(), dst_layout.to_vk(), 
+                                                regions, filter) 
+        }
     }
 
     pub fn custom<F>(&self, func: F)
@@ -264,6 +273,25 @@ impl<'a> CommandEncoder<'a> {
         F: FnOnce(&RenderDevice, vk::CommandBuffer)
     {
         func(&self.device, self.cmd.clone());
+    }
+
+    fn extract_offset_and_size<R: RangeBounds<u32>>(range: R) -> (u32, u32) {
+        let start = match range.start_bound() {
+            Bound::Included(&v) => v,
+            Bound::Excluded(&v) => v.checked_add(1).expect("Index overflow"),
+            Bound::Unbounded => 0,
+        };
+        let end_exclusive = match range.end_bound() {
+            Bound::Included(&v) => v.checked_add(1).expect("Index overflow"),
+            Bound::Excluded(&v) => v,
+            Bound::Unbounded => panic!("Draw indexed range should have an upper bound!"),
+        };
+
+        if start > end_exclusive {
+            panic!("Draw indexed do DOT support negative range length!");
+        }
+
+        (start, end_exclusive - start)
     }
 }
 

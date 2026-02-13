@@ -47,7 +47,7 @@ pub use pipeline::{
     GraphicPipeline, GraphicPipelineDesc, GraphicPipelineState, GraphicPipelineStateBuilder,
     GraphicShaderInput, GraphicShaderInputBuilder, GraphicShaderInputBuildError,
     GraphicPipelineAttachments,
-    InputAssemblyState, RasterizationState, MultisampleState, ColorBlendState,
+    InputAssemblyState, RasterizationState, MultisampleState,
     VertexAttribute, VertexBinding, VertexLayout,
 };
 pub use pipeline_cache::{PipelineCache, PipelineCacheStats};

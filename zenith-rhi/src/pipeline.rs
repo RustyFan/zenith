@@ -15,44 +15,42 @@ use crate::{RenderDevice};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
 
-/// Dynamic rendering attachment formats for a graphics pipeline.
-///
-/// The binding order is:
-/// - `color_formats[0..]` (in-order)
-/// - `depth_format` (optional)
-/// - `stencil_format` (optional)
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Builder)]
+#[builder(setter(into), default)]
 pub struct GraphicPipelineAttachments {
+    pub color_blend_states: Vec<BlendState>,
+    pub color_blend_constants: [i32; 4],
+    pub depth_stencil_state: Option<DepthStencilState>,
+
     pub color_formats: Vec<vk::Format>,
     pub depth_format: Option<vk::Format>,
     pub stencil_format: Option<vk::Format>,
 }
 
-impl Hash for GraphicPipelineAttachments {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        for fmt in &self.color_formats {
-            (fmt.as_raw() as i32).hash(state);
-        }
-        self.depth_format.map(|f| f.as_raw() as i32).hash(state);
-        self.stencil_format.map(|f| f.as_raw() as i32).hash(state);
-    }
-}
-
-impl PartialEq for GraphicPipelineAttachments {
-    fn eq(&self, other: &Self) -> bool {
-        self.color_formats == other.color_formats
-            && self.depth_format == other.depth_format
-            && self.stencil_format == other.stencil_format
-    }
-}
-
-impl Eq for GraphicPipelineAttachments {}
-
 impl GraphicPipelineAttachments {
     #[inline]
+    pub fn to_vk_attachments(&self) -> Vec<vk::PipelineColorBlendAttachmentState> {
+        self.color_blend_states.iter().map(|a| a.to_vk_blend_attachment()).collect()
+    }
+
+    #[inline]
+    pub fn to_vk_color_blend<'a>(
+        &self,
+        attachments: &'a [vk::PipelineColorBlendAttachmentState],
+    ) -> vk::PipelineColorBlendStateCreateInfo<'a> {
+        vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(attachments)
+            .blend_constants([
+                f32::from_bits(self.color_blend_constants[0] as u32),
+                f32::from_bits(self.color_blend_constants[1] as u32),
+                f32::from_bits(self.color_blend_constants[2] as u32),
+                f32::from_bits(self.color_blend_constants[3] as u32),
+            ])
+    }
+
+    #[inline]
     pub fn to_vk_rendering_info(&self) -> vk::PipelineRenderingCreateInfo<'_> {
-        let mut info =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&self.color_formats);
+        let mut info = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&self.color_formats);
 
         if let Some(depth) = self.depth_format {
             info = info.depth_attachment_format(depth);
@@ -64,6 +62,86 @@ impl GraphicPipelineAttachments {
         info
     }
 }
+
+impl GraphicPipelineAttachmentsBuilder {
+    pub fn color_no_blending(mut self, format: vk::Format) -> Self {
+        self.color_formats.get_or_insert_default().push(format);
+        self.color_blend_states.get_or_insert_default().push(BlendState::default());
+        self
+    }
+
+    pub fn color(mut self, format: vk::Format, blend_state: BlendState) -> Self {
+        self.color_formats.get_or_insert_default().push(format);
+        self.color_blend_states.get_or_insert_default().push(blend_state);
+        self
+    }
+
+    pub fn depth_stencil(mut self, format: vk::Format, depth_stencil_state: DepthStencilState) -> Self {
+        if depth_stencil_state.depth_test_enable || depth_stencil_state.depth_write_enable {
+            self.depth_format.get_or_insert_default().replace(format);
+        }
+        if depth_stencil_state.stencil_test_enable {
+            self.stencil_format.get_or_insert_default().replace(format);
+        }
+        self.depth_stencil_state.get_or_insert_default().replace(depth_stencil_state);
+        self
+    }
+}
+
+impl Hash for GraphicPipelineAttachments {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for b in &self.color_blend_states {
+            b.hash(state);
+        }
+        self.color_blend_constants.hash(state);
+        // Depth/stencil (now includes attachment behavior + clear values for cache key)
+        if let Some(ds) = &self.depth_stencil_state {
+            ds.depth_test_enable.hash(state);
+            ds.depth_write_enable.hash(state);
+            (ds.depth_compare_op.as_raw() as i32).hash(state);
+            ds.depth_bounds_test_enable.hash(state);
+            ds.stencil_test_enable.hash(state);
+
+            hash_vk_stencil_op_state(&ds.stencil_front, state);
+            hash_vk_stencil_op_state(&ds.stencil_back, state);
+        }
+        for fmt in &self.color_formats {
+            (fmt.as_raw() as i32).hash(state);
+        }
+        self.depth_format.map(|f| f.as_raw() as i32).hash(state);
+        self.stencil_format.map(|f| f.as_raw() as i32).hash(state);
+    }
+}
+
+impl PartialEq for GraphicPipelineAttachments {
+    fn eq(&self, other: &Self) -> bool {
+        if self.color_blend_constants != other.color_blend_constants {
+            return false;
+        }
+        if self.color_blend_states.len() != other.color_blend_states.len() {
+            return false;
+        }
+
+        self.color_blend_states
+            .iter()
+            .zip(other.color_blend_states.iter())
+            .all(|(a, b)| {
+                a.blend_enable == b.blend_enable
+                    && a.src_color_blend == b.src_color_blend
+                    && a.dst_color_blend == b.dst_color_blend
+                    && a.color_blend_op == b.color_blend_op
+                    && a.src_alpha_blend == b.src_alpha_blend
+                    && a.dst_alpha_blend == b.dst_alpha_blend
+                    && a.alpha_blend_op == b.alpha_blend_op
+                    && a.write_mask == b.write_mask
+            }) && self.color_formats == other.color_formats
+            && eq_depth_stencil_opt(&self.depth_stencil_state, &other.depth_stencil_state)
+            && self.depth_format == other.depth_format
+            && self.stencil_format == other.stencil_format
+    }
+}
+
+impl Eq for GraphicPipelineAttachments {}
 
 #[derive(Clone)]
 pub struct GraphicShaderInput {
@@ -695,92 +773,15 @@ impl PartialEq for BlendState {
 
 impl Eq for BlendState {}
 
-#[derive(Clone, Debug, Builder)]
-#[builder(setter(into), default)]
-pub struct ColorBlendState {
-    pub blend_states: Vec<BlendState>,
-    pub blend_constants: [i32; 4],
-}
-
-impl Default for ColorBlendState {
-    fn default() -> Self {
-        Self {
-            blend_states: Vec::new(),
-            blend_constants: [0; 4],
-        }
-    }
-}
-
-impl Hash for ColorBlendState {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hash full attachment behavior + clear value for cache key
-        for a in &self.blend_states {
-            a.hash(state);
-        }
-        self.blend_constants.hash(state);
-    }
-}
-
-impl PartialEq for ColorBlendState {
-    fn eq(&self, other: &Self) -> bool {
-        if self.blend_constants != other.blend_constants {
-            return false;
-        }
-        if self.blend_states.len() != other.blend_states.len() {
-            return false;
-        }
-
-        self.blend_states
-            .iter()
-            .zip(other.blend_states.iter())
-            .all(|(a, b)| {
-                a.blend_enable == b.blend_enable
-                    && a.src_color_blend == b.src_color_blend
-                    && a.dst_color_blend == b.dst_color_blend
-                    && a.color_blend_op == b.color_blend_op
-                    && a.src_alpha_blend == b.src_alpha_blend
-                    && a.dst_alpha_blend == b.dst_alpha_blend
-                    && a.alpha_blend_op == b.alpha_blend_op
-                    && a.write_mask == b.write_mask
-            })
-    }
-}
-
-impl Eq for ColorBlendState {}
-
-impl ColorBlendState {
-    #[inline]
-    pub fn to_vk_attachments(&self) -> Vec<vk::PipelineColorBlendAttachmentState> {
-        self.blend_states.iter().map(|a| a.to_vk_blend_attachment()).collect()
-    }
-
-    #[inline]
-    pub fn to_vk<'a>(
-        &self,
-        attachments: &'a [vk::PipelineColorBlendAttachmentState],
-    ) -> vk::PipelineColorBlendStateCreateInfo<'a> {
-        vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(attachments)
-            .blend_constants([
-                f32::from_bits(self.blend_constants[0] as u32),
-                f32::from_bits(self.blend_constants[1] as u32),
-                f32::from_bits(self.blend_constants[2] as u32),
-                f32::from_bits(self.blend_constants[3] as u32),
-            ])
-    }
-}
-
 /// Graphics pipeline state collection (rasterization/blend/depth-stencil/etc...).
 ///
 /// Conservative defaults are provided via `Default`.
-#[derive(Clone)]
+#[derive(Clone, Debug, Builder)]
+#[builder(setter(into), default)]
 pub struct GraphicPipelineState {
     pub input_assembly: InputAssemblyState,
     pub rasterization: RasterizationState,
     pub multisample: MultisampleState,
-
-    pub depth_stencil: Option<DepthStencilState>,
-    pub color_blend: ColorBlendState,
 
     pub dynamic_states: Vec<vk::DynamicState>,
 }
@@ -791,8 +792,6 @@ impl Default for GraphicPipelineState {
             input_assembly: InputAssemblyState::default(),
             rasterization: RasterizationState::default(),
             multisample: MultisampleState::default(),
-            depth_stencil: None,
-            color_blend: ColorBlendState::default(),
             dynamic_states: vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR],
         }
     }
@@ -803,19 +802,6 @@ impl Hash for GraphicPipelineState {
         self.input_assembly.hash(state);
         self.rasterization.hash(state);
         self.multisample.hash(state);
-        // Depth/stencil (now includes attachment behavior + clear values for cache key)
-        if let Some(ds) = &self.depth_stencil {
-            ds.depth_test_enable.hash(state);
-            ds.depth_write_enable.hash(state);
-            (ds.depth_compare_op.as_raw() as i32).hash(state);
-            ds.depth_bounds_test_enable.hash(state);
-            ds.stencil_test_enable.hash(state);
-
-            // front/back stencil op state
-            hash_vk_stencil_op_state(&ds.stencil_front, state);
-            hash_vk_stencil_op_state(&ds.stencil_back, state);
-        }
-        self.color_blend.hash(state);
         for ds in &self.dynamic_states {
             (ds.as_raw() as i32).hash(state);
         }
@@ -827,8 +813,6 @@ impl PartialEq for GraphicPipelineState {
         self.input_assembly == other.input_assembly
             && self.rasterization == other.rasterization
             && self.multisample == other.multisample
-            && eq_depth_stencil_opt(&self.depth_stencil, &other.depth_stencil)
-            && self.color_blend == other.color_blend
             && self.dynamic_states == other.dynamic_states
     }
 }
@@ -839,52 +823,6 @@ impl GraphicPipelineState {
     #[inline]
     pub fn to_vk_dynamic_state(&self) -> vk::PipelineDynamicStateCreateInfo<'_> {
         vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&self.dynamic_states)
-    }
-}
-
-#[derive(Default)]
-pub struct GraphicPipelineStateBuilder {
-    state: GraphicPipelineState,
-}
-
-impl GraphicPipelineStateBuilder {
-    pub fn input_assembly(mut self, s: InputAssemblyState) -> Self {
-        self.state.input_assembly = s;
-        self
-    }
-
-    pub fn rasterization(mut self, s: RasterizationState) -> Self {
-        self.state.rasterization = s;
-        self
-    }
-
-    pub fn multisample(mut self, s: MultisampleState) -> Self {
-        self.state.multisample = s;
-        self
-    }
-
-    pub fn push_blend_state(mut self, blend: BlendState) -> Self {
-        self.state.color_blend.blend_states.push(blend);
-        self
-    }
-
-    pub fn blend_constants(mut self, c: [i32; 4]) -> Self {
-        self.state.color_blend.blend_constants = c;
-        self
-    }
-
-    pub fn depth_stencil(mut self, ds: DepthStencilState) -> Self {
-        self.state.depth_stencil = Some(ds);
-        self
-    }
-
-    pub fn dynamic_states(mut self, states: Vec<vk::DynamicState>) -> Self {
-        self.state.dynamic_states = states;
-        self
-    }
-
-    pub fn build(self) -> GraphicPipelineState {
-        self.state
     }
 }
 
@@ -1052,14 +990,14 @@ impl CommonPipeline {
 
         // Depth stencil (if provided)
         let depth_stencil_state = desc
-            .state
-            .depth_stencil
+            .attachments
+            .depth_stencil_state
             .as_ref()
             .map(|ds| ds.to_vk());
 
         // Color blend
-        let blend_attachments = desc.state.color_blend.to_vk_attachments();
-        let color_blend_state = desc.state.color_blend.to_vk(&blend_attachments);
+        let blend_attachments = desc.attachments.to_vk_attachments();
+        let color_blend_state = desc.attachments.to_vk_color_blend(&blend_attachments);
 
         // Viewport state (dynamic)
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
