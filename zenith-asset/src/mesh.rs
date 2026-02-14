@@ -29,16 +29,19 @@ impl Vertex {
 #[derive(Debug, Clone, Builder, Serialize, Deserialize, Encode, Decode)]
 #[builder(setter(into))]
 pub struct Mesh<V = Vertex> {
+    #[serde(skip)]
+    pub url: AssetUrl,
     pub vertices: Vec<V>,
     pub indices: Vec<u32>,
     #[builder(default)]
     #[bincode(with_serde)]
-    pub material: Option<usize>,
+    pub material: Option<AssetUrl>,
 }
 
 impl<V: NoUninit> Mesh<V> {
-    pub fn new(vertices: Vec<V>, indices: Vec<u32>, material: Option<usize>) -> Self {
+    pub fn new(url: AssetUrl, vertices: Vec<V>, indices: Vec<u32>, material: Option<AssetUrl>) -> Self {
         Self {
+            url,
             vertices,
             indices,
             material,
@@ -59,81 +62,69 @@ impl<V: 'static + Send + Sync + NoUninit> Asset for Mesh<V> {
         self
     }
 
-    fn url(&self, name: &str) -> AssetUrl {
-        let mut url = PathBuf::from(name);
-        url.set_extension(Self::extension());
-        url.into()
-    }
+    #[inline(always)]
+    fn url(&self) -> &AssetUrl { &self.url }
 
     fn extension() -> &'static str {
         "mesh"
     }
-
-    fn gpu_size_in_bytes(&self) -> usize {
-        self.vertices_bytes().len() + self.indices_bytes().len()
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct MeshCollection {
-    pub raw_asset_path: PathBuf,
+pub struct Scene {
+    #[serde(skip)]
+    pub url: AssetUrl,
+    // pub raw_asset_path: PathBuf,
     #[bincode(with_serde)]
     pub meshes: Vec<AssetUrl>,
-    #[bincode(with_serde)]
-    pub materials: Vec<AssetUrl>,
+    // #[bincode(with_serde)]
+    // pub materials: Vec<AssetUrl>,
 }
 
-impl Asset for MeshCollection {
+impl Asset for Scene {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn url(&self, name: &str) -> AssetUrl {
-        let mut url = PathBuf::from(name);
-        url.set_extension(Self::extension());
-        url.into()
-    }
+    fn url(&self) -> &AssetUrl { &self.url }
 
     fn extension() -> &'static str {
-        "mscl"
-    }
-
-    fn gpu_size_in_bytes(&self) -> usize {
-        0
+        "scene"
     }
 }
 
-impl MeshCollection {
-    pub fn new(raw_asset_path: impl AsRef<Path>) -> Self {
+impl Scene {
+    pub fn new(url: AssetUrl) -> Self {
         Self {
-            raw_asset_path: raw_asset_path.as_ref().into(),
+            url,
+            // raw_asset_path: raw_asset_path.as_ref().into(),
             meshes: vec![],
-            materials: vec![],
+            // materials: vec![],
         }
     }
 
-    pub fn add_mesh(&mut self, mesh_url: AssetUrl, mat_url: AssetUrl) {
+    pub fn add_mesh(&mut self, mesh_url: AssetUrl) {
         self.meshes.push(mesh_url);
-        self.materials.push(mat_url);
+        // self.materials.push(mat_url);
     }
 
     /// Iterate mesh/material pairs. This is fallible because the two lists may be mismatched.
-    pub fn iter(&self) -> Result<impl Iterator<Item = (&AssetUrl, &AssetUrl)>> {
-        if self.meshes.len() != self.materials.len() {
-            anyhow::bail!(
-                "MeshCollection meshes/materials length mismatch ({} vs {})",
-                self.meshes.len(),
-                self.materials.len()
-            );
-        }
+    pub fn iter(&self) -> impl Iterator<Item = &AssetUrl> {
+        // if self.meshes.len() != self.materials.len() {
+        //     anyhow::bail!(
+        //         "MeshCollection meshes/materials length mismatch ({} vs {})",
+        //         self.meshes.len(),
+        //         self.materials.len()
+        //     );
+        // }
 
-        Ok(self.meshes.iter().zip(self.materials.iter()))
+        self.meshes.iter()
     }
 
-    // "mesh/cerberus/scene.gltf" -> "mesh/cerberus/scene.mscl"
-    pub fn asset_url(&self) -> AssetUrl {
-        let mut baked_asset_path = self.raw_asset_path.clone();
-        baked_asset_path.set_extension(Self::extension());
-        baked_asset_path.into()
-    }
+    // // "mesh/cerberus/scene.gltf" -> "mesh/cerberus/scene.mscl"
+    // pub fn asset_url(&self) -> AssetUrl {
+    //     let mut baked_asset_path = self.raw_asset_path.clone();
+    //     baked_asset_path.set_extension(Self::extension());
+    //     baked_asset_path.into()
+    // }
 }

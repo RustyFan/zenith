@@ -8,9 +8,9 @@ use winit::keyboard::KeyCode;
 use zenith::{launch, App, Args, RenderableApp, RenderContext};
 use zenith::rhi::TextureState;
 use zenith::renderer::WorldRenderer;
-use zenith::asset::manager::AssetManager;
+use zenith::asset::manager::AssetRequestor;
 use zenith::asset::{AssetHandle};
-use zenith::asset::mesh::MeshCollection;
+use zenith::asset::mesh::Scene;
 use zenith::core::camera::{Camera, CameraController, NEAR_PLANE};
 use zenith::core::input::InputActionMapper;
 use zenith::core::log;
@@ -22,7 +22,7 @@ pub struct WorldApp {
     input: InputActionMapper,
     camera: Camera,
     controller: CameraController,
-    asset_manager: AssetManager,
+    asset_manager: AssetRequestor,
 }
 
 impl App for WorldApp {
@@ -32,7 +32,7 @@ impl App for WorldApp {
             input: InputActionMapper::new(),
             camera: Camera::default(),
             controller: CameraController::new(10.0),
-            asset_manager: AssetManager::new(),
+            asset_manager: AssetRequestor::new(),
         })
     }
 
@@ -94,7 +94,7 @@ impl RenderableApp for WorldApp {
         renderer_new_timer.stop();
         let renderer_new_ms = renderer_new_timer.elapsed_total::<Milliseconds>().value();
 
-        let collection = AssetHandle::<MeshCollection>::new(PathBuf::from("mesh/cerberus/scene.mscl").into());
+        let collection = AssetHandle::<Scene>::new(PathBuf::from("mesh/cerberus/scene.mscl").into());
         let mut upload_timer = Timer::new();
         upload_timer.start();
         renderer.add_mesh(render_device, collection)?;

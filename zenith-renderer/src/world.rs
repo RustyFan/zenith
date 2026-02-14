@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4};
 use zenith_asset::{AssetHandle};
 use zenith_asset::material::Material;
-use zenith_asset::mesh::{MeshCollection, Mesh};
+use zenith_asset::mesh::{Scene, Mesh};
 use zenith_core::camera::{Camera, ViewData, WORLD_SPACE_UP};
 use zenith_core::math::{Degree};
 use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, BufferState, Shader, Texture, TextureDesc, TextureLayout, TextureState, ImmediateCommandEncoder, UploadPool, Sampler, SamplerDesc, GraphicPipelineDesc, DepthStencilStateBuilder, BindlessHandle, BindlessPool, GraphicPipelineState};
@@ -153,7 +153,7 @@ impl WorldRenderer {
         self.direct_lighting_renderer.set_skybox(device, skybox)
     }
 
-    pub fn add_mesh(&mut self, device: &RenderDevice,  mesh_collection: AssetHandle<MeshCollection>) -> anyhow::Result<()> {
+    pub fn add_mesh(&mut self, device: &RenderDevice,  mesh_collection: AssetHandle<Scene>) -> anyhow::Result<()> {
         let collection = mesh_collection
             .get()
             .ok_or_else(|| anyhow!("MeshCollection not loaded/registered (call AssetManager::request_load first)"))?;

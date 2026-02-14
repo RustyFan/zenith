@@ -8,6 +8,8 @@ use crate::{Asset, AssetUrl};
 #[derive(Debug, Clone, Builder, Serialize, Deserialize, Encode, Decode)]
 #[builder(setter(into))]
 pub struct Material {
+    #[serde(skip)]
+    pub url: AssetUrl,
     #[builder(default = [1., 0., 1., 1.])]
     pub base_color: [f32; 4],
     #[builder(default = 1.0)]
@@ -37,20 +39,9 @@ impl Asset for Material {
         self
     }
 
-    fn url(&self, name: &str) -> AssetUrl {
-        let mut url = PathBuf::from(name);
-        url.set_extension(Self::extension());
-        url.into()
-    }
+    fn url(&self) -> &AssetUrl { &self.url }
 
     fn extension() -> &'static str {
         "mat"
-    }
-
-    fn gpu_size_in_bytes(&self) -> usize {
-        size_of_val(&self.base_color) +
-            size_of_val(&self.metallic) +
-            size_of_val(&self.roughness) +
-            size_of_val(&self.emissive)
     }
 }

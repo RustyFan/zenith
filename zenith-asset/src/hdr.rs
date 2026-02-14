@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use glam::Vec3;
 use ispc_texcomp::{RgbaSurface};
 use zenith_core::log;
-use crate::{Asset, RawResourceBaker, AssetRegistry, RawResource, RawResourceLoader, AssetUrl, serialize_asset};
+use crate::{Asset, AssetBaker, AssetRegistry, RawAsset, AssetLoader, AssetUrl, serialize_asset, RawAssetType};
 use crate::texture::{Texture, TextureBuilder, TextureFormat};
 
 #[derive(Debug, Clone)]
@@ -23,13 +23,14 @@ pub struct RawHdr {
     pixels: Vec<f32>,  // RGB32F data (3 floats per pixel)
 }
 
-impl RawResource for RawHdr {
-    fn load_path(&self) -> &Path {
-        self.path.as_path()
+impl RawAsset for RawHdr {
+    #[inline(always)]
+    fn raw_asset_type(&self) -> RawAssetType {
+        RawAssetType::Hdr
     }
 }
 
-impl RawResourceLoader for HdrLoader {
+impl AssetLoader for HdrLoader {
     type Raw = RawHdr;
 
     #[profiling::function]
@@ -223,11 +224,11 @@ impl RawHdrProcessor {
     }
 }
 
-impl RawResourceBaker for RawHdrProcessor {
+impl AssetBaker for RawHdrProcessor {
     type Raw = RawHdr;
 
     #[profiling::function]
-    fn bake(raw: Self::Raw, registry: &AssetRegistry, base_directory: &PathBuf, url: &AssetUrl) -> Result<()> {
+    fn bake(raw: Self::Raw, url: AssetUrl) -> Result<Vec<Box<dyn Asset>>> {
         let RawHdr {
             width,
             height,
@@ -262,8 +263,19 @@ impl RawResourceBaker for RawHdrProcessor {
 
         log::info!("Total compressed cubemap size: {} bytes", total_pixels.len());
 
-        // Create Texture asset (mark it as cubemap)
+        let asset_url_str = url.path.to_str().ok_or(anyhow!("Invalid asset url"))?;
+        let (parent, stem) = Self::split_asset_path(asset_url_str, "cubemap");
+
+        let mut cubemap_path = parent.join(format!("{}_cubemap", stem));
+        cubemap_path.set_extension(Texture::extension());
+        let cubemap_url: AssetUrl = cubemap_path.into();
+
+        // let asset_serialize_path = base_directory.join(&cubemap_url);
+        // serialize_asset(&texture, &asset_serialize_path)?;
+        // registry.register(cubemap_url.clone(), texture);
+
         let texture = TextureBuilder::default()
+            .url(cubemap_url.clone())
             .width(face_size)
             .height(face_size)
             .format(TextureFormat::Bc6hUfloat)  // Using f16 uncompressed for now
@@ -271,19 +283,7 @@ impl RawResourceBaker for RawHdrProcessor {
             .is_cubemap(true)
             .build()?;
 
-        // Serialize to .tex file
-        let asset_url_str = url.path.to_str().ok_or(anyhow!("Invalid asset url"))?;
-        let (parent, stem) = Self::split_asset_path(asset_url_str, "cubemap");
-
-        let mut cubemap_path = parent.join(format!("{}_cubemap_{}x{}", stem, face_size, face_size));
-        cubemap_path.set_extension(Texture::extension());
-        let cubemap_url: AssetUrl = cubemap_path.into();
-
-        let asset_serialize_path = base_directory.join(&cubemap_url);
-        serialize_asset(&texture, &asset_serialize_path)?;
-        registry.register(cubemap_url.clone(), texture);
-
         log::info!("HDR cubemap baked successfully: {:?}", cubemap_url);
-        Ok(())
+        Ok(vec![Box::new(texture) as Box<dyn Asset>])
     }
 }

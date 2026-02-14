@@ -86,6 +86,8 @@ impl TextureFormat {
 #[derive(Debug, Clone, Builder, Serialize, Deserialize, Encode, Decode)]
 #[builder(setter(into))]
 pub struct Texture {
+    #[serde(skip)]
+    pub url: AssetUrl,
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
@@ -99,17 +101,10 @@ impl Asset for Texture {
         self
     }
 
-    fn url(&self, name: &str) -> AssetUrl {
-        let mut url = PathBuf::from(format!("{}_{}_{}", name, self.width, self.height));
-        url.set_extension(Self::extension());
-        url.into()
-    }
+    #[inline(always)]
+    fn url(&self) -> &AssetUrl { &self.url }
 
     fn extension() -> &'static str {
         "tex"
-    }
-
-    fn gpu_size_in_bytes(&self) -> usize {
-        self.pixels.len()
     }
 }

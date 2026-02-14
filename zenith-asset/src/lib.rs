@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use anyhow::{anyhow, Result};
-use bincode::Encode;
+use bincode::{Decode, Encode};
 use derive_builder::Builder;
 use derive_more::From;
 use parking_lot::RwLock;
@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_core::file::load_with_memory_mapping;
+use zenith_core::{log, workspace_root};
+use crate::manager::AssetDirectory;
 
 pub mod mesh;
 pub mod manager;
@@ -49,8 +51,8 @@ impl AssetRegistry {
     }
 
     /// Register an asset.
-    pub fn register<A: Asset>(&self, url: impl Into<AssetUrl>, asset: A) {
-        let key = (url.into(), TypeId::of::<A>());
+    pub fn register<A: Asset>(&self, asset: A) {
+        let key = (asset.url().clone(), TypeId::of::<A>());
         self.assets_map.write().insert(key, Arc::new(asset));
     }
 
@@ -62,6 +64,11 @@ impl AssetRegistry {
 
     /// Get an asset by url. Return None is this asset had NOT been loaded.
     fn get<A: Asset>(&self, url: &AssetUrl) -> Option<AssetRef<'_, A>> {
+        if url.asset_type() != extension_asset_type(A::extension()) {
+            log::warn!("Mismatch asset type. Try to get {:?} with an asset type of {:?}.", url, extension_asset_type(A::extension()));
+            return None;
+        }
+
         let assets = self.assets_map.read();
         let key = (url.clone(), TypeId::of::<A>());
 
@@ -72,20 +79,21 @@ impl AssetRegistry {
 }
 
 /// Engine asset type.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssetType {
     Mesh,
     Texture,
     Material,
-    MeshCollection,
+    Scene,
 }
 
+// TODO: write the extension once
 fn asset_type_extension(ty: AssetType) -> &'static str {
     match ty {
         AssetType::Mesh => "mesh",
         AssetType::Texture => "tex",
         AssetType::Material => "mat",
-        AssetType::MeshCollection => "mscl",
+        AssetType::Scene => "scene",
     }
 }
 
@@ -94,7 +102,15 @@ fn extension_asset_type(extension: &str) -> AssetType {
         "mesh" => AssetType::Mesh,
         "tex" => AssetType::Texture,
         "mat" => AssetType::Material,
-        "mscl" => AssetType::MeshCollection,
+        "scene" => AssetType::Scene,
+        _ => unreachable!()
+    }
+}
+
+fn extension_raw_asset_type(extension: &str) -> RawAssetType {
+    match extension {
+        "gltf" => RawAssetType::Gltf,
+        "hdr" => RawAssetType::Hdr,
         _ => unreachable!()
     }
 }
@@ -107,27 +123,34 @@ impl AssetType {
 
 /// Url to unique identify an asset.
 /// This is a relative path start with words, points to a file located inside content/ folder.
-/// TODO: Validation. AssetUrl should always have a valid extension.
 ///
 /// # Example
 ///
 /// ```
 /// use zenith_asset::AssetUrl;
 /// use std::path::PathBuf;
-/// let asset_url: AssetUrl = PathBuf::from("mesh/cerberus/scene.mesh").into();
+/// let asset_url: AssetUrl = PathBuf::from("mesh/cerberus/scene.mesh").try_into();
 /// ```
-#[derive(Clone, Debug, From, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Default, From, Serialize, Deserialize, Encode, Decode)]
 pub struct AssetUrl {
     path: PathBuf,
 }
 
-impl From<String> for AssetUrl {
-    fn from(path: String) -> Self {
-        AssetUrl { path: path.into() }
+impl TryFrom<String> for AssetUrl {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        Ok(AssetUrl {
+            path: value.into(),
+        })
     }
 }
 
 impl AssetUrl {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        AssetUrl { path: path.into() }
+    }
+
     /// Return an invalid url represents nothing.
     pub fn invalid() -> Self {
         Self {
@@ -136,7 +159,7 @@ impl AssetUrl {
     }
 
     /// Return the asset type this AssetUrl points to.
-    pub fn ty(&self) -> AssetType {
+    pub fn asset_type(&self) -> AssetType {
         let extension = self
             .path
             .extension()
@@ -206,7 +229,6 @@ impl<'a, A: Asset> Deref for AssetRef<'a, A> {
     }
 }
 
-
 /// Asset is any type of data which can be serialized and deserialized.
 /// Asset should be read-only which is thread-safe.
 ///
@@ -214,47 +236,80 @@ impl<'a, A: Asset> Deref for AssetRef<'a, A> {
 /// The baked asset which had been turned into engine representation is stored at cache/ folder.
 pub trait Asset: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
-    fn url(&self, name: &str) -> AssetUrl;
+    fn url(&self) -> &AssetUrl;
     fn extension() -> &'static str where Self: Sized;
-    /// Return the total size in byte of gpu upload data.
-    fn gpu_size_in_bytes(&self) -> usize;
+
 }
 
-/// Data needed to send a raw resource load request.
-#[derive(Clone, Debug, Builder)]
-#[builder(setter(into))]
-pub struct RawResourceLoadRequest {
-    /// Relative path starts at content/ folder.
-    relative_path: PathBuf,
+// TODO: this is NOT extensible, make it able to add any raw asset type
+#[derive(Debug, Clone, Copy)]
+pub enum RawAssetType {
+    Gltf,
+    Hdr,
+    Png,
 }
 
 /// Type represents a raw resource.
-pub trait RawResource: Sized {
-    fn load_path(&self) -> &Path;
+pub trait RawAsset: Sized {
+    fn raw_asset_type(&self) -> RawAssetType;
 }
 
 /// Raw resource loader interface.
-pub trait RawResourceLoader {
-    type Raw: RawResource;
+/// AssetLoader is responds for transforming absolute_path into RawAsset
+pub trait AssetLoader {
+    type Raw: RawAsset;
 
-    fn load(path: &Path) -> Result<Self::Raw>;
+    fn load(absolute_path: &Path) -> Result<Self::Raw>;
 }
 
 /// Raw resource baker interface.
-pub trait RawResourceBaker {
-    type Raw: RawResource;
+/// AssetLoader is responds for transforming RawAsset into Asset
+pub trait AssetBaker {
+    type Raw: RawAsset;
 
-    fn bake(raw: Self::Raw, registry: &AssetRegistry, directory: &PathBuf, url: &AssetUrl) -> Result<()>;
+    fn bake(raw: Self::Raw, url: AssetUrl) -> Result<Vec<Box<dyn Asset>>>;
 }
 
 /// Data needed to send an asset load request.
 #[derive(Clone, Debug, Builder)]
 #[builder(setter(into))]
 pub struct AssetLoadRequest {
+    /// Relative path in content folder
+    raw_asset_path: PathBuf,
+    /// Relative path in asset folder
     url: AssetUrl,
 }
 
-fn serialize_asset<A: Asset + Encode>(asset: &A, absolute_path: &PathBuf) -> Result<()> {
+impl AssetLoadRequest {
+    fn absolute_raw_asset_path(&self) -> PathBuf {
+        workspace_root()
+            .join(AssetDirectory::Content.folder_name())
+            .join(&self.raw_asset_path)
+    }
+
+    fn absolute_asset_path(&self) -> PathBuf {
+        workspace_root()
+            .join(AssetDirectory::Asset.folder_name())
+            .join(&self.raw_asset_path)
+    }
+
+    #[inline]
+    pub fn asset_type(&self) -> AssetType {
+        self.url.asset_type()
+    }
+
+    #[inline]
+    pub fn raw_asset_type(&self) -> RawAssetType {
+        if let Some(extension) = self.raw_asset_path.extension() {
+            extension_raw_asset_type(extension.to_ascii_lowercase().to_str().unwrap())
+        } else {
+            // TODO: make it failable
+            panic!("Unsupported raw asset type!")
+        }
+    }
+}
+
+fn serialize_asset<A: Asset + Encode>(asset: &A, absolute_path: &Path) -> Result<()> {
     if let Some(parent) = absolute_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -272,10 +327,11 @@ fn serialize_asset<A: Asset + Encode>(asset: &A, absolute_path: &PathBuf) -> Res
     Ok(())
 }
 
-fn deserialize_asset<A: Asset + Encode + DeserializeOwned>(absolute_path: &PathBuf) -> Result<A> {
+fn deserialize_asset<A: Asset + Encode + DeserializeOwned>(absolute_path: &Path) -> Result<A> {
+    // TODO: load differently by asset type
     let absolute_path = absolute_path.canonicalize()?;
     let bytes = match absolute_path.extension().and_then(|ext| ext.to_str()) {
-        Some("mscl") | Some("mat") => std::fs::read(&absolute_path)?,
+        Some("scene") | Some("mat") => std::fs::read(&absolute_path)?,
         _ => load_with_memory_mapping(&absolute_path)?.to_vec(),
     };
 

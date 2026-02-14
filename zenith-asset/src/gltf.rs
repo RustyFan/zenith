@@ -1,3 +1,4 @@
+use std::io::BufRead;
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use gltf::{buffer::Data as BufferData, image::Data as ImageData, Document, Primitive};
@@ -5,8 +6,8 @@ use ispc_texcomp::{RgbaSurface, bc5, bc7};
 use zenith_core::file::load_with_memory_mapping;
 use zenith_core::log;
 use zenith_core::log::info;
-use crate::mesh::{Mesh, MeshBuilder, MeshCollection, Vertex};
-use crate::{Asset, RawResourceBaker, AssetRegistry, RawResource, RawResourceLoader, AssetUrl, serialize_asset};
+use crate::mesh::{Mesh, MeshBuilder, Scene, Vertex};
+use crate::{Asset, AssetBaker, AssetRegistry, RawAsset, AssetLoader, AssetUrl, serialize_asset, RawAssetType};
 use crate::material::{Material, MaterialBuilder};
 use crate::texture::{Texture, TextureBuilder, TextureFormat};
 
@@ -56,91 +57,99 @@ impl TextureUsageMask {
     }
 }
 
-impl RawResource for RawGltf {
-    fn load_path(&self) -> &Path {
-        self.path.as_path()
+impl RawAsset for RawGltf {
+    #[inline(always)]
+    fn raw_asset_type(&self) -> RawAssetType {
+        RawAssetType::Gltf
     }
 }
 
-impl RawResourceLoader for GltfLoader {
+impl AssetLoader for GltfLoader {
     type Raw = RawGltf;
 
     #[profiling::function]
-    fn load(path: &Path) -> Result<Self::Raw> {
-        let mmap = load_with_memory_mapping(path)?;
+    fn load(absolute_path: &Path) -> Result<Self::Raw> {
+        let mmap = load_with_memory_mapping(absolute_path)?;
 
         let gltf = gltf::Gltf::from_slice(&mmap)
             .map_err(|e| anyhow!("Failed to parse GLTF: {}", e))?;
 
         let mut raw = RawGltf {
-            path: path.to_owned(),
+            path: absolute_path.to_owned(),
             gltf,
             buffers: vec![],
             images: vec![],
         };
         
-        Self::load_gltf(path, &mut raw)?;
+        Self::load_gltf(absolute_path, &mut raw)?;
 
         Ok(raw)
     }
 }
 
-pub struct RawGltfProcessor;
+pub struct GltfBaker;
 
-impl RawGltfProcessor {
+impl GltfBaker {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl RawGltfProcessor {
+impl GltfBaker {
     #[profiling::function]
     fn process_node(
-        base_directory: &PathBuf,
         node: &gltf::Node,
         buffers: &[BufferData],
-        registry: &AssetRegistry,
-        meshes_url: &mut Vec<(AssetUrl, Option<usize>)>,
-        mesh_counter: &mut u32,
-        main_url: &str,
-    ) -> Result<()> {
+        materials: &[Material],
+        parent: &Path,
+        stem: &String,
+        base_idx: usize,
+    ) -> Result<Vec<Mesh>> {
+        let mut assets = vec![];
+
         if let Some(mesh) = node.mesh() {
-            for primitive in mesh.primitives() {
-                // TODO: abstract asset serialize and register logic
-                let mesh_asset = Self::bake_mesh(&primitive, buffers)?;
-                let url = {
-                    let main = PathBuf::from(main_url);
-                    let parent = main.parent().unwrap_or_else(|| Path::new(""));
-                    let stem = main
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("mesh");
-                    let idx = *mesh_counter;
-                    *mesh_counter += 1;
-                    let mut p = parent.join(format!("{stem}_mesh{idx}"));
-                    p.set_extension(Mesh::<Vertex>::extension());
-                    AssetUrl::from(p)
-                };
+            for (idx, primitive) in mesh.primitives().enumerate() {
+                let mesh = Self::bake_mesh(&primitive, buffers, materials, parent, stem, base_idx + idx)?;
+                assets.push(mesh);
 
-                let asset_serialize_path = base_directory.join(&url);
-                serialize_asset(&mesh_asset, &asset_serialize_path)?;
+                // let url = {
+                //     let main = PathBuf::from(main_url);
+                //     let parent = main.parent().unwrap_or_else(|| Path::new(""));
+                //     let stem = main
+                //         .file_stem()
+                //         .and_then(|s| s.to_str())
+                //         .unwrap_or("mesh");
+                //     let idx = *mesh_counter;
+                //     *mesh_counter += 1;
+                //     let mut p = parent.join(format!("{stem}_mesh{idx}"));
+                //     p.set_extension(Mesh::<Vertex>::extension());
+                //     AssetUrl::from(p)
+                // };
 
-                meshes_url.push((url.clone(), mesh_asset.material));
-                registry.register(url, mesh_asset);
+                // let asset_serialize_path = base_directory.join(&url);
+                // serialize_asset(&mesh_asset, &asset_serialize_path)?;
+                //
+                // meshes_url.push((url.clone(), mesh_asset.material));
+                // registry.register(url, mesh_asset);
             }
         }
 
         for child in node.children() {
-            Self::process_node(base_directory, &child, buffers, registry, meshes_url, mesh_counter, main_url)?;
+            let meshes = Self::process_node(&child, buffers, materials, parent, stem, assets.len())?;
+            assets.extend(meshes.into_iter());
         }
 
-        Ok(())
+        Ok(assets)
     }
 
     #[profiling::function]
     fn bake_mesh(
         primitive: &Primitive,
         buffers: &[BufferData],
+        materials: &[Material],
+        parent: &Path,
+        stem: &String,
+        idx: usize,
     ) -> Result<Mesh> {
         let reader = primitive.reader(|buffer| Some(&*buffers[buffer.index()]));
 
@@ -186,12 +195,13 @@ impl RawGltfProcessor {
             })
             .collect();
 
-        let material = primitive.material().index();
+        let material_idx = primitive.material().index();
 
         let mesh = MeshBuilder::default()
+            .url(Self::resource_url::<Mesh>(parent, stem, idx))
             .vertices(vertices)
             .indices(indices)
-            .material(material)
+            .material(materials.get(material_idx.unwrap_or(0)).map(|mat| mat.url.clone()))
             .build()?;
 
         Ok(mesh)
@@ -221,36 +231,37 @@ impl RawGltfProcessor {
     }
 
     #[profiling::function]
-    fn bake_materials(gltf: &Document, texture_urls: &[AssetUrl]) -> Result<Vec<Material>> {
+    fn bake_materials(gltf: &Document, parent: &Path, stem: &String, texture_assets: &[Texture]) -> Result<Vec<Material>> {
         let mut materials = Vec::new();
 
-        for material in gltf.materials() {
+        for(idx, material) in gltf.materials().enumerate() {
             let pbr = material.pbr_metallic_roughness();
 
             let mut builder = MaterialBuilder::default();
             builder.base_color(pbr.base_color_factor())
                 .metallic(pbr.metallic_factor())
                 .roughness(pbr.roughness_factor())
-                .emissive(material.emissive_factor());
+                .emissive(material.emissive_factor())
+                .url(Self::resource_url::<Material>(&parent, &stem, idx));
 
             if let Some(texture) = pbr.base_color_texture() {
                 let image_index = texture.texture().source().index();
-                if let Some(url) = texture_urls.get(image_index) {
-                    builder.base_color_tex(url.clone());
+                if let Some(tex) = texture_assets.get(image_index) {
+                    builder.base_color_tex(tex.url().clone());
                 }
             }
 
             if let Some(texture) = pbr.metallic_roughness_texture() {
                 let image_index = texture.texture().source().index();
-                if let Some(url) = texture_urls.get(image_index) {
-                    builder.mra_tex(url.clone());
+                if let Some(tex) = texture_assets.get(image_index) {
+                    builder.mra_tex(tex.url().clone());
                 }
             }
 
             if let Some(texture) = material.normal_texture() {
                 let image_index = texture.texture().source().index();
-                if let Some(url) = texture_urls.get(image_index) {
-                    builder.normal_tex(url.clone());
+                if let Some(tex) = texture_assets.get(image_index) {
+                    builder.normal_tex(tex.url().clone());
                 }
             }
 
@@ -268,17 +279,17 @@ impl RawGltfProcessor {
 
             if let Some(texture) = material.emissive_texture() {
                 let image_index = texture.texture().source().index();
-                if let Some(url) = texture_urls.get(image_index) {
-                    builder.emissive_tex(url.clone());
+                if let Some(tex) = texture_assets.get(image_index) {
+                    builder.emissive_tex(tex.url().clone());
                 }
             }
 
             materials.push(builder.build()?);
         }
 
-        if materials.is_empty() {
-            materials.push(MaterialBuilder::default().build()?);
-        }
+        // if materials.is_empty() {
+        //     materials.push(MaterialBuilder::default().build()?);
+        // }
 
         Ok(materials)
     }
@@ -317,8 +328,8 @@ impl RawGltfProcessor {
         usages
     }
 
-    fn split_asset_path(asset_url: &str, fallback: &str) -> (PathBuf, String) {
-        let main = Path::new(asset_url);
+    fn split_asset_path(asset_url: &AssetUrl, fallback: &str) -> (PathBuf, String) {
+        let main = Path::new(asset_url.as_ref());
         let parent = main.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
         let stem = main
             .file_stem()
@@ -338,15 +349,15 @@ impl RawGltfProcessor {
     }
 
     #[profiling::function]
-    fn create_texture_from_gltf_image(image_data: &ImageData, usage: TextureUsageMask) -> Result<Texture> {
+    fn create_texture_from_gltf_image(image_data: &ImageData, usage: TextureUsageMask, parent: &Path, stem: &String, idx: usize) -> Result<Texture> {
         if let Some((pixels, format)) = Self::compress_texture_if_possible(image_data, usage) {
             return TextureBuilder::default()
+                .url(Self::resource_url::<Texture>(&parent, &stem, idx))
                 .width(image_data.width)
                 .height(image_data.height)
                 .format(format)
                 .pixels(pixels)
-                .build()
-                .map_err(|e| anyhow!("Failed to build texture: {}", e));
+                .build().map_err(|e| anyhow!("Failed to build texture: {}", e));
         }
 
         // Fallback: store uncompressed pixels.
@@ -354,6 +365,7 @@ impl RawGltfProcessor {
         log::warn!("Uncompressed glTF image: format[{:?}]", texture_format);
 
         TextureBuilder::default()
+            .url(Self::resource_url::<Texture>(&parent, &stem, idx))
             .width(image_data.width)
             .height(image_data.height)
             .format(texture_format)
@@ -550,13 +562,19 @@ impl RawGltfProcessor {
             }
         }
     }
+
+    fn resource_url<A: Asset>(parent: &Path, stem: &String, idx: usize) -> AssetUrl {
+        let mut url = parent.join(format!("{stem}_{idx}"));
+        url.set_extension(A::extension());
+        AssetUrl::new(url)
+    }
 }
 
-impl RawResourceBaker for RawGltfProcessor {
+impl AssetBaker for GltfBaker {
     type Raw = RawGltf;
 
     #[profiling::function]
-    fn bake(raw: Self::Raw, registry: &AssetRegistry, base_directory: &PathBuf, url: &AssetUrl) -> Result<()> {
+    fn bake(raw: Self::Raw, url: AssetUrl) -> Result<Vec<Box<dyn Asset>>> {
         let RawGltf {
             gltf,
             buffers,
@@ -564,78 +582,50 @@ impl RawResourceBaker for RawGltfProcessor {
             ..
         } = raw;
 
-        let asset_url = url.path.to_str().ok_or(anyhow!(format!("Invalid asset url: {:?}", url)))?;
+        let (parent, stem) = Self::split_asset_path(&url, "mesh");
 
         let texture_usage_by_image = Self::collect_texture_usages(&gltf, images.len());
-
-        // Bake textures once (shared by materials via AssetUrl references).
-        let (tex_parent, tex_stem) = Self::split_asset_path(asset_url, "asset");
-        let texture_urls: Vec<AssetUrl> = images
-            .iter()
+        let textures = images.iter()
             .enumerate()
             .map(|(idx, img)| {
-                let usage = texture_usage_by_image.get(idx).copied().unwrap_or_default();
-                let tex = Self::create_texture_from_gltf_image(img, usage)?;
+                let usage = texture_usage_by_image.get(idx).copied().ok_or(anyhow!("Unknown texture usage!"))?;
+                let tex = Self::create_texture_from_gltf_image(img, usage, &parent, &stem, idx)?;
 
-                let mut p = tex_parent.join(format!("{tex_stem}_tex{idx}_{}x{}", tex.width, tex.height));
-                p.set_extension(Texture::extension());
-                let url: AssetUrl = p.into();
+                // let mut p = tex_parent.join(format!("{tex_stem}_tex{idx}_{}x{}", tex.width, tex.height));
+                // p.set_extension(Texture::extension());
+                // let url: AssetUrl = p.into();
 
-                let asset_serialize_path = base_directory.join(&url);
-                serialize_asset(&tex, &asset_serialize_path)?;
-                registry.register(url.clone(), tex);
+                // let asset_serialize_path = base_directory.join(&url);
+                // serialize_asset(&tex, &asset_serialize_path)?;
+                // registry.register(url.clone(), tex);
 
-                Ok(url)
+                Ok(tex)
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let materials = Self::bake_materials(&gltf, &texture_urls)?;
-        let (mat_parent, mat_stem) = Self::split_asset_path(asset_url, "material");
-        let mut material_urls = Vec::with_capacity(materials.len());
-        for (mat_idx, material) in materials.into_iter().enumerate() {
-            // TODO: abstract asset serialize and register logic
-            let url = {
-                let mut p = mat_parent.join(format!("{mat_stem}_mat{mat_idx}"));
-                p.set_extension(Material::extension());
-                AssetUrl::from(p)
-            };
+        let materials = Self::bake_materials(&gltf, &parent, &stem, &textures)?;
 
-            let asset_serialize_path = base_directory.join(&url);
-            serialize_asset(&material, &asset_serialize_path)?;
-
-            material_urls.push(url.clone());
-            registry.register(url, material);
-        }
-
-        let mut meshes_urls: Vec<(AssetUrl, Option<usize>)> = Vec::new();
-        let mut mesh_counter: u32 = 0;
+        let mut meshes = vec![];
         for scene in gltf.scenes() {
             for node in scene.nodes() {
-                Self::process_node(&base_directory, &node, &buffers, registry, &mut meshes_urls, &mut mesh_counter, asset_url)?;
+                meshes.extend(Self::process_node(&node, &buffers, &materials, &parent, &stem, 0)?.into_iter());
             }
         }
 
-        let mut mesh_collection = MeshCollection::new(&url);
-        for (mesh_url, mat_index) in meshes_urls.into_iter() {
-            let idx = mat_index.unwrap_or(0);
-            let mat_url = material_urls
-                .get(idx)
-                .cloned()
-                .unwrap_or_else(|| material_urls.first().cloned().unwrap());
-            mesh_collection.add_mesh(mesh_url, mat_url);
+        let mut scene = Scene::new(url.clone());
+        for mesh in &meshes {
+            scene.add_mesh(mesh.url.clone());
         }
 
-        let mesh_collection_url = mesh_collection.url(asset_url);
-        let asset_serialize_path = base_directory.join(&mesh_collection_url);
-        serialize_asset(&mesh_collection, &asset_serialize_path)?;
+        info!("[{:?}] is loaded and serialized. ({} meshes, {} materials, {} textures)", &url, meshes.len(), materials.len(), textures.len());
 
-        // Also register the collection so users can immediately get it via AssetHandle<MeshCollection>.
-        registry.register(mesh_collection_url.clone(), mesh_collection.clone());
+        let assets = textures.into_iter().map(|asset| Box::new(asset) as Box<dyn Asset>)
+            .chain(materials.into_iter().map(|asset| Box::new(asset) as Box<dyn Asset>))
+            .chain(meshes.into_iter().map(|asset| Box::new(asset) as Box<dyn Asset>))
+            .chain(std::iter::once(scene).map(|asset| Box::new(asset) as Box<dyn Asset>))
+            .collect();
 
-        info!("[{}] is loaded and serialized.", asset_url);
-        info!("{:?}", mesh_collection);
-
-        Ok(())
+        Ok(assets)
     }
 }
 
