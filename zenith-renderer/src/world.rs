@@ -153,8 +153,8 @@ impl WorldRenderer {
         self.direct_lighting_renderer.set_skybox(device, skybox)
     }
 
-    pub fn add_mesh(&mut self, device: &RenderDevice,  mesh_collection: AssetHandle<Scene>) -> anyhow::Result<()> {
-        let collection = mesh_collection
+    pub fn add_scene(&mut self, device: &RenderDevice, scene: AssetHandle<Scene>) -> anyhow::Result<()> {
+        let collection = scene
             .get()
             .ok_or_else(|| anyhow!("MeshCollection not loaded/registered (call AssetManager::request_load first)"))?;
 
@@ -168,18 +168,13 @@ impl WorldRenderer {
             tex_urls: [Option<zenith_asset::AssetUrl>; 4],
         }
 
-        let mut pending: Vec<PendingMeshUpload> = Vec::with_capacity(collection.iter()?.size_hint().1.unwrap_or(0));
+        let mut pending: Vec<PendingMeshUpload> = Vec::with_capacity(collection.iter().size_hint().1.unwrap_or(0));
 
-        for (mesh_url, mat_url) in collection.iter()? {
+        for mesh_url in collection.iter() {
             let mesh_handle = AssetHandle::<Mesh>::new(mesh_url.clone());
             let mesh = mesh_handle
                 .get()
                 .ok_or_else(|| anyhow!("Mesh not loaded: {:?}", mesh_url.as_ref()))?;
-
-            let mat_handle = AssetHandle::<Material>::new(mat_url.clone());
-            let mat = mat_handle
-                .get()
-                .ok_or_else(|| anyhow!("Material not loaded: {:?}", mat_url.as_ref()))?;
 
             let vertex_buffer = Arc::new(Buffer::new(
                 device,
@@ -210,69 +205,77 @@ impl WorldRenderer {
                 }
             };
 
-            let tex_urls = [
-                mat.base_color_tex.clone(),
-                mat.mra_tex.clone(),
-                mat.normal_tex.clone(),
-                mat.emissive_tex.clone(),
-            ];
+            let handle = mesh.material.as_ref()
+                .map(|url| AssetHandle::<Material>::new(url.clone()));
 
-            let base_color_tex = create_texture("base_color", tex_urls[0].as_ref())?;
-            let mra_tex = create_texture("mra", tex_urls[1].as_ref())?;
-            let normal_tex = create_texture("normal", tex_urls[2].as_ref())?;
-            let emissive_tex = create_texture("emissive", tex_urls[3].as_ref())?;
+            if let Some(handle) = &handle {
+                let mut bindless_pool = device.bindless_pool().lock();
 
-            let mut bindless_pool = device.bindless_pool().lock();
+                let mat = handle.get()
+                    .ok_or_else(|| anyhow!("Material not loaded: {:?}", handle.url().as_ref()))?;
 
-            let base_color_tex_handle = if let Some(tex) = &base_color_tex {
-                bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
-            } else {
-                BindlessHandle::INVALID
-            };
+                let tex_urls = [
+                    mat.base_color_tex.clone(),
+                    mat.mra_tex.clone(),
+                    mat.normal_tex.clone(),
+                    mat.emissive_tex.clone(),
+                ];
 
-            let mra_tex_handle = if let Some(tex) = &mra_tex {
-                bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
-            } else {
-                BindlessHandle::INVALID
-            };
+                let base_color_tex = create_texture("base_color", tex_urls[0].as_ref())?;
+                let mra_tex = create_texture("mra", tex_urls[1].as_ref())?;
+                let normal_tex = create_texture("normal", tex_urls[2].as_ref())?;
+                let emissive_tex = create_texture("emissive", tex_urls[3].as_ref())?;
 
-            let normal_tex_handle = if let Some(tex) = &normal_tex {
-                bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
-            } else {
-                BindlessHandle::INVALID
-            };
+                let base_color_tex_handle = if let Some(tex) = &base_color_tex {
+                    bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
+                } else {
+                    BindlessHandle::INVALID
+                };
 
-            let emissive_tex_handle = if let Some(tex) = &emissive_tex {
-                bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
-            } else {
-                BindlessHandle::INVALID
-            };
+                let mra_tex_handle = if let Some(tex) = &mra_tex {
+                    bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
+                } else {
+                    BindlessHandle::INVALID
+                };
 
-            bindless_pool.flush(device);
+                let normal_tex_handle = if let Some(tex) = &normal_tex {
+                    bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
+                } else {
+                    BindlessHandle::INVALID
+                };
 
-            let material = GpuMaterial {
-                base_color_factor: mat.base_color,
-                base_color_tex,
-                mra_tex,
-                normal_tex,
-                emissive_tex,
-                base_color_tex_handle,
-                mra_tex_handle,
-                normal_tex_handle,
-                _emissive_tex_handle: emissive_tex_handle,
-            };
+                let emissive_tex_handle = if let Some(tex) = &emissive_tex {
+                    bindless_pool.upload(&tex.as_range(TextureLayout::ShaderReadOnly, .., ..))?
+                } else {
+                    BindlessHandle::INVALID
+                };
 
-            pending.push(PendingMeshUpload {
-                gpu: GpuMesh {
-                    vertex_buffer,
-                    index_buffer,
-                    index_count: mesh.indices.len() as u32,
-                    model: Mat4::from_axis_angle(WORLD_SPACE_UP, Degree::new(90.0).to_radians().into()),
-                    material,
-                },
-                mesh_url: mesh_url.clone(),
-                tex_urls,
-            });
+                bindless_pool.flush(device);
+
+                let material = GpuMaterial {
+                    base_color_factor: mat.base_color,
+                    base_color_tex,
+                    mra_tex,
+                    normal_tex,
+                    emissive_tex,
+                    base_color_tex_handle,
+                    mra_tex_handle,
+                    normal_tex_handle,
+                    _emissive_tex_handle: emissive_tex_handle,
+                };
+
+                pending.push(PendingMeshUpload {
+                    gpu: GpuMesh {
+                        vertex_buffer,
+                        index_buffer,
+                        index_count: mesh.indices.len() as u32,
+                        model: Mat4::from_axis_angle(WORLD_SPACE_UP, Degree::new(90.0).to_radians().into()),
+                        material,
+                    },
+                    mesh_url: mesh_url.clone(),
+                    tex_urls,
+                });
+            }
         }
 
         // 2. Upload data to gpu

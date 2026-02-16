@@ -269,7 +269,7 @@ fn build_reflection(
         b.set == crate::BindlessPool::SET_INDEX && b.name.starts_with(crate::BindlessPool::BINDING_PREFIX)
     });
     if has_bindless_set0 {
-        for canonical in crate::BindlessPool::canonical_shader_bindings(caps) {
+        for canonical in crate::BindlessPool::shader_bindings(caps) {
             if let Some(existing) = bindings
                 .iter_mut()
                 .find(|b| b.set == canonical.set && b.binding == canonical.binding)

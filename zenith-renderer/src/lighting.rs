@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use zenith_rendergraph::{ColorAttachment, RenderGraphBuilder, RenderGraphResource, VertexLayout};
 use zenith_rhi::{vk, Buffer, BufferState, GraphicPipelineStateBuilder, GraphicShaderInputBuilder, RenderDevice, Shader, Texture, TextureState, GraphicPipelineDesc, ShaderStage, BindlessPool, TextureDesc, TextureLayout, UploadPool, ImmediateCommandEncoder};

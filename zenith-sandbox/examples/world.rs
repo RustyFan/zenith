@@ -9,7 +9,7 @@ use zenith::{launch, App, Args, RenderableApp, RenderContext};
 use zenith::rhi::TextureState;
 use zenith::renderer::WorldRenderer;
 use zenith::asset::manager::AssetRequestor;
-use zenith::asset::{AssetHandle};
+use zenith::asset::{AssetHandle, AssetLoadRequestBuilder};
 use zenith::asset::mesh::Scene;
 use zenith::core::camera::{Camera, CameraController, NEAR_PLANE};
 use zenith::core::input::InputActionMapper;
@@ -22,7 +22,7 @@ pub struct WorldApp {
     input: InputActionMapper,
     camera: Camera,
     controller: CameraController,
-    asset_manager: AssetRequestor,
+    asset_requestor: AssetRequestor,
 }
 
 impl App for WorldApp {
@@ -32,7 +32,7 @@ impl App for WorldApp {
             input: InputActionMapper::new(),
             camera: Camera::default(),
             controller: CameraController::new(10.0),
-            asset_manager: AssetRequestor::new(),
+            asset_requestor: AssetRequestor::new(),
         })
     }
 
@@ -83,8 +83,16 @@ impl RenderableApp for WorldApp {
 
         let mut load_timer = Timer::new();
         load_timer.start();
-        self.asset_manager.request_load("mesh/cerberus/scene.gltf")?;
-        self.asset_manager.request_load("texture/minedump_flats_4k.hdr")?;
+        self.asset_requestor.request_load(
+            AssetLoadRequestBuilder::default()
+                .raw_asset_path(Some(PathBuf::from("mesh/cerberus/scene.gltf")))
+                .url("mesh/cerberus/scene.scene")
+                .build().unwrap())?;
+        self.asset_requestor.request_load(
+            AssetLoadRequestBuilder::default()
+                .raw_asset_path(Some(PathBuf::from("texture/minedump_flats_4k.hdr")))
+                .url("texture/minedump_flats_4k.tex")
+                .build().unwrap())?;
         load_timer.stop();
         let load_ms = load_timer.elapsed_total::<Milliseconds>().value();
 
@@ -94,13 +102,13 @@ impl RenderableApp for WorldApp {
         renderer_new_timer.stop();
         let renderer_new_ms = renderer_new_timer.elapsed_total::<Milliseconds>().value();
 
-        let collection = AssetHandle::<Scene>::new(PathBuf::from("mesh/cerberus/scene.mscl").into());
+        let collection = AssetHandle::<Scene>::new(PathBuf::from("mesh/cerberus/scene.scene").into());
         let mut upload_timer = Timer::new();
         upload_timer.start();
-        renderer.add_mesh(render_device, collection)?;
+        renderer.add_scene(render_device, collection)?;
 
         let skybox_handle = AssetHandle::<zenith::asset::texture::Texture>::new(
-            PathBuf::from("texture/minedump_flats_4k_cubemap_2048x2048.tex").into()
+            PathBuf::from("texture/minedump_flats_4k.tex").into()
         );
         if let Some(skybox_tex) = skybox_handle.get() {
             renderer.set_skybox(render_device, &skybox_tex)?;

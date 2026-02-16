@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use glam::Vec3;
 use ispc_texcomp::{RgbaSurface};
 use zenith_core::log;
-use crate::{Asset, AssetBaker, AssetRegistry, RawAsset, AssetLoader, AssetUrl, serialize_asset, RawAssetType};
+use crate::{Asset, AssetBaker, RawAsset, AssetLoader, AssetUrl, RawAssetType};
 use crate::texture::{Texture, TextureBuilder, TextureFormat};
 
 #[derive(Debug, Clone)]
@@ -17,7 +17,6 @@ impl HdrLoader {
 
 /// Raw HDR data container (equirectangular RGB32F)
 pub struct RawHdr {
-    path: PathBuf,
     width: u32,
     height: u32,
     pixels: Vec<f32>,  // RGB32F data (3 floats per pixel)
@@ -46,7 +45,6 @@ impl AssetLoader for HdrLoader {
         log::info!("Loaded HDR image: {}x{} ({} pixels)", width, height, pixels_flat.len() / 3);
 
         Ok(RawHdr {
-            path: path.to_owned(),
             width,
             height,
             pixels: pixels_flat,
@@ -266,13 +264,9 @@ impl AssetBaker for RawHdrProcessor {
         let asset_url_str = url.path.to_str().ok_or(anyhow!("Invalid asset url"))?;
         let (parent, stem) = Self::split_asset_path(asset_url_str, "cubemap");
 
-        let mut cubemap_path = parent.join(format!("{}_cubemap", stem));
+        let mut cubemap_path = parent.join(format!("{}", stem));
         cubemap_path.set_extension(Texture::extension());
         let cubemap_url: AssetUrl = cubemap_path.into();
-
-        // let asset_serialize_path = base_directory.join(&cubemap_url);
-        // serialize_asset(&texture, &asset_serialize_path)?;
-        // registry.register(cubemap_url.clone(), texture);
 
         let texture = TextureBuilder::default()
             .url(cubemap_url.clone())

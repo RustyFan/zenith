@@ -1,4 +1,3 @@
-use std::io::BufRead;
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use gltf::{buffer::Data as BufferData, image::Data as ImageData, Document, Primitive};
@@ -7,7 +6,7 @@ use zenith_core::file::load_with_memory_mapping;
 use zenith_core::log;
 use zenith_core::log::info;
 use crate::mesh::{Mesh, MeshBuilder, Scene, Vertex};
-use crate::{Asset, AssetBaker, AssetRegistry, RawAsset, AssetLoader, AssetUrl, serialize_asset, RawAssetType};
+use crate::{Asset, AssetBaker, RawAsset, AssetLoader, AssetUrl, RawAssetType};
 use crate::material::{Material, MaterialBuilder};
 use crate::texture::{Texture, TextureBuilder, TextureFormat};
 
@@ -21,7 +20,7 @@ impl GltfLoader {
 }
 
 pub struct RawGltf {
-    path: PathBuf,
+    // path: PathBuf,
     gltf: gltf::Gltf,
     buffers: Vec<BufferData>,
     images: Vec<ImageData>,
@@ -75,7 +74,6 @@ impl AssetLoader for GltfLoader {
             .map_err(|e| anyhow!("Failed to parse GLTF: {}", e))?;
 
         let mut raw = RawGltf {
-            path: absolute_path.to_owned(),
             gltf,
             buffers: vec![],
             images: vec![],

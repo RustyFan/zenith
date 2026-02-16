@@ -167,7 +167,7 @@ impl BindlessPool {
     /// with this prefix will have its layout replaced by the bindless pool layout.
     pub const BINDING_PREFIX: &'static str = "bindless_";
     
-    pub fn canonical_shader_bindings(caps: &BindlessCaps) -> [ShaderBinding; 3] {
+    pub fn shader_bindings(caps: &BindlessCaps) -> [ShaderBinding; 3] {
         let binding_flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
         [
             ShaderBinding {
@@ -201,7 +201,7 @@ impl BindlessPool {
     }
 
     pub fn descriptor_layout_bindings(caps: &BindlessCaps) -> Vec<LayoutBinding> {
-        let canonical = Self::canonical_shader_bindings(caps);
+        let canonical = Self::shader_bindings(caps);
         let bindings = canonical
             .into_iter()
             .map(|binding| {

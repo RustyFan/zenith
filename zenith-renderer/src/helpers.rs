@@ -1,4 +1,4 @@
-﻿use std::sync::{Arc};
+use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use zenith_rhi::{Buffer, BufferDesc, BufferState, ImmediateCommandEncoder, RenderDevice, Shader, ShaderStage, UploadPool, VertexLayout};
 

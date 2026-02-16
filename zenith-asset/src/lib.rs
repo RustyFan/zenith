@@ -15,7 +15,7 @@ use serde::de::DeserializeOwned;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_core::file::load_with_memory_mapping;
 use zenith_core::{log, workspace_root};
-use crate::manager::AssetDirectory;
+use crate::manager::EngineDirectory;
 
 pub mod mesh;
 pub mod manager;
@@ -131,18 +131,18 @@ impl AssetType {
 /// use std::path::PathBuf;
 /// let asset_url: AssetUrl = PathBuf::from("mesh/cerberus/scene.mesh").try_into();
 /// ```
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Default, From, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, From, Serialize, Deserialize, Encode, Decode)]
 pub struct AssetUrl {
     path: PathBuf,
 }
 
-impl TryFrom<String> for AssetUrl {
-    type Error = anyhow::Error;
+impl From<&str> for AssetUrl {
+    fn from(value: &str) -> Self { Self { path: value.into() } }
+}
 
-    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-        Ok(AssetUrl {
-            path: value.into(),
-        })
+impl Default for AssetUrl {
+    fn default() -> Self {
+        Self::invalid()
     }
 }
 
@@ -167,6 +167,12 @@ impl AssetUrl {
             .unwrap_or("unknown");
         extension_asset_type(&extension.to_ascii_lowercase())
     }
+
+    pub fn absolute_path(&self) -> PathBuf {
+        workspace_root()
+            .join(EngineDirectory::Asset.folder_name())
+            .join(&self.path)
+    }
 }
 
 impl AsRef<Path> for AssetUrl {
@@ -179,6 +185,12 @@ impl AsRef<Path> for AssetUrl {
 pub struct AssetHandle<A> {
     url: AssetUrl,
     _marker: PhantomData<A>,
+}
+
+impl<A: Asset> Default for AssetHandle<A> {
+    fn default() -> Self {
+        Self::null()
+    }
 }
 
 impl<A: Asset> AssetHandle<A> {
@@ -196,6 +208,11 @@ impl<A: Asset> AssetHandle<A> {
             url,
             _marker: PhantomData,
         }
+    }
+
+    #[inline]
+    pub fn url(&self) -> &AssetUrl {
+        &self.url
     }
 
     /// Get the underlying asset data if this asset is successfully loaded and registered.
@@ -274,8 +291,9 @@ pub trait AssetBaker {
 #[derive(Clone, Debug, Builder)]
 #[builder(setter(into))]
 pub struct AssetLoadRequest {
-    /// Relative path in content folder
-    raw_asset_path: PathBuf,
+    /// Relative path in content folder (None when loading a dependency from cache only).
+    #[builder(default)]
+    raw_asset_path: Option<PathBuf>,
     /// Relative path in asset folder
     url: AssetUrl,
 }
@@ -283,14 +301,19 @@ pub struct AssetLoadRequest {
 impl AssetLoadRequest {
     fn absolute_raw_asset_path(&self) -> PathBuf {
         workspace_root()
-            .join(AssetDirectory::Content.folder_name())
-            .join(&self.raw_asset_path)
+            .join(EngineDirectory::Content.folder_name())
+            .join(self.raw_asset_path.as_ref().expect("raw_asset_path required for bake"))
     }
 
     fn absolute_asset_path(&self) -> PathBuf {
         workspace_root()
-            .join(AssetDirectory::Asset.folder_name())
-            .join(&self.raw_asset_path)
+            .join(EngineDirectory::Asset.folder_name())
+            .join(&self.url.path)
+    }
+
+    #[inline]
+    pub fn raw_asset_path(&self) -> Option<&PathBuf> {
+        self.raw_asset_path.as_ref()
     }
 
     #[inline]
@@ -300,23 +323,25 @@ impl AssetLoadRequest {
 
     #[inline]
     pub fn raw_asset_type(&self) -> RawAssetType {
-        if let Some(extension) = self.raw_asset_path.extension() {
+        let path = self.raw_asset_path.as_ref().expect("raw_asset_path required for bake");
+        if let Some(extension) = path.extension() {
             extension_raw_asset_type(extension.to_ascii_lowercase().to_str().unwrap())
         } else {
-            // TODO: make it failable
             panic!("Unsupported raw asset type!")
         }
     }
 }
 
-fn serialize_asset<A: Asset + Encode>(asset: &A, absolute_path: &Path) -> Result<()> {
+const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
+
+fn serialize_asset<A: Asset + Serialize>(asset: &A) -> Result<()> {
+    let absolute_path = asset.url().absolute_path();
     if let Some(parent) = absolute_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let config = bincode::config::standard();
-    let encoded_data = bincode::encode_to_vec(asset, config)?;
-    let compressed = zstd::stream::encode_all(Cursor::new(encoded_data), ZSTD_LEVEL)?;
+    let encoded_data = bincode::serde::encode_to_vec(asset, BINCODE_CONFIG)?;
+    let compressed = zstd::stream::encode_all(Cursor::new(&encoded_data), ZSTD_LEVEL)?;
 
     let mut file = File::create(absolute_path)?;
     file.write_all(ZSTD_MAGIC)?;
@@ -345,8 +370,7 @@ fn deserialize_asset<A: Asset + Encode + DeserializeOwned>(absolute_path: &Path)
 
     let compressed = &bytes[header_len..];
     let decompressed = zstd::stream::decode_all(Cursor::new(compressed))?;
-    let (asset, _): (A, usize) = bincode::serde::decode_from_slice(&decompressed, bincode::config::standard())
-        .expect(&format!("Failed to deserialize asset {:?}", absolute_path));
-
+    let (asset, _) = bincode::serde::decode_from_slice::<A, _>(&decompressed, BINCODE_CONFIG)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize asset {:?}: {}", absolute_path, e))?;
     Ok(asset)
 }

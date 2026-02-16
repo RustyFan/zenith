@@ -258,7 +258,6 @@ unsafe extern "system" fn vulkan_debug_callback(
     match message_severity {
         vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => {
             log::error!("Vulkan {}: {}", type_str, message);
-            std::process::abort();
         }
         vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => {
             log::warn!("Vulkan {}: {}", type_str, message);

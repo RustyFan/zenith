@@ -1,9 +1,8 @@
 use std::any::Any;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use anyhow::Result;
-use derive_more::Error;
 use zenith_core::log::info;
-use zenith_core::{log, workspace_root};
+use zenith_core::{workspace_root};
 use crate::gltf::{GltfLoader, GltfBaker};
 use crate::hdr::{HdrLoader, RawHdrProcessor};
 use crate::{AssetBaker, AssetLoadRequest, AssetType, AssetLoader, ASSET_REGISTRY, AssetLoadRequestBuilder, Asset, AssetUrl, deserialize_asset, RawAssetType, serialize_asset};
@@ -13,24 +12,26 @@ use crate::texture::Texture;
 
 /// Managing the loading, registering of assets.
 pub struct AssetRequestor {
-    cache_dir: PathBuf,
-    content_dir: PathBuf,
+    asset_dir: PathBuf,
+    // content_dir: PathBuf,
 }
 
-const CACHE_VERSION: &str = "9def1275-2dc5-47c7-b4c4-daed2c7d3951";
+/// Bump this when asset structs (Scene, Mesh, Material, Texture, AssetUrl) or bincode layout change
+/// so existing baked caches are invalidated and re-baked.
+const CACHE_VERSION: &str = "a1b2c3d4-5e6f-42c7-b4c4-daed2c7d3952";
 const CACHE_VERSION_FILE: &str = ".cache_version";
 
 #[derive(Debug, Clone, Copy)]
-pub enum AssetDirectory {
+pub enum EngineDirectory {
     Content,
     Asset,
 }
 
-impl AssetDirectory {
+impl EngineDirectory {
     pub fn folder_name(&self) -> &str {
         match self {
-            AssetDirectory::Content => "content",
-            AssetDirectory::Asset => "asset",
+            EngineDirectory::Content => "content",
+            EngineDirectory::Asset => "asset",
         }
     }
 }
@@ -39,8 +40,8 @@ impl AssetRequestor {
     pub fn new() -> Self {
         let root = workspace_root();
         Self {
-            cache_dir: root.to_owned().join("cache/"),
-            content_dir: root.join("content/"),
+            asset_dir: root.to_owned().join("asset/"),
+            // content_dir: root.join("content/"),
         }
     }
 
@@ -57,34 +58,10 @@ impl AssetRequestor {
     /// ```
     #[profiling::function]
     pub fn request_load(&self, request: AssetLoadRequest) -> Result<()> {
-        // let url = request.url.into();
-
         if self.should_bake_asset(&request) {
             self.request_load_raw(request)?;
         } else {
             self.request_load_asset(request)?;
-            // let extension = request.url.as_ref().extension()
-            //     .and_then(|e| e.to_str())
-            //     .unwrap_or("");
-            //
-            // if extension == "hdr" {
-            //     // Load the cached cubemap texture directly
-            //     if let Some(cached_path) = self.find_hdr_cache_file(&request) {
-            //         let cache_url: AssetUrl = cached_path.into();
-            //         return self.request_load_asset(AssetLoadRequestBuilder::default()
-            //             .url(cache_url)
-            //             .build()?);
-            //     }
-            //     anyhow::bail!("HDR cache file not found for {:?}", request.url);
-            // }
-            //
-            // // Default: assume MeshCollection
-            // let mut url = url;
-            // url.set_extension(Scene::extension());
-            //
-            // self.request_load_asset(AssetLoadRequestBuilder::default()
-            //     .url(url)
-            //     .build()?)
         }
 
         Ok(())
@@ -92,86 +69,58 @@ impl AssetRequestor {
 
     #[profiling::function]
     fn should_bake_asset(&self, request: &AssetLoadRequest) -> bool {
+        let Some(_) = request.raw_asset_path() else {
+            return false; // load from cache only (e.g. dependency)
+        };
         let raw_path = request.absolute_raw_asset_path();
-        let extension = raw_path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
 
-        if !self.cache_version_matches() {
-            return true;
-        }
-
-        if extension == "gltf" {
-            let cached_file_path = request.absolute_asset_path();
-
-            // if no cache had been found, rebake
-            if !cached_file_path.exists() {
-                return true;
-            }
-
-            let asset_metadata = match std::fs::metadata(cached_file_path) {
-                Ok(metadata) => metadata,
-                Err(_) => return false,
-            };
-
-            let source_metadata = match std::fs::metadata(raw_path) {
-                Ok(metadata) => metadata,
-                Err(_) => return false,
-            };
-
-            let asset_last_modified_time = match asset_metadata.modified() {
-                Ok(time) => time,
-                Err(_) => return false,
-            };
-
-            let raw_last_modified_time = match source_metadata.modified() {
-                Ok(time) => time,
-                Err(_) => return false,
-            };
-
-            // if the raw asset had been modified, rebake
-            return raw_last_modified_time > asset_last_modified_time;
-        }
-
-        // For HDR files, check if a cached cubemap texture exists and is up-to-date
-        if extension == "hdr" {
-            if !raw_path.exists() {
-                return false;
-            }
-
-            if let Some(cached_path) = self.find_hdr_cache_file(&request) {
-                let cached_abs_path = self.cache_dir.join(&cached_path);
-                let cache_modified = std::fs::metadata(&cached_abs_path)
-                    .and_then(|m| m.modified())
-                    .ok();
-                let source_modified = std::fs::metadata(&raw_path)
-                    .and_then(|m| m.modified())
-                    .ok();
-
-                match (cache_modified, source_modified) {
-                    (Some(cache_time), Some(source_time)) => return source_time > cache_time,
-                    _ => return true,
-                }
-            }
-
+        if self.is_engine_cache_version_dirty() {
             return true;
         }
         
-        true
+        let cached_file_path = request.absolute_asset_path();
+
+        // if no cache had been found, rebake
+        if !cached_file_path.exists() {
+            return true;
+        }
+
+        let asset_metadata = match std::fs::metadata(cached_file_path) {
+            Ok(metadata) => metadata,
+            Err(_) => return false,
+        };
+
+        let source_metadata = match std::fs::metadata(raw_path) {
+            Ok(metadata) => metadata,
+            Err(_) => return false,
+        };
+
+        let asset_last_modified_time = match asset_metadata.modified() {
+            Ok(time) => time,
+            Err(_) => return false,
+        };
+
+        let raw_last_modified_time = match source_metadata.modified() {
+            Ok(time) => time,
+            Err(_) => return false,
+        };
+
+        // if the raw asset had been modified, rebake
+        raw_last_modified_time > asset_last_modified_time
     }
 
-    fn cache_version_matches(&self) -> bool {
-        let version_path = self.cache_dir.join(CACHE_VERSION_FILE);
+    fn is_engine_cache_version_dirty(&self) -> bool {
+        let version_path = self.asset_dir.join(CACHE_VERSION_FILE);
         let contents = match std::fs::read_to_string(version_path) {
             Ok(contents) => contents,
             Err(_) => return false,
         };
-        contents.trim() == CACHE_VERSION
+        contents.trim() != CACHE_VERSION
     }
 
     fn write_cache_version(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.cache_dir)?;
-        let version_path = self.cache_dir.join(CACHE_VERSION_FILE);
+        std::fs::create_dir_all(&self.asset_dir)?;
+        let version_path = self.asset_dir.join(CACHE_VERSION_FILE);
         std::fs::write(version_path, CACHE_VERSION)?;
         Ok(())
     }
@@ -181,8 +130,6 @@ impl AssetRequestor {
         // TODO: make it close for modification
         let assets = match request.raw_asset_type() {
             RawAssetType::Gltf => {
-                GltfLoader::load(&PathBuf::default())?;
-
                 let raw = GltfLoader::load(&request.absolute_raw_asset_path())?;
                 GltfBaker::bake(raw, request.url.clone())?
             }
@@ -194,8 +141,10 @@ impl AssetRequestor {
         };
 
         for asset in assets {
-            let url = asset.url().to_owned();
-            let ty = url.asset_type();
+            let ty = asset.url().asset_type();
+            // let ty = url.asset_type();
+            // Each asset must be written to its own path (asset dir + url), not the request path.
+            // let asset_path = self.asset_dir.join(&url.path);
 
             let asset = asset as Box<dyn Any>;
 
@@ -203,30 +152,22 @@ impl AssetRequestor {
             match ty {
                 AssetType::Mesh => {
                     let asset = *asset.downcast::<Mesh>().unwrap();
-                    serialize_asset(&asset, &workspace_root()
-                        .join(AssetDirectory::Asset.folder_name())
-                        .join(url))?;
+                    serialize_asset(&asset)?;
                     Self::register_asset(asset);
                 },
                 AssetType::Texture => {
                     let asset = *asset.downcast::<Texture>().unwrap();
-                    serialize_asset(&asset, &workspace_root()
-                        .join(AssetDirectory::Asset.folder_name())
-                        .join(url))?;
+                    serialize_asset(&asset)?;
                     Self::register_asset(asset);
                 },
                 AssetType::Material => {
                     let asset = *asset.downcast::<Material>().unwrap();
-                    serialize_asset(&asset, &workspace_root()
-                        .join(AssetDirectory::Asset.folder_name())
-                        .join(url))?;
+                    serialize_asset(&asset)?;
                     Self::register_asset(asset);
                 },
                 AssetType::Scene => {
                     let asset = *asset.downcast::<Scene>().unwrap();
-                    serialize_asset(&asset, &workspace_root()
-                        .join(AssetDirectory::Asset.folder_name())
-                        .join(url))?;
+                    serialize_asset(&asset)?;
                     Self::register_asset(asset);
                 },
             }
@@ -234,7 +175,7 @@ impl AssetRequestor {
         }
 
         self.write_cache_version()?;
-        info!("Asset {:?} baked successfully.", request.raw_asset_path);
+        info!("Asset {:?} baked successfully.", request.raw_asset_path().unwrap_or(&request.url.path));
         Ok(())
     }
 
@@ -308,24 +249,4 @@ impl AssetRequestor {
             .register(asset);
     }
 
-    /// Find a cached cubemap texture file for a given HDR source path.
-    /// The cache file is named `{stem}_cubemap.tex`.
-    fn find_hdr_cache_file(&self, request: &AssetLoadRequest) -> Option<PathBuf> {
-        let parent = request.url.as_ref().parent().unwrap_or(Path::new(""));
-        let stem = request.url.as_ref().file_stem()?.to_str()?;
-        // let cache_parent = self.cache_dir.join(parent);
-        let asset_path = request.absolute_asset_path();
-        let prefix = format!("{}_cubemap", stem);
-
-        let entries = std::fs::read_dir(&asset_path).ok()?;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with(&prefix) && name_str.ends_with(".tex") {
-                // Return relative path (without cache_dir prefix) for use as AssetUrl
-                return Some(parent.join(name_str.into_owned()));
-            }
-        }
-        None
-    }
 }

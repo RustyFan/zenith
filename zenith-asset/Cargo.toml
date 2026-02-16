@@ -4,20 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytemuck.workspace = true
-anyhow.workspace = true
-derive_more.workspace = true
-parking_lot.workspace = true
-derive_builder.workspace = true
-glam.workspace = true
-serde = { workspace = true, features = ["derive"] }
-image.workspace = true
-gltf = "1.4"
-bincode = { workspace = true, features = ["serde"] }
-profiling.workspace = true
-ash.workspace = true
+bytemuck = { workspace = true }
+anyhow = { workspace = true }
+derive_more = { workspace = true }
+parking_lot = { workspace = true }
+derive_builder = { workspace = true }
+glam = { workspace = true }
+profiling = { workspace = true }
+ash = { workspace = true }
 
-zenith-core = { path = "../zenith-core" }
 ispc-texcomp = "0.1.20"
 zstd = "0.13.3"
 half = "2.7.1"
+gltf = "1.4"
+image = "0.25"
+bincode = { version = "2.0.1", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+
+zenith-core = { path = "../zenith-core" }
