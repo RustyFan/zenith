@@ -1088,11 +1088,11 @@ impl GraphicPipeline {
         desc: &GraphicPipelineDesc,
         descriptor_layouts: &[Arc<DescriptorSetLayout>],
     ) -> Result<Self, vk::Result> {
-        Self::with_cache(name, device, desc, vk::PipelineCache::null(), descriptor_layouts)
+        Self::new_with_cache(name, device, desc, vk::PipelineCache::null(), descriptor_layouts)
     }
 
     /// Create a new graphics pipeline with a pipeline cache.
-    pub fn with_cache(
+    pub fn new_with_cache(
         name: &str,
         device: &RenderDevice,
         desc: &GraphicPipelineDesc,

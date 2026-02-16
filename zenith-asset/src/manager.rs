@@ -77,7 +77,7 @@ impl AssetRequestor {
         if self.is_engine_cache_version_dirty() {
             return true;
         }
-        
+
         let cached_file_path = request.absolute_asset_path();
 
         // if no cache had been found, rebake
@@ -142,10 +142,6 @@ impl AssetRequestor {
 
         for asset in assets {
             let ty = asset.url().asset_type();
-            // let ty = url.asset_type();
-            // Each asset must be written to its own path (asset dir + url), not the request path.
-            // let asset_path = self.asset_dir.join(&url.path);
-
             let asset = asset as Box<dyn Any>;
 
             // TODO: make it close for modification

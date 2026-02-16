@@ -18,7 +18,7 @@ ash = { version = "0.38.0", features = ["std", "debug", "loaded"] }
 winit = "0.30.11"
 log = "0.4"
 bytemuck = { version = "1.23", features = ["derive"] }
-glam = "0.30"
+glam = "0.32.0"
 anyhow = "1.0.98"
 derive_more = { version = "2.0.1", features = ["full"] }
 derive_builder = "0.20.2"

@@ -20,7 +20,6 @@ impl GltfLoader {
 }
 
 pub struct RawGltf {
-    // path: PathBuf,
     gltf: gltf::Gltf,
     buffers: Vec<BufferData>,
     images: Vec<ImageData>,
@@ -109,26 +108,6 @@ impl GltfBaker {
             for (idx, primitive) in mesh.primitives().enumerate() {
                 let mesh = Self::bake_mesh(&primitive, buffers, materials, parent, stem, base_idx + idx)?;
                 assets.push(mesh);
-
-                // let url = {
-                //     let main = PathBuf::from(main_url);
-                //     let parent = main.parent().unwrap_or_else(|| Path::new(""));
-                //     let stem = main
-                //         .file_stem()
-                //         .and_then(|s| s.to_str())
-                //         .unwrap_or("mesh");
-                //     let idx = *mesh_counter;
-                //     *mesh_counter += 1;
-                //     let mut p = parent.join(format!("{stem}_mesh{idx}"));
-                //     p.set_extension(Mesh::<Vertex>::extension());
-                //     AssetUrl::from(p)
-                // };
-
-                // let asset_serialize_path = base_directory.join(&url);
-                // serialize_asset(&mesh_asset, &asset_serialize_path)?;
-                //
-                // meshes_url.push((url.clone(), mesh_asset.material));
-                // registry.register(url, mesh_asset);
             }
         }
 
@@ -284,10 +263,6 @@ impl GltfBaker {
 
             materials.push(builder.build()?);
         }
-
-        // if materials.is_empty() {
-        //     materials.push(MaterialBuilder::default().build()?);
-        // }
 
         Ok(materials)
     }
@@ -587,17 +562,7 @@ impl AssetBaker for GltfBaker {
             .enumerate()
             .map(|(idx, img)| {
                 let usage = texture_usage_by_image.get(idx).copied().ok_or(anyhow!("Unknown texture usage!"))?;
-                let tex = Self::create_texture_from_gltf_image(img, usage, &parent, &stem, idx)?;
-
-                // let mut p = tex_parent.join(format!("{tex_stem}_tex{idx}_{}x{}", tex.width, tex.height));
-                // p.set_extension(Texture::extension());
-                // let url: AssetUrl = p.into();
-
-                // let asset_serialize_path = base_directory.join(&url);
-                // serialize_asset(&tex, &asset_serialize_path)?;
-                // registry.register(url.clone(), tex);
-
-                Ok(tex)
+                Ok(Self::create_texture_from_gltf_image(img, usage, &parent, &stem, idx)?)
             })
             .collect::<Result<Vec<_>>>()?;
 
