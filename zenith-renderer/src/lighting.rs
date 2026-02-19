@@ -161,25 +161,28 @@ impl DirectLightingRenderer {
         let width = self.width;
         let height = self.height;
         node.execute(move |ctx| {
-            ctx.bind_pipeline(pipeline_handle)
-                .bind_raw(BindlessPool::SET_INDEX, &[ctx.device().bindless_pool().lock().set()], &[])
-                .bind("view", view)?
-                .bind("base_color_tex", gbuffer_base)?
-                .bind("normal_mra_tex", gbuffer_nmr)?
-                .bind("depth_tex", scene_depth)?
-                .bind("skybox_cubemap", skybox_handle)?;
+            if let Some(pipeline) = ctx.bind_pipeline(pipeline_handle) {
+                pipeline.bind_raw(BindlessPool::SET_INDEX, &[ctx.device().bindless_pool().lock().set()], &[])
+                    .bind("view", view)?
+                    .bind("base_color_tex", gbuffer_base)?
+                    .bind("normal_mra_tex", gbuffer_nmr)?
+                    .bind("depth_tex", scene_depth)?
+                    .bind("skybox_cubemap", skybox_handle)?
+                    .finish();
 
-            ctx.begin_rendering(
-                (width, height),
-                &[ColorAttachment::new(output_rt).clear_input().clear_value([0.02, 0.02, 0.02, 1.0])],
-                None
-            );
+                ctx.begin_rendering(
+                    (width, height),
+                    &[ColorAttachment::new(output_rt).clear_input().clear_value([0.02, 0.02, 0.02, 1.0])],
+                    None
+                );
 
-            ctx.bind_vertex_buffers(vb, 0, &[0]);
-            ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT16);
-            ctx.encoder().draw_indexed(0..6, 0..1, 0);
+                ctx.bind_vertex_buffers(vb, 0, &[0]);
+                ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT16);
+                ctx.encoder().draw_indexed(0..6, 0..1, 0);
 
-            ctx.end_rendering();
+                ctx.end_rendering();
+            }
+
             Ok(())
         });
     }

@@ -1,19 +1,19 @@
-use zenith_rhi::{GraphicPipelineDesc};
-use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext};
+use zenith_rhi::PipelineHandle;
+use crate::graph::{ComputeNodeExecutionContext, GraphicNodeExecutionContext, LambdaNodeExecutionContext};
 use crate::builder::ResourceAccessStorage;
 
-/// Handle to a registered pipeline within a node
+/// Graph-scoped handle to a registered pipeline (valid only when used inside a render graph node).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GraphicPipelineHandle(pub(crate) u32);
+pub struct GraphPipelineHandle(pub(crate) u32);
 
 pub(crate) enum NodePipelineState {
     Graphic {
-        pipeline_descs: Vec<GraphicPipelineDesc>,
+        pipeline_handles: Vec<PipelineHandle>,
         job_functor: Option<Box<dyn FnOnce(&mut GraphicNodeExecutionContext) -> anyhow::Result<()>>>,
     },
-    #[allow(dead_code)]
     Compute {
-        job_functor: Option<Box<dyn FnOnce(&mut GraphicNodeExecutionContext) -> anyhow::Result<()>>>,
+        pipeline_handles: Vec<PipelineHandle>,
+        job_functor: Option<Box<dyn FnOnce(&mut ComputeNodeExecutionContext) -> anyhow::Result<()>>>,
     },
     Lambda {
         job_functor: Option<Box<dyn FnOnce(&mut LambdaNodeExecutionContext) -> anyhow::Result<()>>>,
@@ -23,26 +23,32 @@ pub(crate) enum NodePipelineState {
 impl NodePipelineState {
     pub(crate) fn valid(&self) -> bool {
         match self {
-            NodePipelineState::Graphic { pipeline_descs, job_functor, .. } => {
-                !pipeline_descs.is_empty() && job_functor.is_some()
+            NodePipelineState::Graphic { pipeline_handles, job_functor, .. } => {
+                !pipeline_handles.is_empty() && job_functor.is_some()
             }
-            NodePipelineState::Compute { .. } => {
-                false
+            NodePipelineState::Compute { pipeline_handles, job_functor } => {
+                !pipeline_handles.is_empty() && job_functor.is_some()
             }
             NodePipelineState::Lambda { job_functor } => {
                 job_functor.is_some()
             }
         }
     }
+
+    /// Returns the pipeline handles for this node (empty for Lambda).
+    pub(crate) fn pipeline_handles(&self) -> &[PipelineHandle] {
+        match self {
+            NodePipelineState::Graphic { pipeline_handles, .. } => pipeline_handles.as_slice(),
+            NodePipelineState::Compute { pipeline_handles, .. } => pipeline_handles.as_slice(),
+            NodePipelineState::Lambda { .. } => &[],
+        }
+    }
 }
 
 pub struct RenderGraphNode {
-    // TODO: debug only
-    #[allow(dead_code)]
     pub(crate) name: String,
     pub(crate) inputs: Vec<ResourceAccessStorage>,
     pub(crate) outputs: Vec<ResourceAccessStorage>,
-
     pub(crate) pipeline_state: NodePipelineState,
 }
 

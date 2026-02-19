@@ -151,7 +151,7 @@ impl BindableResource for Sampler {
 }
 
 impl DebuggableObject for Sampler {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.sampler, vk::ObjectType::SAMPLER, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.sampler, vk::ObjectType::SAMPLER, name);
     }
 }

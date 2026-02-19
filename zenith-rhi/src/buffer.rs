@@ -213,7 +213,7 @@ impl Buffer {
             memory,
             device: device.handle().clone(),
         };
-        device.set_debug_name(&buf);
+        device.set_debug_name(&buf, &desc.name);
         Ok(buf)
     }
 
@@ -269,13 +269,13 @@ impl Drop for Buffer {
 }
 
 impl DebuggableObject for Buffer {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.buffer, vk::ObjectType::BUFFER, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.buffer, vk::ObjectType::BUFFER, name);
         set_debug_name_handle(
-            device,
+            &device,
             self.memory,
             vk::ObjectType::DEVICE_MEMORY,
-            &format!("{}.memory", self.name()),
+            &format!("{}.memory", name),
         );
     }
 }

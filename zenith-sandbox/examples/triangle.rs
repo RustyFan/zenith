@@ -3,6 +3,7 @@ use winit::window::Window;
 use zenith::{launch, App, Args, RenderableApp, RenderContext};
 use zenith::rhi::{RenderDevice, TextureState};
 use zenith::renderer::TriangleRenderer;
+use zenith::rendergraph::RenderGraphBuilder;
 
 pub struct TriangleApp {
     triangle_renderer: Option<TriangleRenderer>,
@@ -22,15 +23,13 @@ impl RenderableApp for TriangleApp {
         Ok(())
     }
 
-    fn render(&mut self, mut context: RenderContext) {
+    fn render(&mut self, builder: &mut RenderGraphBuilder<'_>, context: RenderContext<'_>) {
         let extent = context.extent();
         if extent.width == 0 || extent.height == 0 {
             return;
         }
 
         let output = context.swapchain_texture();
-        let builder = context.builder();
-
         let mut output = builder.import(output, TextureState::Undefined);
 
         self.triangle_renderer.as_ref().unwrap().render(

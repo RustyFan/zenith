@@ -24,7 +24,7 @@ impl Fence {
             fence,
             device: device.handle().clone(),
         };
-        device.set_debug_name(&fence);
+        device.set_debug_name(&fence, name);
         Ok(fence)
     }
 
@@ -38,8 +38,8 @@ impl Fence {
 }
 
 impl DebuggableObject for Fence {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.fence, vk::ObjectType::FENCE, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.fence, vk::ObjectType::FENCE, name);
     }
 }
 
@@ -68,7 +68,7 @@ impl Semaphore {
             semaphore,
             device: device.handle().clone(),
         };
-        device.set_debug_name(&semaphore);
+        device.set_debug_name(&semaphore, name);
         Ok(semaphore)
     }
 
@@ -82,8 +82,8 @@ impl Semaphore {
 }
 
 impl DebuggableObject for Semaphore {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.semaphore, vk::ObjectType::SEMAPHORE, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.semaphore, vk::ObjectType::SEMAPHORE, name);
     }
 }
 

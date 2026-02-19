@@ -2,7 +2,7 @@
 
 use crate::interface::{Buffer, BufferDesc, BufferState, ResourceState, Texture, TextureDesc, TextureState};
 use crate::node::{NodePipelineState, RenderGraphNode};
-use crate::resource::{GraphBindableAccess, GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess, Rt, Srv};
+use crate::resource::{GraphBindable, GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess, Rt, Srv};
 use std::cell::Cell;
 use std::sync::{Arc};
 use bytemuck::NoUninit;
@@ -11,9 +11,9 @@ use zenith_core::collections::SmallVec;
 use zenith_core::color;
 use zenith_rhi::{vk, RenderDevice, Swapchain, BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier,
                  PipelineStages, ShaderReflection, CommandPool, TextureLayout,
-                 ColorAttachmentDesc, DepthStencilAttachmentDesc, GraphicPipeline,
-                 DescriptorBindingError, DescriptorSetBinder, PipelineCache};
-use crate::GraphicPipelineHandle;
+                 ColorAttachmentDesc, DepthStencilAttachmentDesc,
+                 DescriptorBindingError, DescriptorSetBinder, PipelineRegistry, PipelineHandle};
+use crate::node::GraphPipelineHandle;
 
 pub enum ResourceStorage {
     ManagedBuffer {
@@ -104,7 +104,7 @@ impl RenderGraph {
     pub fn compile(
         mut self,
         device: &mut RenderDevice,
-        pipeline_cache: &mut PipelineCache,
+        _pipeline_cache: &mut PipelineRegistry,
     ) -> CompiledRenderGraph {
         // Create resources from initial resource descriptors
         let resources: Vec<ResourceStorage> = self.initial_resources
@@ -178,56 +178,20 @@ impl RenderGraph {
 
         let serial_nodes_count = serial_nodes.len();
 
-        let node_pipelines = Self::create_node_pipelines(&serial_nodes, &present_nodes, device, pipeline_cache);
+        // Pipeline handles were registered at build time in node.register_pipeline(); collect them per node.
+        let node_pipeline_handles: Vec<Vec<PipelineHandle>> = serial_nodes.iter()
+            .chain(present_nodes.iter())
+            .map(|node| node.pipeline_state.pipeline_handles().to_vec())
+            .collect();
 
         CompiledRenderGraph {
             serial_nodes,
             present_nodes,
             resources,
             swapchain_tex_id,
-            node_pipelines,
+            node_pipeline_handles,
             serial_nodes_count,
         }
-    }
-
-    fn create_node_pipelines(
-        serial_nodes: &[RenderGraphNode],
-        present_nodes: &[RenderGraphNode],
-        device: &RenderDevice,
-        pipeline_cache: &mut PipelineCache,
-    ) -> Vec<Vec<Arc<GraphicPipeline>>> {
-        let total_nodes = serial_nodes.len() + present_nodes.len();
-        let mut node_pipelines = Vec::with_capacity(total_nodes);
-
-        for node in serial_nodes.iter().chain(present_nodes.iter()) {
-            match &node.pipeline_state {
-                NodePipelineState::Graphic { pipeline_descs, .. } => {
-                    let mut pipelines = Vec::with_capacity(pipeline_descs.len());
-
-                    for (handle_idx, desc) in pipeline_descs.iter().enumerate() {
-                        let name = format!("{}.pipeline{}", node.name, handle_idx);
-                        match pipeline_cache.get_or_create(&name, device, desc) {
-                            Ok(pipeline) => {
-                                pipelines.push(pipeline);
-                            },
-                            Err(e) => {
-                                log::error!("Failed to create pipeline {} for node {}: {:?}", handle_idx, node.name, e);
-                            }
-                        }
-                    }
-
-                    node_pipelines.push(pipelines);
-                }
-                NodePipelineState::Compute { .. } => {
-                    node_pipelines.push(Vec::new());  // No pipelines for compute yet
-                }
-                NodePipelineState::Lambda { .. } => {
-                    node_pipelines.push(Vec::new());  // No pipelines for lambda nodes
-                }
-            }
-        }
-
-        node_pipelines
     }
 }
 
@@ -236,20 +200,20 @@ pub struct CompiledRenderGraph {
     present_nodes: Vec<RenderGraphNode>,
     resources: Vec<ResourceStorage>,
     swapchain_tex_id: GraphResourceId,
-    node_pipelines: Vec<Vec<Arc<GraphicPipeline>>>,
+    node_pipeline_handles: Vec<Vec<PipelineHandle>>,
     serial_nodes_count: usize,
 }
 
 impl CompiledRenderGraph {
     #[profiling::function]
-    pub fn execute(&mut self, device: &RenderDevice, cmd_pool: &CommandPool) -> anyhow::Result<()>  {
+    pub fn execute(&mut self, device: &RenderDevice, cmd_pool: &CommandPool, pipeline_cache: &PipelineRegistry) -> anyhow::Result<()>  {
         let encoder = CommandEncoder::new("cmd.rendergraph.execute", device, cmd_pool)?;
 
         encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
         encoder.begin_debug_label("render_graph::execution", color::LIGHT_GREEN);
 
         let nodes = std::mem::take(&mut self.serial_nodes);
-        self.record_nodes(device, &encoder, nodes, 0);
+        self.record_nodes(device, &encoder, pipeline_cache, nodes, 0);
 
         encoder.end_debug_label();
         encoder.end()?;
@@ -267,7 +231,7 @@ impl CompiledRenderGraph {
         Ok(())
     }
 
-    pub fn present(mut self, device: &mut RenderDevice, cmd_pool: &CommandPool, swapchain: &mut Swapchain, image_index: u32) -> anyhow::Result<RetiredRenderGraph> {
+    pub fn present(mut self, device: &mut RenderDevice, cmd_pool: &CommandPool, pipeline_cache: &PipelineRegistry, swapchain: &mut Swapchain, image_index: u32) -> anyhow::Result<RetiredRenderGraph> {
         cmd_pool.reset()?;
 
         // update the swapchain texture reference to the acquired image
@@ -286,7 +250,7 @@ impl CompiledRenderGraph {
 
         let nodes = std::mem::take(&mut self.present_nodes);
         let serial_nodes_count = self.serial_nodes_count;
-        self.record_nodes(device, &encoder, nodes, serial_nodes_count);
+        self.record_nodes(device, &encoder, pipeline_cache, nodes, serial_nodes_count);
 
         // make sure the swapchain texture has the right image layout for presentation
         Self::transition_resources(
@@ -320,6 +284,7 @@ impl CompiledRenderGraph {
         &mut self,
         device: &RenderDevice,
         encoder: &CommandEncoder,
+        pipeline_cache: &PipelineRegistry,
         nodes: Vec<RenderGraphNode>,
         node_start_index: usize,
     ) {
@@ -339,10 +304,11 @@ impl CompiledRenderGraph {
             };
 
             match node.pipeline_state {
-                NodePipelineState::Graphic { ref pipeline_descs, mut job_functor } => {
-                    let reflection = ShaderReflection::merge(&pipeline_descs.iter()
-                        .map(|pipe| &pipe.shader.merged_reflection)
-                        .collect::<Vec<_>>());
+                NodePipelineState::Graphic { ref pipeline_handles, mut job_functor } => {
+                    let reflections: Vec<&ShaderReflection> = pipeline_handles.iter()
+                        .filter_map(|h| pipeline_cache.try_get_pipeline(*h).map(|e| e.shader_reflection()))
+                        .collect();
+                    let reflection = ShaderReflection::merge(&reflections);
                     transition_resources(Some(&reflection));
 
                     let name = node.name;
@@ -351,11 +317,17 @@ impl CompiledRenderGraph {
                         encoder.begin_debug_label(&name, color::LIGHT_BLUE);
                         profiling::scope!("rendergraph::node_recording", &name);
 
+                        let pipeline_handles = self.node_pipeline_handles[node_idx].as_slice();
                         let mut ctx = GraphicNodeExecutionContext {
                             device,
-                            resources: &self.resources,
                             encoder,
-                            node_pipelines: &self.node_pipelines[node_idx],
+                            binding_ctx: NodeBindingContext {
+                                resources: &self.resources,
+                                device,
+                                encoder,
+                                pipeline_handles,
+                                pipeline_cache,
+                            },
                         };
                         let result = record(&mut ctx);
                         encoder.end_debug_label();
@@ -364,7 +336,38 @@ impl CompiledRenderGraph {
                         log::warn!("Missing job of graphic node {}!", name);
                     }
                 }
-                NodePipelineState::Compute { .. } => unimplemented!(),
+                NodePipelineState::Compute { ref pipeline_handles, mut job_functor } => {
+                    let reflections: Vec<&ShaderReflection> = pipeline_handles.iter()
+                        .filter_map(|h| pipeline_cache.try_get_pipeline(*h).map(|e| e.shader_reflection()))
+                        .collect();
+                    let reflection = ShaderReflection::merge(&reflections);
+                    transition_resources(Some(&reflection));
+
+                    let name = node.name;
+
+                    if let Some(record) = job_functor.take() {
+                        encoder.begin_debug_label(&name, color::LIGHT_BLUE);
+                        profiling::scope!("rendergraph::node_recording", &name);
+
+                        let pipeline_handles = self.node_pipeline_handles[node_idx].as_slice();
+                        let mut ctx = ComputeNodeExecutionContext {
+                            device,
+                            encoder,
+                            binding_ctx: NodeBindingContext {
+                                resources: &self.resources,
+                                device,
+                                encoder,
+                                pipeline_handles,
+                                pipeline_cache,
+                            },
+                        };
+                        let result = record(&mut ctx);
+                        encoder.end_debug_label();
+                        result.expect("Failed to record compute node.");
+                    } else {
+                        log::warn!("Missing job of compute node {}!", name);
+                    }
+                }
                 NodePipelineState::Lambda { mut job_functor } => {
                     transition_resources(None);
 
@@ -375,7 +378,13 @@ impl CompiledRenderGraph {
 
                         let mut ctx = LambdaNodeExecutionContext {
                             device,
-                            resources: &self.resources,
+                            binding_ctx: NodeBindingContext {
+                                resources: &self.resources,
+                                device,
+                                encoder,
+                                pipeline_handles: &[],
+                                pipeline_cache,
+                            },
                             encoder,
                         };
                         let result = record(&mut ctx);
@@ -576,7 +585,8 @@ fn shader_stage_to_pipeline_stage(stage_flags: vk::ShaderStageFlags) -> vk::Pipe
 
 pub struct PipelineResourceBinder<'a> {
     device: &'a RenderDevice,
-    ctx: &'a GraphicNodeExecutionContext<'a>,
+    encoder: &'a CommandEncoder<'a>,
+    binding_ctx: &'a NodeBindingContext<'a>,
     binder: Option<DescriptorSetBinder<'a>>,
     bind_point: vk::PipelineBindPoint,
     layout: vk::PipelineLayout,
@@ -584,34 +594,31 @@ pub struct PipelineResourceBinder<'a> {
 
 impl<'a> Drop for PipelineResourceBinder<'a> {
     fn drop(&mut self) {
-        let (base_set, sets) = self.binder.take().unwrap().finish(self.device).unwrap();
-        self.ctx.encoder.bind_descriptor_sets(
-            self.bind_point,
-            self.layout.clone(),
-            base_set,
-            &sets,
-            &[],
-        );
+        self.finish_impl();
     }
 }
 
 impl<'a> PipelineResourceBinder<'a> {
-    pub fn bind<A: GraphBindableAccess>(
-        &mut self,
+    pub fn bind<A: GraphBindable>(
+        mut self,
         name: &str,
         access: A,
-    ) -> Result<&mut Self, DescriptorBindingError> {
-        self.binder.as_mut().unwrap().bind(name, &access.into_bindable(&self.ctx))?;
+    ) -> Result<Self, DescriptorBindingError> {
+        self.binder.as_mut().unwrap().bind(name, &access.into_bindable(self.binding_ctx))?;
         Ok(self)
     }
 
+    pub fn finish(mut self) {
+        self.finish_impl();
+    }
+
     pub fn bind_raw(
-        &mut self,
+        self,
         base_set: u32,
         sets: &[vk::DescriptorSet],
         dynamic_offsets: &[u32],
-    ) -> &mut Self {
-        self.ctx.encoder.bind_descriptor_sets(
+    ) -> Self {
+        self.encoder.bind_descriptor_sets(
             self.bind_point,
             self.layout.clone(),
             base_set,
@@ -619,6 +626,19 @@ impl<'a> PipelineResourceBinder<'a> {
             dynamic_offsets,
         );
         self
+    }
+
+    fn finish_impl(&mut self) {
+        if let Some(binder) = self.binder.take() {
+            let (base_set, sets) = binder.finish(self.device).unwrap();
+            self.encoder.bind_descriptor_sets(
+                self.bind_point,
+                self.layout.clone(),
+                base_set,
+                &sets,
+                &[],
+            );
+        }
     }
 }
 
@@ -714,14 +734,15 @@ impl DepthStencilAttachment {
     }
 }
 
-pub struct GraphicNodeExecutionContext<'node> {
-    device: &'node RenderDevice,
-    resources: &'node Vec<ResourceStorage>,
-    encoder: &'node CommandEncoder<'node>,
-    node_pipelines: &'node [Arc<GraphicPipeline>],
+pub struct NodeBindingContext<'node> {
+    pub(crate) resources: &'node Vec<ResourceStorage>,
+    pub(crate) device: &'node RenderDevice,
+    pub(crate) encoder: &'node CommandEncoder<'node>,
+    pub(crate) pipeline_handles: &'node [PipelineHandle],
+    pub(crate) pipeline_cache: &'node PipelineRegistry,
 }
 
-impl<'node> GraphicNodeExecutionContext<'node> {
+impl<'node> NodeBindingContext<'node> {
     /// Gets a reference to the concrete resource.
     ///
     /// # Safety
@@ -729,7 +750,6 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     /// 1. The sealed trait ensures only Buffer and Texture implement GraphResource
     /// 2. PhantomData<R> in RenderGraphResourceAccess ensures the resource type matches the storage variant
     /// 3. The enum discriminant is checked before transmute
-    #[inline]
     pub fn get<R: GraphResource, V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<R, V>) -> &R {
         match self.resources.get(resource.id as usize).expect("Graph resource index out of bound!") {
             ResourceStorage::ManagedBuffer { resource, .. } => unsafe { std::mem::transmute(resource) },
@@ -745,44 +765,77 @@ impl<'node> GraphicNodeExecutionContext<'node> {
         }
     }
 
+    /// Bind a pipeline by graph-scoped handle. Returns None if the pipeline is not found in the cache.
+    pub fn bind_pipeline(&self, handle: GraphPipelineHandle) -> Option<PipelineResourceBinder<'_>> {
+        let cache_handle = *self.pipeline_handles.get(handle.0 as usize)?;
+        let entry = self.pipeline_cache.try_get_pipeline(cache_handle)?;
+
+        let binder = DescriptorSetBinder::new(
+            self.device,
+            entry.shader_reflection(),
+            entry.descriptor_layouts(),
+        );
+
+        self.encoder.bind_pipeline(entry.bind_point(), entry.handle());
+
+        Some(PipelineResourceBinder {
+            device: self.device,
+            encoder: self.encoder,
+            binding_ctx: self,
+            binder: Some(binder),
+            bind_point: entry.bind_point(),
+            layout: entry.layout(),
+        })
+    }
+
+    /// Push constants for the pipeline at the given handle. No-op if pipeline is not found.
+    pub fn push_constants<T: NoUninit>(&self, handle: GraphPipelineHandle, offset: u32, data: &T) {
+        let cache_handle = match self.pipeline_handles.get(handle.0 as usize) {
+            Some(h) => *h,
+            None => return,
+        };
+        let entry = match self.pipeline_cache.try_get_pipeline(cache_handle) {
+            Some(e) => e,
+            None => return,
+        };
+
+        let stages = match entry.bind_point() {
+            vk::PipelineBindPoint::GRAPHICS => vk::ShaderStageFlags::ALL_GRAPHICS,
+            vk::PipelineBindPoint::COMPUTE => vk::ShaderStageFlags::COMPUTE,
+            _ => return,
+        };
+
+        self.encoder.push_constants(entry.layout(), stages, offset, data);
+    }
+}
+
+pub struct GraphicNodeExecutionContext<'node> {
+    device: &'node RenderDevice,
+    encoder: &'node CommandEncoder<'node>,
+    binding_ctx: NodeBindingContext<'node>,
+}
+
+impl<'node> GraphicNodeExecutionContext<'node> {
+    #[inline]
+    pub fn get<R: GraphResource, V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<R, V>) -> &R {
+        self.binding_ctx.get(resource)
+    }
+
     #[inline]
     pub fn device(&self) -> &RenderDevice { self.device }
 
     #[inline]
     pub fn encoder(&self) -> &CommandEncoder<'node> { self.encoder }
 
-    pub fn bind_pipeline<'a>(&'a self, handle: GraphicPipelineHandle) -> PipelineResourceBinder<'a> {
-        let pipeline = self.get_pipeline(handle);
-
-        let binder = DescriptorSetBinder::new(
-            self.device,
-            &pipeline.desc().shader.merged_reflection,
-            pipeline.descriptor_layouts(),
-        );
-
-        self.encoder.bind_pipeline(
-            vk::PipelineBindPoint::GRAPHICS,
-            pipeline.handle(),
-        );
-
-        PipelineResourceBinder {
-            device: self.device,
-            ctx: self,
-            binder: Some(binder),
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-            layout: pipeline.layout(),
-        }
+    /// Bind a pipeline by graph-scoped handle. Returns None if the pipeline is not found in the cache.
+    #[inline]
+    pub fn bind_pipeline(&self, handle: GraphPipelineHandle) -> Option<PipelineResourceBinder<'_>> {
+        self.binding_ctx.bind_pipeline(handle)
     }
 
-    pub fn push_constants<T: NoUninit>(&self, handle: GraphicPipelineHandle, offset: u32, data: &T) {
-        let pipeline = self.get_pipeline(handle);
-
-        self.encoder.push_constants(
-            pipeline.layout(),
-            vk::ShaderStageFlags::ALL_GRAPHICS,
-            offset,
-            data,
-        );
+    #[inline]
+    pub fn push_constants<T: NoUninit>(&self, handle: GraphPipelineHandle, offset: u32, data: &T) {
+        self.binding_ctx.push_constants(handle, offset, data);
     }
 
     pub fn begin_rendering(
@@ -793,7 +846,7 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     ) {
         let color_attachments: SmallVec<[vk::RenderingAttachmentInfo; 8]> = color_attachments.iter()
             .map(|attachment| {
-                let texture = utility::resource_storage_ref(self.resources, attachment.color.id).as_texture();
+                let texture = utility::resource_storage_ref(self.binding_ctx.resources, attachment.color.id).as_texture();
 
                 vk::RenderingAttachmentInfo::default()
                     .image_view(texture.as_range(TextureLayout::Color, .., ..).view().expect("Texture view not created"))
@@ -809,7 +862,7 @@ impl<'node> GraphicNodeExecutionContext<'node> {
             .collect();
 
         let depth_attachment = depth_attachment.map(|attachment| {
-            let texture = utility::resource_storage_ref(self.resources, attachment.depth.id).as_texture();
+            let texture = utility::resource_storage_ref(self.binding_ctx.resources, attachment.depth.id).as_texture();
 
             vk::RenderingAttachmentInfo::default()
                 .image_view(texture.as_range(TextureLayout::DepthStencil, .., ..).view().expect("Texture view not created"))
@@ -869,41 +922,18 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     pub fn bind_index_buffer(&self, buf: RenderGraphResourceAccess<Buffer, Srv>, offset: u64, index_ty: vk::IndexType) {
         self.encoder.bind_index_buffer(self.get(&buf), offset, index_ty);
     }
-
-    #[inline]
-    fn get_pipeline(&self, handle: GraphicPipelineHandle) -> &GraphicPipeline {
-        &self.node_pipelines.get(handle.0 as usize).unwrap()
-    }
 }
 
 pub struct LambdaNodeExecutionContext<'node> {
     device: &'node RenderDevice,
-    resources: &'node Vec<ResourceStorage>,
+    binding_ctx: NodeBindingContext<'node>,
     encoder: &'node CommandEncoder<'node>,
 }
 
 impl<'node> LambdaNodeExecutionContext<'node> {
-    /// Gets a reference to the concrete resource.
-    ///
-    /// # Safety
-    /// This method uses transmute which is safe because:
-    /// 1. The sealed trait ensures only Buffer and Texture implement GraphResource
-    /// 2. PhantomData<R> in RenderGraphResourceAccess ensures the resource type matches the storage variant
-    /// 3. The enum discriminant is checked before transmute
     #[inline]
     pub fn get<R: GraphResource, V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<R, V>) -> &R {
-        match self.resources.get(resource.id as usize).expect("Graph resource index out of bound!") {
-            ResourceStorage::ManagedBuffer { resource, .. } => unsafe { std::mem::transmute(resource) },
-            ResourceStorage::ManagedTexture { resource, .. } => unsafe { std::mem::transmute(resource) },
-            ResourceStorage::ImportedBuffer { resource, .. } => {
-                let res: &Buffer = resource.as_ref();
-                unsafe { std::mem::transmute(res) }
-            },
-            ResourceStorage::ImportedTexture { resource, .. } => {
-                let res: &Texture = resource.as_ref();
-                unsafe { std::mem::transmute(res) }
-            },
-        }
+        self.binding_ctx.get(resource)
     }
 
     #[inline]
@@ -914,6 +944,40 @@ impl<'node> LambdaNodeExecutionContext<'node> {
 
     #[inline]
     pub fn bindless_pool(&self) -> &Arc<Mutex<BindlessPool>> { self.device.bindless_pool() }
+}
+
+pub struct ComputeNodeExecutionContext<'node> {
+    device: &'node RenderDevice,
+    encoder: &'node CommandEncoder<'node>,
+    binding_ctx: NodeBindingContext<'node>,
+}
+
+impl<'node> ComputeNodeExecutionContext<'node> {
+    #[inline]
+    pub fn get<R: GraphResource, V: GraphResourceView>(&self, resource: &RenderGraphResourceAccess<R, V>) -> &R {
+        self.binding_ctx.get(resource)
+    }
+
+    #[inline]
+    pub fn device(&self) -> &RenderDevice { self.device }
+
+    #[inline]
+    pub fn encoder(&self) -> &CommandEncoder<'node> { self.encoder }
+
+    /// Bind a pipeline by graph-scoped handle. Returns None if the pipeline is not found in the cache.
+    #[inline]
+    pub fn bind_pipeline(&self, handle: GraphPipelineHandle) -> Option<PipelineResourceBinder<'_>> {
+        self.binding_ctx.bind_pipeline(handle)
+    }
+
+    #[inline]
+    pub fn push_constants<T: NoUninit>(&self, handle: GraphPipelineHandle, offset: u32, data: &T) {
+        self.binding_ctx.push_constants(handle, offset, data);
+    }
+
+    pub fn dispatch(&self, x: u32, y: u32, z: u32) {
+        self.encoder.dispatch(x, y, z);
+    }
 }
 
 pub struct RetiredRenderGraph {

@@ -105,25 +105,28 @@ impl TriangleRenderer {
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
         node.execute(move |ctx| {
-            ctx.get(&tb)
-                .as_range(..)
-                .write(bytemuck::bytes_of(&elapsed))
-                .map_err(|e| anyhow!("Failed to write time buffer: {e:?}"))?;
+            if let Some(pipe) = ctx.bind_pipeline(pipeline_handle) {
+                ctx.get(&tb)
+                    .as_range(..)
+                    .write(bytemuck::bytes_of(&elapsed))
+                    .map_err(|e| anyhow!("Failed to write time buffer: {e:?}"))?;
+                
+                pipe.bind("time", tb)?
+                    .finish();
 
-            ctx.bind_pipeline(pipeline_handle)
-                .bind("time", tb)?;
+                ctx.begin_rendering(
+                    (width, height),
+                    &[ColorAttachment::new(output_rt).clear_input().clear_value([0.1, 0.1, 0.1, 1.0])],
+                    None
+                );
 
-            ctx.begin_rendering(
-                (width, height),
-                &[ColorAttachment::new(output_rt).clear_input().clear_value([0.1, 0.1, 0.1, 1.0])],
-                None
-            );
+                ctx.bind_vertex_buffers(vb, 0, &[0]);
+                ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT16);
+                ctx.encoder().draw_indexed(0..3, 0..1, 0);
 
-            ctx.bind_vertex_buffers(vb, 0, &[0]);
-            ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT16);
-            ctx.encoder().draw_indexed(0..3, 0..1, 0);
-
-            ctx.end_rendering();
+                ctx.end_rendering();
+            }
+            
             Ok(())
         });
     }

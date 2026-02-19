@@ -354,7 +354,7 @@ impl Texture {
             views: RefCell::new(Default::default()),
             device: device.handle().clone(),
         };
-        device.set_debug_name(&texture);
+        device.set_debug_name(&texture, &desc.name);
         Ok(texture)
     }
 
@@ -392,7 +392,7 @@ impl Texture {
             views: RefCell::new(Default::default()),
             device: device.handle().clone(),
         };
-        device.set_debug_name(&texture);
+        device.set_debug_name(&texture, &texture.desc.name);
         texture
     }
 
@@ -479,15 +479,15 @@ impl Drop for Texture {
 }
 
 impl DebuggableObject for Texture {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.image, vk::ObjectType::IMAGE, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.image, vk::ObjectType::IMAGE, name);
 
         if self.memory != vk::DeviceMemory::null() {
             set_debug_name_handle(
                 device,
                 self.memory,
                 vk::ObjectType::DEVICE_MEMORY,
-                &format!("{}.memory", self.name()),
+                &format!("{}.memory", name),
             );
         }
     }

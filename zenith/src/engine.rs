@@ -5,12 +5,12 @@ use winit::window::Window;
 use zenith_rendergraph::RenderGraphBuilder;
 use zenith_rhi::core::{select_physical_device, PhysicalDevice};
 use zenith_rhi::swapchain::SwapchainWindow;
-use zenith_rhi::{vk, CommandPool, PipelineCache, RenderDevice, RhiCore, Swapchain, SwapchainConfig};
+use zenith_rhi::{vk, CommandPool, PipelineRegistry, RenderDevice, RhiCore, Swapchain, SwapchainConfig};
 
 pub struct Engine {
     execute_command_pools: Vec<CommandPool>,
     present_command_pools: Vec<CommandPool>,
-    pipeline_cache: PipelineCache,
+    pipeline_cache: PipelineRegistry,
     swapchain: Swapchain,
     pub render_device: RenderDevice,
     _physical_device: PhysicalDevice,
@@ -49,7 +49,7 @@ impl Engine {
             swapchain_config,
         )?;
 
-        let pipeline_cache = PipelineCache::new("pipeline_cache.main", &device)?;
+        let pipeline_cache = PipelineRegistry::new();
 
         let num_frames = device.num_frames();
         let (execute_command_pools, present_command_pools) = (0..num_frames)
@@ -97,35 +97,26 @@ impl Engine {
 
     #[profiling::function]
     pub fn render<A: RenderableApp>(&mut self, app: &mut A) {
-        // 1. Wait for the previous cycle's execute fence (begin_frame).
         let frame_index = self.render_device.begin_frame();
 
-        // 2. Wait for the previous cycle's present fence (acquire_next_image).
         let (image_index, _) = self.swapchain.acquire_next_image(self.render_device.handle())
             .expect("Failed to acquire next swapchain image!");
         self.swapchain.reset_current_fence(self.render_device.handle())
             .expect("Failed to reset swapchain fence!");
 
-        // 3. BOTH fences waited — safe to release deferred resources and reset pools.
         self.render_device.reset_frame_resources();
         self.execute_command_pools[frame_index].reset().expect("Failed to reset execute command pool");
 
-        let mut builder = RenderGraphBuilder::new();
-        let render_context = RenderContext::new(
-            &mut builder,
-            &self.render_device,
-            &self.swapchain,
-            frame_index,
-        );
-        app.render(render_context);
-
+        let mut builder = RenderGraphBuilder::new(&mut self.pipeline_cache, &self.render_device);
+        let context = RenderContext::new(&self.render_device, &self.swapchain, frame_index);
+        app.render(&mut builder, context);
         let render_graph = builder.build();
         let mut compiled = render_graph.compile(&mut self.render_device, &mut self.pipeline_cache);
 
-        compiled.execute(&mut self.render_device, &self.execute_command_pools[frame_index])
+        compiled.execute(&mut self.render_device, &self.execute_command_pools[frame_index], &self.pipeline_cache)
             .expect("Failed to execute render graph!");
 
-        let retired = compiled.present(&mut self.render_device, &self.present_command_pools[frame_index], &mut self.swapchain, image_index)
+        let retired = compiled.present(&mut self.render_device, &self.present_command_pools[frame_index], &self.pipeline_cache, &mut self.swapchain, image_index)
             .expect("Failed to present swapchain!");
 
         retired.release_frame_resources(&mut self.render_device);

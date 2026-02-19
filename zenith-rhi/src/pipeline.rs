@@ -1,8 +1,7 @@
 //! Vulkan Pipeline - pipeline layout and graphics pipeline management.
 
-use zenith_core::log;
 use crate::descriptor::DescriptorSetLayout;
-use crate::shader::{Shader, ShaderReflection};
+use crate::shader::{Shader, ShaderReflection, ShaderStage};
 use derive_builder::Builder;
 use ash::{vk};
 use ash::vk::Handle;
@@ -14,6 +13,34 @@ use zenith_rhi_derive::DeviceObject;
 use crate::{RenderDevice};
 use crate::device::DebuggableObject;
 use crate::device::set_debug_name_handle;
+
+#[DeviceObject]
+pub struct Pipeline {
+    handle: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    descriptor_layouts: Vec<Arc<DescriptorSetLayout>>,
+}
+
+impl Drop for Pipeline {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_pipeline_layout(self.layout, None);
+            self.device.destroy_pipeline(self.handle, None);
+        }
+    }
+}
+
+impl DebuggableObject for Pipeline {
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.handle, vk::ObjectType::PIPELINE, &format!("pipeline.{}", name));
+        set_debug_name_handle(
+            device,
+            self.layout,
+            vk::ObjectType::PIPELINE_LAYOUT,
+            &format!("pipeline_layout.{}", name),
+        );
+    }
+}
 
 #[derive(Clone, Debug, Default, Builder)]
 #[builder(setter(into), default)]
@@ -143,6 +170,38 @@ impl PartialEq for GraphicPipelineAttachments {
 
 impl Eq for GraphicPipelineAttachments {}
 
+// ---------------------------------------------------------------------------
+// Unified pipeline layout creation
+// ---------------------------------------------------------------------------
+
+/// Create a Vulkan pipeline layout from descriptor set layouts and optional push constants.
+fn create_pipeline_layout(
+    device: &RenderDevice,
+    set_layouts: &[vk::DescriptorSetLayout],
+    push_constant_size: u32,
+    push_constant_stage_flags: vk::ShaderStageFlags,
+) -> Result<vk::PipelineLayout, vk::Result> {
+    let push_constant_ranges = if push_constant_size > 0 {
+        vec![vk::PushConstantRange {
+            stage_flags: push_constant_stage_flags,
+            offset: 0,
+            size: push_constant_size,
+        }]
+    } else {
+        vec![]
+    };
+
+    let layouts = set_layouts.iter().copied().collect::<SmallVec<[_; 3]>>();
+
+    let layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&layouts)
+        .push_constant_ranges(&push_constant_ranges);
+
+    unsafe { device.handle().create_pipeline_layout(&layout_info, None) }
+}
+
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct GraphicShaderInput {
     pub vertex_shader: Arc<Shader>,
@@ -183,23 +242,12 @@ impl GraphicShaderInput {
     }
 
     pub fn create_pipeline_layout(&self, device: &RenderDevice, layouts: &[vk::DescriptorSetLayout]) -> Result<vk::PipelineLayout, vk::Result> {
-        let push_constant_ranges = if self.push_constant_size > 0 {
-            vec![vk::PushConstantRange {
-                stage_flags: vk::ShaderStageFlags::ALL_GRAPHICS,
-                offset: 0,
-                size: self.push_constant_size,
-            }]
-        } else {
-            vec![]
-        };
-
-        let layouts = layouts.iter().copied().collect::<SmallVec<[_; 3]>>();
-
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&layouts)
-            .push_constant_ranges(&push_constant_ranges);
-
-        unsafe { device.handle().create_pipeline_layout(&layout_info, None) }
+        create_pipeline_layout(
+            device,
+            layouts,
+            self.push_constant_size,
+            vk::ShaderStageFlags::ALL_GRAPHICS,
+        )
     }
 }
 
@@ -913,21 +961,16 @@ impl PartialEq for GraphicPipelineDesc {
 
 impl Eq for GraphicPipelineDesc {}
 
-#[DeviceObject]
-pub struct CommonPipeline {
-    name: String,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+pub struct GraphicPipeline {
+    desc: GraphicPipelineDesc,
+    pipeline: Pipeline,
 }
 
-impl CommonPipeline {
-    /// Create a new pipeline layout.
-    pub fn new_graphic(
-        name: &str,
+impl GraphicPipeline {
+    pub fn new(
         device: &RenderDevice,
         desc: &GraphicPipelineDesc,
-        cache: vk::PipelineCache,
-        descriptor_layouts: &[&DescriptorSetLayout],
+        descriptor_layouts: &[Arc<DescriptorSetLayout>],
     ) -> Result<Self, vk::Result> {
         let layout_handles = descriptor_layouts
             .iter()
@@ -936,7 +979,6 @@ impl CommonPipeline {
 
         let layout = desc.shader.create_pipeline_layout(device, &layout_handles)?;
 
-        // Build shader stages (fragment shader is optional)
         let mut shader_stages = Vec::with_capacity(if desc.shader.fragment_shader.is_some() { 2 } else { 1 });
         shader_stages.push(
             vk::PipelineShaderStageCreateInfo::default()
@@ -953,7 +995,6 @@ impl CommonPipeline {
             );
         }
 
-        // Vertex input
         let bindings: Vec<vk::VertexInputBindingDescription> = desc
             .shader
             .vertex_bindings
@@ -983,34 +1024,27 @@ impl CommonPipeline {
             .vertex_binding_descriptions(&bindings)
             .vertex_attribute_descriptions(&attributes);
 
-        // Input assembly / rasterization / multisample
         let input_assembly = desc.state.input_assembly.to_vk();
         let rasterization = desc.state.rasterization.to_vk();
         let multisample = desc.state.multisample.to_vk();
 
-        // Depth stencil (if provided)
         let depth_stencil_state = desc
             .attachments
             .depth_stencil_state
             .as_ref()
             .map(|ds| ds.to_vk());
 
-        // Color blend
         let blend_attachments = desc.attachments.to_vk_attachments();
         let color_blend_state = desc.attachments.to_vk_color_blend(&blend_attachments);
 
-        // Viewport state (dynamic)
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
 
-        // Dynamic state
         let dynamic_state = desc.state.to_vk_dynamic_state();
 
-        // Dynamic rendering info
         let mut rendering_info = desc.attachments.to_vk_rendering_info();
 
-        // Build pipeline create info
         let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .vertex_input_state(&vertex_input)
@@ -1027,97 +1061,184 @@ impl CommonPipeline {
             pipeline_info = pipeline_info.depth_stencil_state(depth_stencil);
         }
 
-        let pipelines = unsafe { device.handle().create_graphics_pipelines(cache, &[pipeline_info], None) }
+        let pipelines = unsafe { device.handle().create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None) }
             .map_err(|e| e.1)?;
 
-        log::trace!("create graphic pipeline.");
-
-        let pipeline = Self {
-            name: name.to_owned(),
+        let inner_pipe = Pipeline {
+            handle: pipelines[0],
             layout,
-            pipeline: pipelines[0],
+            descriptor_layouts: descriptor_layouts.to_owned(),
             device: device.handle().clone(),
         };
-        device.set_debug_name(&pipeline);
+        device.set_debug_name(&inner_pipe, &format!("graphic.{}", desc.name));
+
+        let pipeline = Self {
+            desc: desc.clone(),
+            pipeline: inner_pipe,
+        };
+
         Ok(pipeline)
     }
 
     #[inline]
-    pub fn name(&self) -> &str { &self.name }
-
-    #[inline]
-    pub fn handle(&self) -> vk::Pipeline { self.pipeline }
-}
-
-impl Drop for CommonPipeline {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_pipeline_layout(self.layout, None);
-            self.device.destroy_pipeline(self.pipeline, None);
-        }
-
-        log::trace!("destroy graphic pipeline.");
-    }
-}
-
-impl DebuggableObject for CommonPipeline {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        // Name both pipeline and layout for better debugging.
-        set_debug_name_handle(device, self.pipeline, vk::ObjectType::PIPELINE, self.name());
-        set_debug_name_handle(
-            device,
-            self.layout,
-            vk::ObjectType::PIPELINE_LAYOUT,
-            &format!("pipeline_layout.{}", self.name()),
-        );
-    }
-}
-
-/// Graphics pipeline using dynamic rendering (Vulkan 1.3+).
-pub struct GraphicPipeline {
-    desc: GraphicPipelineDesc,
-    pipeline: CommonPipeline,
-    descriptor_layouts: Vec<Arc<DescriptorSetLayout>>,
-}
-
-impl GraphicPipeline {
-    /// Create a new graphics pipeline with dynamic rendering.
-    pub fn new(
-        name: &str,
-        device: &RenderDevice,
-        desc: &GraphicPipelineDesc,
-        descriptor_layouts: &[Arc<DescriptorSetLayout>],
-    ) -> Result<Self, vk::Result> {
-        Self::new_with_cache(name, device, desc, vk::PipelineCache::null(), descriptor_layouts)
-    }
-
-    /// Create a new graphics pipeline with a pipeline cache.
-    pub fn new_with_cache(
-        name: &str,
-        device: &RenderDevice,
-        desc: &GraphicPipelineDesc,
-        cache: vk::PipelineCache,
-        descriptor_layouts: &[Arc<DescriptorSetLayout>],
-    ) -> Result<Self, vk::Result> {
-        let descriptor_layout_refs = descriptor_layouts.iter().map(|l| l.as_ref()).collect::<Vec<_>>();
-        let pipeline = CommonPipeline::new_graphic(name, device, desc, cache, &descriptor_layout_refs)?;
-
-        Ok(Self {
-            desc: desc.clone(),
-            descriptor_layouts: descriptor_layouts.into(),
-            pipeline
-        })
-    }
-
-    #[inline]
-    pub fn handle(&self) -> vk::Pipeline { self.pipeline.pipeline }
+    pub fn handle(&self) -> vk::Pipeline { self.pipeline.handle }
 
     #[inline]
     pub fn layout(&self) -> vk::PipelineLayout { self.pipeline.layout }
 
     #[inline]
-    pub fn descriptor_layouts(&self) -> &[Arc<DescriptorSetLayout>] { &self.descriptor_layouts }
+    pub fn descriptor_layouts(&self) -> &[Arc<DescriptorSetLayout>] { &self.pipeline.descriptor_layouts }
 
     #[inline]
     pub fn desc(&self) -> &GraphicPipelineDesc { &self.desc }
+}
+
+#[derive(Clone)]
+pub struct ComputePipelineDesc {
+    pub name: String,
+    pub shader: Arc<Shader>,
+}
+
+impl std::fmt::Debug for ComputePipelineDesc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComputePipelineDesc")
+            .field("name", &self.name)
+            .field("shader", &format!("Shader({})", self.shader.name()))
+            .finish()
+    }
+}
+
+impl ComputePipelineDesc {
+    pub fn new(name: &str, shader: Arc<Shader>) -> Self {
+        Self {
+            name: name.to_owned(),
+            shader,
+        }
+    }
+}
+
+impl Hash for ComputePipelineDesc {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.shader.module().as_raw().hash(state);
+        (self.shader.vk_stage().as_raw() as i32).hash(state);
+        self.shader.entry_point().as_bytes().hash(state);
+        let r = self.shader.reflection();
+        r.push_constant_size.hash(state);
+        for b in &r.bindings {
+            b.set.hash(state);
+            b.binding.hash(state);
+            (b.descriptor_type.as_raw() as i32).hash(state);
+            b.stage_flags.as_raw().hash(state);
+            b.count.hash(state);
+            b.binding_flags.as_raw().hash(state);
+        }
+    }
+}
+
+impl PartialEq for ComputePipelineDesc {
+    fn eq(&self, other: &Self) -> bool {
+        if self.name != other.name
+            || self.shader.module() != other.shader.module()
+            || self.shader.vk_stage() != other.shader.vk_stage()
+            || self.shader.entry_point() != other.shader.entry_point()
+        {
+            return false;
+        }
+        let a = self.shader.reflection();
+        let b = other.shader.reflection();
+        if a.push_constant_size != b.push_constant_size || a.bindings.len() != b.bindings.len() {
+            return false;
+        }
+        for (x, y) in a.bindings.iter().zip(b.bindings.iter()) {
+            if x.set != y.set
+                || x.binding != y.binding
+                || x.descriptor_type != y.descriptor_type
+                || x.stage_flags != y.stage_flags
+                || x.count != y.count
+                || x.binding_flags != y.binding_flags
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Eq for ComputePipelineDesc {}
+
+pub struct ComputePipeline {
+    desc: ComputePipelineDesc,
+    pipeline: Pipeline,
+}
+
+impl ComputePipeline {
+    pub fn new(
+        device: &RenderDevice,
+        desc: &ComputePipelineDesc,
+        descriptor_layouts: &[Arc<DescriptorSetLayout>],
+    ) -> Result<Self, vk::Result> {
+        if desc.shader.stage() != ShaderStage::Compute {
+            return Err(vk::Result::ERROR_INVALID_SHADER_NV);
+        }
+
+        let descriptor_layout_refs = descriptor_layouts.iter().map(|l| l.as_ref()).collect::<Vec<_>>();
+        let layout_handles = descriptor_layout_refs
+            .iter()
+            .map(|l| l.handle())
+            .collect::<SmallVec<[_; 3]>>();
+
+        let layout = create_pipeline_layout(
+            device,
+            &layout_handles,
+            desc.shader.reflection().push_constant_size,
+            vk::ShaderStageFlags::COMPUTE,
+        )?;
+
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(desc.shader.module())
+            .name(desc.shader.entry_point());
+
+        let create_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(layout);
+
+        let pipelines = unsafe {
+            device.handle().create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None)
+        }.map_err(|e| e.1)?;
+
+        let inner_pipe = Pipeline {
+            handle: pipelines[0],
+            layout,
+            descriptor_layouts: descriptor_layouts.to_owned(),
+            device: device.handle().clone(),
+        };
+        device.set_debug_name(&inner_pipe, &format!("compute.{}", desc.name));
+
+        let pipeline = Self {
+            desc: desc.clone(),
+            pipeline: inner_pipe,
+        };
+
+        Ok(pipeline)
+    }
+
+    #[inline]
+    pub fn handle(&self) -> vk::Pipeline {
+        self.pipeline.handle
+    }
+
+    #[inline]
+    pub fn layout(&self) -> vk::PipelineLayout {
+        self.pipeline.layout
+    }
+
+    #[inline]
+    pub fn descriptor_layouts(&self) -> &[Arc<DescriptorSetLayout>] { &self.pipeline.descriptor_layouts }
+
+    #[inline]
+    pub fn desc(&self) -> &ComputePipelineDesc {
+        &self.desc
+    }
 }

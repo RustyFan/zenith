@@ -1,4 +1,4 @@
-use crate::graph::{GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph};
+use crate::graph::{ComputeNodeExecutionContext, GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph};
 use crate::interface::{ResourceDescriptor, ResourceState};
 use crate::node::{NodePipelineState, RenderGraphNode};
 use crate::resource::{
@@ -9,7 +9,8 @@ use crate::resource::{
 use log::warn;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use zenith_rhi::{vk, GraphicPipelineDesc};
+use zenith_rhi::{vk, ComputePipelineDesc, GraphicPipelineDesc, PipelineRegistry, RenderDevice};
+use crate::GraphPipelineHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResourceAccessStorage {
@@ -18,19 +19,23 @@ pub(crate) struct ResourceAccessStorage {
     pub(crate) stage_hint: Option<vk::PipelineStageFlags2>,
 }
 
-pub struct RenderGraphBuilder {
+pub struct RenderGraphBuilder<'a> {
     nodes: Vec<RenderGraphNode>,
     pub(crate) initial_resources: Vec<InitialResourceStorage>,
     #[allow(dead_code)]
     pub(crate) export_resources: Vec<ExportResourceStorage>,
+    pipeline_cache: &'a mut PipelineRegistry,
+    device: &'a RenderDevice,
 }
 
-impl RenderGraphBuilder {
-    pub fn new() -> Self {
+impl<'a> RenderGraphBuilder<'a> {
+    pub fn new(pipeline_cache: &'a mut PipelineRegistry, device: &'a RenderDevice) -> Self {
         Self {
             nodes: Vec::new(),
             initial_resources: Vec::new(),
             export_resources: Vec::new(),
+            pipeline_cache,
+            device,
         }
     }
 
@@ -93,7 +98,7 @@ impl RenderGraphBuilder {
             inputs: vec![],
             outputs: vec![],
             pipeline_state: NodePipelineState::Graphic {
-                pipeline_descs: Vec::new(),
+                pipeline_handles: Vec::new(),
                 job_functor: None,
             },
         });
@@ -102,6 +107,8 @@ impl RenderGraphBuilder {
             common: CommonNodeBuilder {
                 node: &mut self.nodes[index],
                 resources: &self.initial_resources,
+                pipeline_cache: self.pipeline_cache,
+                device: self.device,
             },
         }
     }
@@ -123,22 +130,35 @@ impl RenderGraphBuilder {
             common: CommonNodeBuilder {
                 node: &mut self.nodes[index],
                 resources: &self.initial_resources,
+                pipeline_cache: self.pipeline_cache,
+                device: self.device,
             }
         }
     }
 
-    // #[must_use]
-    // pub fn add_compute_node(&mut self, name: &str) -> GraphComputeNodeBuilder {
-    //     let index = self.nodes.len();
-    //     self.nodes.push(RenderGraphNode {
-    //         node_name: name.to_string(),
-    //         ..Default::default()
-    //     });
-    //
-    //     GraphComputeNodeBuilder {
-    //         node: &mut self.nodes[index]
-    //     }
-    // }
+    #[must_use]
+    pub fn add_compute_node(&mut self, name: &str) -> ComputeNodeBuilder<'_> {
+        let index = self.nodes.len();
+
+        self.nodes.push(RenderGraphNode {
+            name: name.to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            pipeline_state: NodePipelineState::Compute {
+                pipeline_handles: Vec::new(),
+                job_functor: None,
+            },
+        });
+
+        ComputeNodeBuilder {
+            common: CommonNodeBuilder {
+                node: &mut self.nodes[index],
+                resources: &self.initial_resources,
+                pipeline_cache: self.pipeline_cache,
+                device: self.device,
+            },
+        }
+    }
 
     #[profiling::function]
     pub fn build(self) -> RenderGraph {
@@ -152,9 +172,11 @@ impl RenderGraphBuilder {
 pub struct CommonNodeBuilder<'builder> {
     node: &'builder mut RenderGraphNode,
     resources: &'builder Vec<InitialResourceStorage>,
+    pipeline_cache: &'builder mut PipelineRegistry,
+    device: &'builder RenderDevice,
 }
 
-impl CommonNodeBuilder<'_> {
+impl<'builder> CommonNodeBuilder<'builder> {
     #[must_use]
     fn read<R: GraphResource, V: GraphResourceView>(
         &mut self,
@@ -319,12 +341,14 @@ pub struct GraphicNodeBuilder<'builder> {
 impl<'builder> GraphicNodeBuilder<'builder> {
     inject_common_node_builder_methods!(Srv, Rt);
 
-    /// Register a pipeline for this node and return a handle to reference it
-    pub fn register_pipeline(&mut self, desc: GraphicPipelineDesc) -> crate::node::GraphicPipelineHandle {
-        if let NodePipelineState::Graphic { pipeline_descs, .. } = &mut self.common.node.pipeline_state {
-            let handle = crate::node::GraphicPipelineHandle(pipeline_descs.len() as u32);
-            pipeline_descs.push(desc);
-            handle
+    pub fn register_pipeline(&mut self, desc: GraphicPipelineDesc) -> GraphPipelineHandle {
+        if let NodePipelineState::Graphic { pipeline_handles, .. } = &mut self.common.node.pipeline_state {
+            let cache_handle = self.common.pipeline_cache
+                .register_graph_pipeline(self.common.device, &desc)
+                .expect("Failed to register graphic pipeline");
+            let index = pipeline_handles.len() as u32;
+            pipeline_handles.push(cache_handle);
+            GraphPipelineHandle(index)
         } else {
             unreachable!("register_pipeline called on non-graphic node");
         }
@@ -359,6 +383,39 @@ impl<'builder> LambdaNodeBuilder<'builder> {
             job_functor.replace(Box::new(node_job));
         } else {
             unreachable!("Use other node execution context in lambda node: {}", self.common.node.name());
+        }
+    }
+}
+
+pub struct ComputeNodeBuilder<'builder> {
+    common: CommonNodeBuilder<'builder>,
+}
+
+impl<'builder> ComputeNodeBuilder<'builder> {
+    inject_common_node_builder_methods!(Srv, Uav);
+
+    pub fn register_pipeline(&mut self, desc: ComputePipelineDesc) -> GraphPipelineHandle {
+        if let NodePipelineState::Compute { pipeline_handles, .. } = &mut self.common.node.pipeline_state {
+            let cache_handle = self.common.pipeline_cache
+                .register_compute_pipeline(self.common.device, &desc)
+                .expect("Failed to register compute pipeline");
+            let index = pipeline_handles.len() as u32;
+            pipeline_handles.push(cache_handle);
+            GraphPipelineHandle(index)
+        } else {
+            unreachable!("register_pipeline called on non-compute node");
+        }
+    }
+
+    #[inline]
+    pub fn execute<F>(self, node_job: F)
+    where
+        F: FnOnce(&mut ComputeNodeExecutionContext) -> anyhow::Result<()> + 'static
+    {
+        if let NodePipelineState::Compute { job_functor, .. } = &mut self.common.node.pipeline_state {
+            job_functor.replace(Box::new(node_job));
+        } else {
+            unreachable!("Use other node execution context in compute node: {}", self.common.node.name());
         }
     }
 }

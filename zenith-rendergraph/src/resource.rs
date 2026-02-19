@@ -5,8 +5,9 @@ use derive_more::From;
 use zenith_rhi::descriptor::BindableResource;
 use zenith_rhi::{vk, TextureLayout};
 use crate::builder::ResourceAccessStorage;
+use crate::graph::NodeBindingContext;
 use crate::interface::{Buffer, Texture, BufferDesc, TextureDesc, BufferState, TextureState, ResourceDescriptor, ResourceState};
-use crate::{GraphicNodeExecutionContext, RenderGraphBuilder};
+use crate::RenderGraphBuilder;
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -158,34 +159,35 @@ pub(crate) enum ExportResourceStorage {
     ExportedTexture(TextureState),
 }
 
-pub trait GraphBindableAccess {
-    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource;
+/// Unified binding interface: convert a resource access into a bindable resource used in any node contexts.
+pub trait GraphBindable {
+    fn into_bindable(self, ctx: &NodeBindingContext) -> impl BindableResource;
 }
 
-impl GraphBindableAccess for RenderGraphResourceAccess<Buffer, Srv> {
+impl GraphBindable for RenderGraphResourceAccess<Buffer, Srv> {
     #[inline]
-    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource {
+    fn into_bindable(self, ctx: &NodeBindingContext) -> impl BindableResource {
         ctx.get(&self).as_range(..)
     }
 }
 
-impl GraphBindableAccess for RenderGraphResourceAccess<Buffer, Uav> {
+impl GraphBindable for RenderGraphResourceAccess<Buffer, Uav> {
     #[inline]
-    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource {
+    fn into_bindable(self, ctx: &NodeBindingContext) -> impl BindableResource {
         ctx.get(&self).as_range(..)
     }
 }
 
-impl GraphBindableAccess for RenderGraphResourceAccess<Texture, Srv> {
+impl GraphBindable for RenderGraphResourceAccess<Texture, Srv> {
     #[inline]
-    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource {
+    fn into_bindable(self, ctx: &NodeBindingContext) -> impl BindableResource {
         ctx.get(&self).as_range(TextureLayout::ShaderReadOnly, .., ..)
     }
 }
 
-impl GraphBindableAccess for RenderGraphResourceAccess<Texture, Uav> {
+impl GraphBindable for RenderGraphResourceAccess<Texture, Uav> {
     #[inline]
-    fn into_bindable(self, ctx: &GraphicNodeExecutionContext) -> impl BindableResource {
+    fn into_bindable(self, ctx: &NodeBindingContext) -> impl BindableResource {
         ctx.get(&self).as_range(TextureLayout::ShaderReadOnly, .., ..)
     }
 }

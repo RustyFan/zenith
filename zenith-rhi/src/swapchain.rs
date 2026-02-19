@@ -181,8 +181,7 @@ impl Swapchain {
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) =
             create_sync_objects(device, images.len())?;
 
-        set_debug_name_handle(device, swapchain, vk::ObjectType::SWAPCHAIN_KHR, name);
-        Ok(Swapchain {
+        let swapchain = Swapchain {
             name: name.to_owned(),
             physical_device: physical_device.handle(),
             window,
@@ -197,7 +196,10 @@ impl Swapchain {
             current_frame: 0,
             present_mode,
             device: device.handle().clone(),
-        })
+        };
+        device.set_debug_name(&swapchain, name);
+
+        Ok(swapchain)
     }
 
     #[inline]
@@ -292,6 +294,8 @@ impl Swapchain {
             extent,
             self.swapchain,
         )?;
+        #[cfg(debug_assertions)]
+        set_debug_name_handle(&device.debug_utils, swapchain, vk::ObjectType::SWAPCHAIN_KHR, &self.name);
 
         self.clean_up_render_resources();
 
@@ -410,8 +414,8 @@ impl Swapchain {
 }
 
 impl DebuggableObject for Swapchain {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.swapchain, vk::ObjectType::SWAPCHAIN_KHR, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.swapchain, vk::ObjectType::SWAPCHAIN_KHR, name);
     }
 }
 

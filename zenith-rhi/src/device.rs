@@ -17,9 +17,9 @@ use crate::CommandEncoder;
 use crate::bindless::BindlessCaps;
 
 #[cfg(debug_assertions)]
-fn set_debug_name_raw(
-    debug_utils: &ash::ext::debug_utils::Device,
-    object_handle: u64,
+pub(crate) fn set_debug_name_handle<T: vk::Handle>(
+    device: &ash::ext::debug_utils::Device,
+    object: T,
     object_type: vk::ObjectType,
     name: &str,
 ) {
@@ -31,6 +31,7 @@ fn set_debug_name_raw(
         return;
     };
 
+    let object_handle = object.as_raw();
     let info = vk::DebugUtilsObjectNameInfoEXT {
         object_type,
         object_handle,
@@ -39,37 +40,18 @@ fn set_debug_name_raw(
     };
 
     unsafe {
-        debug_utils.set_debug_utils_object_name(&info).unwrap();
+        device.set_debug_utils_object_name(&info).unwrap();
     }
 }
 
 #[cfg(not(debug_assertions))]
-#[inline]
-#[allow(dead_code)]
-fn set_debug_name_raw(
-    _debug_utils: &ash::ext::debug_utils::Device,
-    _object_handle: u64,
+#[allow(unused)]
+pub(crate) fn set_debug_name_handle<T: vk::Handle>(
+    _device: &ash::ext::debug_utils::Device,
+    _object: T,
     _object_type: vk::ObjectType,
     _name: &str,
-) {
-}
-
-/// Set debug name for a raw Vulkan handle (best-effort, no-op without validation).
-pub(crate) fn set_debug_name_handle<T: vk::Handle>(
-    device: &RenderDevice,
-    object: T,
-    object_type: vk::ObjectType,
-    name: &str,
-) {
-    #[cfg(debug_assertions)]
-    {
-        set_debug_name_raw(&device.debug_utils, object.as_raw(), object_type, name);
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = (device, object, object_type, name);
-    }
-}
+) {}
 
 /// Get required device extensions.
 fn get_required_device_extensions() -> Vec<*const i8> {
@@ -97,13 +79,19 @@ pub struct RenderDevice {
     device: Device,
     parent_physical_device: PhysicalDevice,
     #[cfg(debug_assertions)]
-    debug_utils: ash::ext::debug_utils::Device,
+    pub(crate) debug_utils: ash::ext::debug_utils::Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
     current_frame: u8,
     bindless_caps: BindlessCaps,
     bindless_pool: Option<Arc<Mutex<crate::BindlessPool>>>,
+}
+
+impl DebuggableObject for RenderDevice {
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.device.handle(), vk::ObjectType::DEVICE, name);
+    }
 }
 
 impl RenderDevice {
@@ -231,6 +219,7 @@ impl RenderDevice {
             bindless_caps,
             bindless_pool: None,
         };
+        device.set_debug_name(&device, "device.main");
 
         // Initialize the bindless pool now that we have a complete device
         let bindless_pool = Arc::new(Mutex::new(crate::BindlessPool::new(&device)?));
@@ -243,27 +232,19 @@ impl RenderDevice {
             );
         }
 
-        set_debug_name_handle(&device, device.handle().handle(), vk::ObjectType::DEVICE, "device.main");
         Ok(device)
     }
 
     /// Get a reference to the logical device.
     #[inline]
-    pub fn handle(&self) -> &Device {
-        &self.device
-    }
+    pub fn handle(&self) -> &Device { &self.device }
 
-    /// Get a reference to the debug utils device extension (debug builds only).
-    #[cfg(debug_assertions)]
     #[inline]
-    pub(crate) fn debug_utils(&self) -> &ash::ext::debug_utils::Device {
-        &self.debug_utils
-    }
-
-    /// Set debug name for a zenith-rhi wrapper object (best-effort, no-op without validation).
-    #[inline]
-    pub(crate) fn set_debug_name<T: DebuggableObject>(&self, obj: &T) {
-        obj.set_debug_name(self)
+    pub(crate) fn set_debug_name<T: DebuggableObject>(&self, obj: &T, name: &str) {
+        #[cfg(debug_assertions)]
+        obj.set_debug_name(&self.debug_utils, name);
+        #[cfg(not(debug_assertions))]
+        let _ = (obj, name);
     }
 
     pub fn begin_frame(&mut self) -> usize {
@@ -273,9 +254,6 @@ impl RenderDevice {
             self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
             self.device.reset_fences(&[fence]).unwrap();
         }
-        // NOTE: reset_frame_resources() is NOT called here because the present
-        // path uses a separate in_flight_fence.  The caller (Engine::render)
-        // must wait for BOTH fences before calling reset_frame_resources().
         self.current_frame as _
     }
 
@@ -460,17 +438,11 @@ pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
-/// Crate-only trait for objects that own an `ash::Device` used for destruction and device calls.
-///
-/// This trait is sealed and not visible to users of `zenith-rhi`.
 pub trait DeviceObject: sealed::Sealed {
     fn device(&self) -> &Device;
 }
 
-/// Crate-only trait for objects that can name their Vulkan resources.
-///
-/// This is used by `RenderDevice::set_debug_name(&T)` to delegate debug-name work to the object
-/// itself (so it can also name sub-resources like `vk::DeviceMemory`).
 pub(crate) trait DebuggableObject {
-    fn set_debug_name(&self, device: &RenderDevice);
+    #[allow(unused)]
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str);
 }

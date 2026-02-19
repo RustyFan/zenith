@@ -8,7 +8,7 @@ pub mod core;
 pub mod descriptor;
 pub mod device;
 pub mod pipeline;
-pub mod pipeline_cache;
+pub mod pipeline_registry;
 pub mod resource_cache;
 pub mod sampler;
 pub mod shader;
@@ -42,6 +42,7 @@ pub use descriptor::{
 pub use device::RenderDevice;
 pub use pipeline::{
     ColorAttachmentDesc, ColorAttachmentDescBuilder, ColorAttachmentDescBuilderError,
+    ComputePipeline, ComputePipelineDesc,
     DepthStencilState, DepthStencilStateBuilder, DepthStencilStateBuilderError,
     DepthStencilAttachmentDesc, DepthStencilAttachmentDescBuilder, DepthStencilAttachmentDescBuilderError,
     GraphicPipeline, GraphicPipelineDesc, GraphicPipelineState, GraphicPipelineStateBuilder,
@@ -50,7 +51,7 @@ pub use pipeline::{
     InputAssemblyState, RasterizationState, MultisampleState,
     VertexAttribute, VertexBinding, VertexLayout,
 };
-pub use pipeline_cache::{PipelineCache, PipelineCacheStats};
+pub use pipeline_registry::{PipelineRegistry, PipelineCacheStats, PipelineEntry, PipelineHandle};
 pub use resource_cache::TransientResourceCache;
 pub use sampler::{Sampler, SamplerDesc};
 pub use shader::{

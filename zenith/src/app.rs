@@ -12,9 +12,7 @@ pub trait App: Sized + 'static {
     fn tick(&mut self, _delta_time: f32) {}
 }
 
-/// All contexts needed to render.
 pub struct RenderContext<'a> {
-    builder: &'a mut RenderGraphBuilder,
     device: &'a RenderDevice,
     swapchain: &'a Swapchain,
     frame_index: usize,
@@ -22,21 +20,16 @@ pub struct RenderContext<'a> {
 
 impl<'a> RenderContext<'a> {
     pub fn new(
-        builder: &'a mut RenderGraphBuilder,
         device: &'a RenderDevice,
         swapchain: &'a Swapchain,
-        frame_index: usize
+        frame_index: usize,
     ) -> Self {
         Self {
-            builder,
             device,
             swapchain,
             frame_index,
         }
     }
-
-    #[inline]
-    pub fn builder(&mut self) -> &mut RenderGraphBuilder { self.builder }
 
     #[inline]
     pub fn device(&self) -> &RenderDevice { self.device }
@@ -54,5 +47,5 @@ impl<'a> RenderContext<'a> {
 pub trait RenderableApp: App {
     fn prepare(&mut self, _render_device: &RenderDevice, _window: Arc<Window>) -> anyhow::Result<()> { Ok(()) }
     fn resize(&mut self, _width: u32, _height: u32) {}
-    fn render(&mut self, context: RenderContext);
+    fn render(&mut self, builder: &mut RenderGraphBuilder<'_>, context: RenderContext<'_>);
 }

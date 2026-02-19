@@ -54,7 +54,7 @@ impl Shader {
             reflection,
             device: device.handle().clone(),
         };
-        device.set_debug_name(&shader);
+        device.set_debug_name(&shader, name);
         Ok(shader)
     }
 
@@ -91,8 +91,8 @@ impl Shader {
 }
 
 impl DebuggableObject for Shader {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.module, vk::ObjectType::SHADER_MODULE, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.module, vk::ObjectType::SHADER_MODULE, name);
     }
 }
 
@@ -180,6 +180,10 @@ pub struct ShaderReflection {
 
 impl ShaderReflection {
     pub fn merge(reflections: &[&ShaderReflection]) -> Self {
+        if reflections.len() == 1 {
+            return reflections[0].clone();
+        }
+        
         let mut binding_map: HashMap<(u32, u32), ShaderBinding> = HashMap::new();
         let mut push_constant_size = 0u32;
         let mut vertex_inputs_map: HashMap<u32, vk::Format> = HashMap::new();

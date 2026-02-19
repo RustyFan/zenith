@@ -1,5 +1,6 @@
 use zenith::rhi::{vk, TextureState};
 use zenith::{launch, App, Args, RenderContext, RenderableApp};
+use zenith::rendergraph::RenderGraphBuilder;
 
 pub struct SimpleApp;
 
@@ -10,7 +11,7 @@ impl App for SimpleApp {
 }
 
 impl RenderableApp for SimpleApp {
-    fn render(&mut self, mut context: RenderContext) {
+    fn render(&mut self, builder: &mut RenderGraphBuilder<'_>, context: RenderContext<'_>) {
         let extent = context.extent();
         let (width, height) = (extent.width, extent.height);
 
@@ -19,8 +20,6 @@ impl RenderableApp for SimpleApp {
         }
 
         let output = context.swapchain_texture();
-
-        let builder = context.builder();
         let mut output = builder.import(output, TextureState::Undefined);
 
         let mut node = builder.add_lambda_node("clear");

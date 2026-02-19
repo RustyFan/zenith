@@ -5,22 +5,23 @@ mod interface;
 mod resource;
 
 pub use resource::{
-    RenderGraphResource, RenderGraphResourceAccess
+    GraphBindable, RenderGraphResource, RenderGraphResourceAccess,
 };
 pub use builder::{RenderGraphBuilder, GraphicNodeBuilder};
 pub use zenith_rhi::{
     ColorAttachmentDesc, ColorAttachmentDescBuilder, ColorAttachmentDescBuilderError,
-    GraphicPipelineDesc, GraphicShaderInput, GraphicPipelineState,
+    ComputePipelineDesc, GraphicPipelineDesc, GraphicShaderInput, GraphicPipelineState,
     GraphicShaderInputBuilder, GraphicShaderInputBuildError,
     GraphicPipelineStateBuilder,
     VertexLayout,
 };
 pub use node::{
     RenderGraphNode,
-    GraphicPipelineHandle,
+    GraphPipelineHandle,
 };
+pub use zenith_rhi::PipelineHandle;
 pub use graph::{
     RenderGraph, CompiledRenderGraph, RetiredRenderGraph,
-    GraphicNodeExecutionContext, LambdaNodeExecutionContext,
+    GraphicNodeExecutionContext, LambdaNodeExecutionContext, ComputeNodeExecutionContext,
     ColorAttachment, DepthStencilAttachment,
 };

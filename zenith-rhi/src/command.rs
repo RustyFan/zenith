@@ -42,7 +42,7 @@ impl CommandPool {
             next_index: Cell::new(0),
             device: device.handle().clone(),
         };
-        device.set_debug_name(&pool);
+        device.set_debug_name(&pool, name);
         Ok(pool)
     }
 
@@ -80,8 +80,8 @@ impl CommandPool {
 }
 
 impl DebuggableObject for CommandPool {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.pool, vk::ObjectType::COMMAND_POOL, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.pool, vk::ObjectType::COMMAND_POOL, name);
     }
 }
 
@@ -108,7 +108,7 @@ impl<'a> CommandEncoder<'a> {
             device,
             cmd,
         };
-        device.set_debug_name(&encoder);
+        device.set_debug_name(&encoder, name);
         Ok(encoder)
     }
 
@@ -121,6 +121,10 @@ impl<'a> CommandEncoder<'a> {
         unsafe { self.device.handle().end_command_buffer(self.cmd) }
     }
 
+    #[inline]
+    pub fn name(&self) -> &str { &self.name }
+
+    #[inline]
     pub fn handle(&self) -> vk::CommandBuffer {
         self.cmd
     }
@@ -135,7 +139,7 @@ impl<'a> CommandEncoder<'a> {
             .color(color.to_array());
         unsafe {
             self.device
-                .debug_utils()
+                .debug_utils
                 .cmd_begin_debug_utils_label(self.cmd, &label_info);
         }
     }
@@ -147,7 +151,7 @@ impl<'a> CommandEncoder<'a> {
     pub fn end_debug_label(&self) {
         unsafe {
             self.device
-                .debug_utils()
+                .debug_utils
                 .cmd_end_debug_utils_label(self.cmd);
         }
     }
@@ -217,6 +221,11 @@ impl<'a> CommandEncoder<'a> {
     pub fn push_constants<T: NoUninit>(&self, layout: vk::PipelineLayout, stages: vk::ShaderStageFlags, offset: u32, data: &T) {
         let bytes = bytemuck::cast_slice(std::slice::from_ref(data));
         unsafe { self.device.handle().cmd_push_constants(self.cmd, layout, stages, offset, bytes) }
+    }
+
+    /// Dispatch a compute workload.
+    pub fn dispatch(&self, x: u32, y: u32, z: u32) {
+        unsafe { self.device.handle().cmd_dispatch(self.cmd, x, y, z) }
     }
 
     // Dynamic rendering (Vulkan 1.3)
@@ -296,8 +305,8 @@ impl<'a> CommandEncoder<'a> {
 }
 
 impl<'a> DebuggableObject for CommandEncoder<'a> {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.cmd, vk::ObjectType::COMMAND_BUFFER, &self.name);
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.cmd, vk::ObjectType::COMMAND_BUFFER, name);
     }
 }
 

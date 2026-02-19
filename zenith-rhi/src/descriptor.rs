@@ -76,7 +76,7 @@ impl DescriptorSetLayout {
             binding_map,
             device: device.handle().clone(),
         };
-        device.set_debug_name(&layout);
+        device.set_debug_name(&layout, name);
         Ok(layout)
     }
 
@@ -109,7 +109,7 @@ impl DescriptorSetLayout {
         };
 
         let layout = Self::new(name, device, &bindings, layout_flags)?;
-        device.set_debug_name(&layout);
+        device.set_debug_name(&layout, name);
         Ok(layout)
     }
 
@@ -137,12 +137,12 @@ impl Drop for DescriptorSetLayout {
 }
 
 impl DebuggableObject for DescriptorSetLayout {
-    fn set_debug_name(&self, device: &RenderDevice) {
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
         set_debug_name_handle(
             device,
             self.layout,
             vk::ObjectType::DESCRIPTOR_SET_LAYOUT,
-            self.name(),
+            name,
         );
     }
 }
@@ -176,7 +176,7 @@ impl DescriptorPool {
             max_sets,
             device: device.handle().clone(),
         };
-        device.set_debug_name(&pool);
+        device.set_debug_name(&pool, name);
         Ok(pool)
     }
 
@@ -193,11 +193,9 @@ impl DescriptorPool {
         Ok(sets[0])
     }
 
+    #[inline]
     pub fn reset(&self) -> Result<(), vk::Result> {
-        unsafe {
-            self.device
-                .reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty())
-        }
+        unsafe { self.device.reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty()) }
     }
 
     #[inline]
@@ -216,8 +214,8 @@ impl Drop for DescriptorPool {
 }
 
 impl DebuggableObject for DescriptorPool {
-    fn set_debug_name(&self, device: &RenderDevice) {
-        set_debug_name_handle(device, self.pool, vk::ObjectType::DESCRIPTOR_POOL, self.name());
+    fn set_debug_name(&self, device: &ash::ext::debug_utils::Device, name: &str) {
+        set_debug_name_handle(device, self.pool, vk::ObjectType::DESCRIPTOR_POOL, name);
     }
 }
 
@@ -265,6 +263,11 @@ impl<'a> DescriptorSetBinder<'a> {
             writer: Default::default(),
             set_range: usize::MAX..0,
         }
+    }
+
+    #[inline]
+    pub fn num_bindings(&self) -> usize {
+        self.writer.num_bindings()
     }
 
     pub fn bind<T: BindableResource>(
@@ -350,12 +353,11 @@ impl DescriptorWriter {
         self.bindings.clear();
     }
 
-    // TODO: buffer descriptor infos and texture descriptor infos will have N-to-1 relationship for fixed-sized descriptor array
-    pub fn write_to<'a>(&'a self, base_set: u32, descriptor_sets: &[vk::DescriptorSet]) -> Vec<vk::WriteDescriptorSet<'a>> {
+    pub fn write_to(&'_ self, base_set: u32, descriptor_sets: &[vk::DescriptorSet]) -> Vec<vk::WriteDescriptorSet<'_>> {
         let mut writes: Vec<vk::WriteDescriptorSet> = Vec::with_capacity(self.num_bindings());
 
         for (location, info) in &self.bindings {
-            assert!(location.set - base_set < descriptor_sets.len() as _);
+            debug_assert!(location.set - base_set < descriptor_sets.len() as _);
 
             match info {
                 ResourceBinding::Buffer(buf_info) => {

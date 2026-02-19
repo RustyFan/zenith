@@ -16,6 +16,7 @@ use zenith::core::input::InputActionMapper;
 use zenith::core::log;
 use zenith::core::math::Degree;
 use zenith::core::time::{Milliseconds, Timer};
+use zenith::rendergraph::RenderGraphBuilder;
 
 pub struct WorldApp {
     world_renderer: Option<WorldRenderer>,
@@ -139,14 +140,13 @@ impl RenderableApp for WorldApp {
         self.world_renderer.as_mut().unwrap().resize(width, height);
     }
 
-    fn render(&mut self, mut context: RenderContext) {
+    fn render(&mut self, builder: &mut RenderGraphBuilder<'_>, context: RenderContext<'_>) {
         let extent = context.extent();
         if extent.width == 0 || extent.height == 0 {
             return;
         }
 
         let output = context.swapchain_texture();
-        let builder = context.builder();
         let mut output = builder.import(output, TextureState::Undefined);
 
         self.world_renderer

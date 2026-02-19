@@ -443,40 +443,43 @@ impl WorldRenderer {
         let width = self.width;
         let height = self.height;
         node.execute(move |ctx| {
-            ctx.get(&view)
-                .as_range(..)
-                .write(bytemuck::bytes_of(&view_data))
-                .map_err(|e| anyhow!("failed to write view buffer: {e:?}"))?;
+            if let Some(pipe) = ctx.bind_pipeline(pipeline_handle) {
+                ctx.get(&view)
+                    .as_range(..)
+                    .write(bytemuck::bytes_of(&view_data))
+                    .map_err(|e| anyhow!("failed to write view buffer: {e:?}"))?;
 
-            ctx.bind_pipeline(pipeline_handle)
-                .bind_raw(BindlessPool::SET_INDEX, &[ctx.device().bindless_pool().lock().set()], &[])
-                .bind("view", view)?;
+                pipe.bind_raw(BindlessPool::SET_INDEX, &[ctx.device().bindless_pool().lock().set()], &[])
+                    .bind("view", view)?
+                    .finish();
 
-            ctx.begin_rendering(
-                (width, height),
-                &[
-                    ColorAttachment::new(gbuffer_base_rt).clear_input().clear_value([0.05, 0.05, 0.05, 1.0]),
-                    ColorAttachment::new(gbuffer_nmr_rt).clear_input().clear_value([0.5, 0.5, 1.0, 1.0]),
-                ],
-                Some(DepthStencilAttachment::new(depth_rt).clear_depth_input()),
-            );
+                ctx.begin_rendering(
+                    (width, height),
+                    &[
+                        ColorAttachment::new(gbuffer_base_rt).clear_input().clear_value([0.05, 0.05, 0.05, 1.0]),
+                        ColorAttachment::new(gbuffer_nmr_rt).clear_input().clear_value([0.5, 0.5, 1.0, 1.0]),
+                    ],
+                    Some(DepthStencilAttachment::new(depth_rt).clear_depth_input()),
+                );
 
-            for (vb, ib, index_count, model, material) in draws.into_iter() {
-                let pc = PushConstants {
-                    model: model.to_cols_array(),
-                    base_color_factor: material.base_color_factor,
-                    base_color_tex: material.base_color_tex_handle.raw(),
-                    mra_tex: material.mra_tex_handle.raw(),
-                    normal_tex: material.normal_tex_handle.raw(),
-                };
-                ctx.push_constants(pipeline_handle, 0, &pc);
+                for (vb, ib, index_count, model, material) in draws.into_iter() {
+                    let pc = PushConstants {
+                        model: model.to_cols_array(),
+                        base_color_factor: material.base_color_factor,
+                        base_color_tex: material.base_color_tex_handle.raw(),
+                        mra_tex: material.mra_tex_handle.raw(),
+                        normal_tex: material.normal_tex_handle.raw(),
+                    };
+                    ctx.push_constants(pipeline_handle, 0, &pc);
 
-                ctx.bind_vertex_buffers(vb, 0, &[0]);
-                ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT32);
-                ctx.encoder().draw_indexed(0..index_count, 0..1, 0);
+                    ctx.bind_vertex_buffers(vb, 0, &[0]);
+                    ctx.bind_index_buffer(ib, 0, vk::IndexType::UINT32);
+                    ctx.encoder().draw_indexed(0..index_count, 0..1, 0);
+                }
+
+                ctx.end_rendering();
             }
 
-            ctx.end_rendering();
             Ok(())
         });
 
