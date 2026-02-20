@@ -1,11 +1,10 @@
-//! Vulkan Texture - GPU texture resource management.
-
 use ash::{vk};
 use std::default::Default;
 use std::cell::RefCell;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::RangeBounds;
+use std::sync::Arc;
 use ash::vk::Handle;
 use zenith_core::collections::hashmap::HashMap;
 use zenith_rhi_derive::DeviceObject;
@@ -310,11 +309,9 @@ impl Debug for Texture {
 impl Texture {
     /// Create a new texture from a descriptor (view is not created).
     pub fn new(
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         desc: &TextureDesc,
     ) -> Result<Self, vk::Result> {
-        let memory_properties = device.memory_properties();
-        // Create image
         let image_info = vk::ImageCreateInfo::default()
             .flags(desc.flags)
             .image_type(desc.image_type)
@@ -330,21 +327,18 @@ impl Texture {
 
         let image = unsafe { device.handle().create_image(&image_info, None)? };
 
-        // Get memory requirements
+        let memory_properties = device.memory_properties();
         let mem_requirements = unsafe { device.handle().get_image_memory_requirements(image) };
 
-        // Find suitable memory type
         let memory_type_index = find_memory_type(memory_properties, mem_requirements.memory_type_bits, desc.memory_flags)
             .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)?;
 
-        // Allocate memory
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(memory_type_index);
 
         let memory = unsafe { device.handle().allocate_memory(&alloc_info, None)? };
 
-        // Bind memory to image
         unsafe { device.handle().bind_image_memory(image, memory, 0)? };
 
         let texture = Self {
@@ -352,15 +346,14 @@ impl Texture {
             image,
             memory,
             views: RefCell::new(Default::default()),
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&texture, &desc.name);
         Ok(texture)
     }
 
-    /// Create a texture wrapper for a swapchain image (does not own the image or memory).
-    pub(crate) fn from_swapchain_image(
-        device: &RenderDevice,
+    pub(crate) fn from_swapchain(
+        device: &Arc<RenderDevice>,
         name: String,
         image: vk::Image,
         format: vk::Format,
@@ -390,7 +383,7 @@ impl Texture {
             image,
             memory: vk::DeviceMemory::null(),
             views: RefCell::new(Default::default()),
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&texture, &texture.desc.name);
         texture
@@ -467,12 +460,12 @@ impl Drop for Texture {
     fn drop(&mut self) {
         unsafe {
             for view in self.views.borrow().values() {
-                self.device.destroy_image_view(*view, None);
+                self.device.handle().destroy_image_view(*view, None);
             }
 
             if self.memory != vk::DeviceMemory::null() {
-                self.device.destroy_image(self.image, None);
-                self.device.free_memory(self.memory, None);
+                self.device.handle().destroy_image(self.image, None);
+                self.device.handle().free_memory(self.memory, None);
             }
         }
     }
@@ -556,7 +549,7 @@ impl<'a> TextureRange<'a> {
             })
             .subresource_range(self.subresource.to_vk(aspect_mask));
 
-        let view = unsafe { self.texture.device.create_image_view(&view_info, None)? };
+        let view = unsafe { self.texture.device.handle().create_image_view(&view_info, None)? };
         // TODO: debug name for view
         self.texture.views.borrow_mut().insert(self.subresource, view);
         Ok(view)

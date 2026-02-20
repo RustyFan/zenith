@@ -1,4 +1,5 @@
-﻿use ash::{vk};
+use std::sync::Arc;
+use ash::{vk};
 use zenith_rhi_derive::DeviceObject;
 use crate::{RenderDevice};
 use crate::device::DebuggableObject;
@@ -11,7 +12,7 @@ pub struct Fence {
 }
 
 impl Fence {
-    pub fn new(name: &str, device: &RenderDevice, signaled: bool) -> Result<Self, vk::Result> {
+    pub fn new(name: &str, device: &Arc<RenderDevice>, signaled: bool) -> Result<Self, vk::Result> {
         let fence_info = vk::FenceCreateInfo::default().flags(if signaled {
             vk::FenceCreateFlags::SIGNALED
         } else {
@@ -22,7 +23,7 @@ impl Fence {
         let fence = Self {
             name: name.to_string(),
             fence,
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&fence, name);
         Ok(fence)
@@ -46,7 +47,7 @@ impl DebuggableObject for Fence {
 impl Drop for Fence {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_fence(self.fence, None);
+            self.device.handle().destroy_fence(self.fence, None);
         }
     }
 }
@@ -58,7 +59,7 @@ pub struct Semaphore {
 }
 
 impl Semaphore {
-    pub fn new(name: &str, device: &RenderDevice) -> Result<Self, vk::Result> {
+    pub fn new(name: &str, device: &Arc<RenderDevice>) -> Result<Self, vk::Result> {
         let semaphore = unsafe {
             device.handle().create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?
         };
@@ -66,7 +67,7 @@ impl Semaphore {
         let semaphore = Self {
             name: name.to_string(),
             semaphore,
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&semaphore, name);
         Ok(semaphore)
@@ -90,7 +91,7 @@ impl DebuggableObject for Semaphore {
 impl Drop for Semaphore {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_semaphore(self.semaphore, None);
+            self.device.handle().destroy_semaphore(self.semaphore, None);
         }
     }
 }

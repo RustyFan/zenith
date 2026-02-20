@@ -1,6 +1,6 @@
 use crate::graph::{ComputeNodeExecutionContext, GraphicNodeExecutionContext, LambdaNodeExecutionContext, RenderGraph};
 use crate::interface::{ResourceDescriptor, ResourceState};
-use crate::node::{NodePipelineState, RenderGraphNode};
+use crate::node::{NodeState, RenderGraphNode};
 use crate::resource::{
     ExportResourceStorage, ExportedRenderGraphResource, GraphImportExportResource,
     GraphResource, GraphResourceDescriptor, GraphResourceId,
@@ -24,12 +24,15 @@ pub struct RenderGraphBuilder<'a> {
     pub(crate) initial_resources: Vec<InitialResourceStorage>,
     #[allow(dead_code)]
     pub(crate) export_resources: Vec<ExportResourceStorage>,
-    pipeline_cache: &'a mut PipelineRegistry,
-    device: &'a RenderDevice,
+    pub pipeline_cache: &'a mut PipelineRegistry,
+    pub device: &'a Arc<RenderDevice>,
 }
 
 impl<'a> RenderGraphBuilder<'a> {
-    pub fn new(pipeline_cache: &'a mut PipelineRegistry, device: &'a RenderDevice) -> Self {
+    pub fn new(
+        device: &'a Arc<RenderDevice>,
+        pipeline_cache: &'a mut PipelineRegistry,
+    ) -> Self {
         Self {
             nodes: Vec::new(),
             initial_resources: Vec::new(),
@@ -97,7 +100,7 @@ impl<'a> RenderGraphBuilder<'a> {
             name: name.to_string(),
             inputs: vec![],
             outputs: vec![],
-            pipeline_state: NodePipelineState::Graphic {
+            pipeline_state: NodeState::Graphic {
                 pipeline_handles: Vec::new(),
                 job_functor: None,
             },
@@ -121,7 +124,7 @@ impl<'a> RenderGraphBuilder<'a> {
             name: name.to_string(),
             inputs: vec![],
             outputs: vec![],
-            pipeline_state: NodePipelineState::Lambda {
+            pipeline_state: NodeState::Lambda {
                 job_functor: None,
             },
         });
@@ -144,7 +147,7 @@ impl<'a> RenderGraphBuilder<'a> {
             name: name.to_string(),
             inputs: vec![],
             outputs: vec![],
-            pipeline_state: NodePipelineState::Compute {
+            pipeline_state: NodeState::Compute {
                 pipeline_handles: Vec::new(),
                 job_functor: None,
             },
@@ -173,7 +176,7 @@ pub struct CommonNodeBuilder<'builder> {
     node: &'builder mut RenderGraphNode,
     resources: &'builder Vec<InitialResourceStorage>,
     pipeline_cache: &'builder mut PipelineRegistry,
-    device: &'builder RenderDevice,
+    device: &'builder Arc<RenderDevice>,
 }
 
 impl<'builder> CommonNodeBuilder<'builder> {
@@ -342,7 +345,7 @@ impl<'builder> GraphicNodeBuilder<'builder> {
     inject_common_node_builder_methods!(Srv, Rt);
 
     pub fn register_pipeline(&mut self, desc: GraphicPipelineDesc) -> GraphPipelineHandle {
-        if let NodePipelineState::Graphic { pipeline_handles, .. } = &mut self.common.node.pipeline_state {
+        if let NodeState::Graphic { pipeline_handles, .. } = &mut self.common.node.pipeline_state {
             let cache_handle = self.common.pipeline_cache
                 .register_graph_pipeline(self.common.device, &desc)
                 .expect("Failed to register graphic pipeline");
@@ -359,7 +362,7 @@ impl<'builder> GraphicNodeBuilder<'builder> {
     where
         F: FnOnce(&mut GraphicNodeExecutionContext) -> anyhow::Result<()> + 'static
     {
-        if let NodePipelineState::Graphic { job_functor, .. } = &mut self.common.node.pipeline_state {
+        if let NodeState::Graphic { job_functor, .. } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));
         } else {
             unreachable!("Use other node execution context in graphic node: {}", self.common.node.name());
@@ -379,7 +382,7 @@ impl<'builder> LambdaNodeBuilder<'builder> {
     where
         F: FnOnce(&mut LambdaNodeExecutionContext) -> anyhow::Result<()> + 'static
     {
-        if let NodePipelineState::Lambda { job_functor } = &mut self.common.node.pipeline_state {
+        if let NodeState::Lambda { job_functor } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));
         } else {
             unreachable!("Use other node execution context in lambda node: {}", self.common.node.name());
@@ -395,7 +398,7 @@ impl<'builder> ComputeNodeBuilder<'builder> {
     inject_common_node_builder_methods!(Srv, Uav);
 
     pub fn register_pipeline(&mut self, desc: ComputePipelineDesc) -> GraphPipelineHandle {
-        if let NodePipelineState::Compute { pipeline_handles, .. } = &mut self.common.node.pipeline_state {
+        if let NodeState::Compute { pipeline_handles, .. } = &mut self.common.node.pipeline_state {
             let cache_handle = self.common.pipeline_cache
                 .register_compute_pipeline(self.common.device, &desc)
                 .expect("Failed to register compute pipeline");
@@ -412,7 +415,7 @@ impl<'builder> ComputeNodeBuilder<'builder> {
     where
         F: FnOnce(&mut ComputeNodeExecutionContext) -> anyhow::Result<()> + 'static
     {
-        if let NodePipelineState::Compute { job_functor, .. } = &mut self.common.node.pipeline_state {
+        if let NodeState::Compute { job_functor, .. } = &mut self.common.node.pipeline_state {
             job_functor.replace(Box::new(node_job));
         } else {
             unreachable!("Use other node execution context in compute node: {}", self.common.node.name());

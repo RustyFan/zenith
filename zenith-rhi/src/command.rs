@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::Bound;
 use std::ops::RangeBounds;
+use std::sync::Arc;
 use ash::{vk};
 use bytemuck::NoUninit;
 use glam::Vec4;
@@ -26,7 +27,7 @@ pub struct CommandPool {
 impl CommandPool {
     pub fn new(
         name: &str,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         queue_family: u32,
         flags: vk::CommandPoolCreateFlags,
     ) -> Result<Self, vk::Result> {
@@ -40,7 +41,7 @@ impl CommandPool {
             pool,
             buffers: RefCell::new(Vec::new()),
             next_index: Cell::new(0),
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&pool, name);
         Ok(pool)
@@ -59,7 +60,7 @@ impl CommandPool {
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
 
-        let buffers = unsafe { self.device.allocate_command_buffers(&alloc_info)? };
+        let buffers = unsafe { self.device.handle().allocate_command_buffers(&alloc_info)? };
         let cmd = buffers[0];
 
         self.buffers.borrow_mut().push(cmd.clone());
@@ -68,7 +69,7 @@ impl CommandPool {
 
     pub fn reset(&self) -> Result<(), vk::Result> {
         self.next_index.set(0);
-        unsafe { self.device.reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty()) }
+        unsafe { self.device.handle().reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty()) }
     }
 
     pub fn handle(&self) -> vk::CommandPool {
@@ -88,7 +89,7 @@ impl DebuggableObject for CommandPool {
 impl Drop for CommandPool {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_command_pool(self.pool, None);
+            self.device.handle().destroy_command_pool(self.pool, None);
         }
     }
 }
@@ -310,8 +311,6 @@ impl<'a> DebuggableObject for CommandEncoder<'a> {
     }
 }
 
-/// An immediate encoder that can submit commands to a queue at any time and
-/// block on a fence until completion.
 pub struct ImmediateCommandEncoder<'a> {
     device: &'a RenderDevice,
     queue: Queue,
@@ -320,12 +319,12 @@ pub struct ImmediateCommandEncoder<'a> {
 }
 
 impl<'a> ImmediateCommandEncoder<'a> {
-    pub fn new(device: &'a RenderDevice, queue: Queue) -> Result<Self, vk::Result> {
+    pub fn new(device: &'a Arc<RenderDevice>, queue: Queue) -> Result<Self, vk::Result> {
         let pool = CommandPool::new("command_pool.immediate", device, queue.family_index(), vk::CommandPoolCreateFlags::empty())?;
         let fence = Fence::new("fence.immediate", device, false)?;
 
         Ok(Self {
-            device,
+            device: &*device,
             queue,
             pool,
             fence,

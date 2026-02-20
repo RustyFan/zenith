@@ -2,9 +2,9 @@
 
 use std::fmt::Debug;
 use ash::{vk};
-use zenith_core::log;
 use std::hash::{Hash, Hasher};
 use std::ops::RangeBounds;
+use std::sync::Arc;
 use ash::vk::Handle;
 use zenith_rhi_derive::DeviceObject;
 use crate::descriptor::{BindableResource, ResourceBinding};
@@ -156,7 +156,6 @@ impl Hash for BufferDesc {
     }
 }
 
-/// GPU buffer with memory allocation.
 #[DeviceObject]
 pub struct Buffer {
     desc: BufferDesc,
@@ -174,13 +173,10 @@ impl Debug for Buffer {
 }
 
 impl Buffer {
-    /// Create a new buffer from a descriptor.
     pub fn new(
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         desc: &BufferDesc,
     ) -> Result<Self, vk::Result> {
-        let memory_properties = device.memory_properties();
-        // Create buffer
         let buffer_info = vk::BufferCreateInfo::default()
             .size(desc.size)
             .usage(desc.usage)
@@ -188,32 +184,28 @@ impl Buffer {
 
         let buffer = unsafe { device.handle().create_buffer(&buffer_info, None)? };
 
-        // Get memory requirements
         let mem_requirements = unsafe { device.handle().get_buffer_memory_requirements(buffer) };
 
-        // Find suitable memory type
+        let memory_properties = device.memory_properties();
         let memory_type_index = find_memory_type(memory_properties, mem_requirements.memory_type_bits, desc.memory_flags)
             .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)?;
 
-        // Allocate memory
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(memory_type_index);
 
         let memory = unsafe { device.handle().allocate_memory(&alloc_info, None)? };
 
-        // Bind memory to buffer
         unsafe { device.handle().bind_buffer_memory(buffer, memory, 0)? };
-
-        log::trace!("Buffer [{}] created.", desc.name);
 
         let buf = Self {
             desc: desc.clone(),
             buffer,
             memory,
-            device: device.handle().clone(),
+            device: device.clone(),
         };
-        device.set_debug_name(&buf, &desc.name);
+        // TODO: hide this
+        set_debug_name_handle(&device.debug_utils, buf.buffer, vk::ObjectType::BUFFER, &desc.name);
         Ok(buf)
     }
 
@@ -228,10 +220,9 @@ impl Buffer {
 
     pub fn device_address(&self) -> vk::DeviceAddress {
         let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
-        unsafe { self.device.get_buffer_device_address(&info) }
+        unsafe { self.device.handle().get_buffer_device_address(&info) }
     }
 
-    /// Get the raw Vulkan buffer handle.
     pub fn handle(&self) -> vk::Buffer {
         self.buffer
     }
@@ -260,11 +251,9 @@ impl Buffer {
 impl Drop for Buffer {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_buffer(self.buffer, None);
-            self.device.free_memory(self.memory, None);
+            self.device.handle().destroy_buffer(self.buffer, None);
+            self.device.handle().free_memory(self.memory, None);
         }
-
-        log::trace!("Buffer [{}] destroyed.", self.desc.name);
     }
 }
 
@@ -308,14 +297,14 @@ impl<'a> BufferRange<'a> {
 
         // SAFETY: range is checked before constructing, and mapping is limited to `len`.
         unsafe {
-            let ptr = self.buffer.device.map_memory(
+            let ptr = self.buffer.device.handle().map_memory(
                 self.buffer.memory,
                 self.offset as vk::DeviceSize,
                 len as vk::DeviceSize,
                 vk::MemoryMapFlags::empty(),
             )?;
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-            self.buffer.device.unmap_memory(self.buffer.memory);
+            self.buffer.device.handle().unmap_memory(self.buffer.memory);
         }
 
         Ok(())

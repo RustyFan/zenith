@@ -13,6 +13,8 @@ profiling.workspace = true
 #puffin_http.workspace = true
 parking_lot.workspace = true
 
+itertools = "0.14.0"
+
 zenith-core = { path = "../zenith-core" }
 zenith-asset = { path = "../zenith-asset" }
 zenith-rhi = { path = "../zenith-rhi" }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use winit::window::Window;
 use zenith::{launch, App, Args, RenderableApp, RenderContext};
-use zenith::rhi::{RenderDevice, TextureState};
+use zenith::rhi::{BindlessPool, RenderDevice, TextureState};
 use zenith::renderer::TriangleRenderer;
 use zenith::rendergraph::RenderGraphBuilder;
 
@@ -18,12 +18,12 @@ impl App for TriangleApp {
 }
 
 impl RenderableApp for TriangleApp {
-    fn prepare(&mut self, render_device: &RenderDevice, _window: Arc<Window>) -> Result<(), anyhow::Error> {
+    fn prepare(&mut self, render_device: &Arc<RenderDevice>, _bindless_pool: &mut BindlessPool, _window: Arc<Window>) -> anyhow::Result<()> {
         self.triangle_renderer = Some(TriangleRenderer::new(render_device)?);
         Ok(())
     }
 
-    fn render(&mut self, builder: &mut RenderGraphBuilder<'_>, context: RenderContext<'_>) {
+    fn render(&mut self, builder: &mut RenderGraphBuilder, context: RenderContext) {
         let extent = context.extent();
         if extent.width == 0 || extent.height == 0 {
             return;

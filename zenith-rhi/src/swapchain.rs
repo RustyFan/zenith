@@ -109,7 +109,7 @@ pub struct Swapchain {
 
 impl Drop for Swapchain {
     fn drop(&mut self) {
-        unsafe { self.device.device_wait_idle().unwrap(); }
+        self.device.wait_until_idle().unwrap();
         self.clean_up_render_resources();
 
         unsafe {
@@ -123,7 +123,7 @@ impl Swapchain {
     pub fn new(
         name: &str,
         core: &RhiCore,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         window: SwapchainWindow,
         config: SwapchainConfig,
     ) -> Result<Self> {
@@ -168,7 +168,7 @@ impl Swapchain {
         let mut textures = Vec::with_capacity(images.len());
 
         for (idx, image) in images.iter().enumerate() {
-            let texture = Texture::from_swapchain_image(
+            let texture = Texture::from_swapchain(
                 device,
                 format!("swapchain.backbuffer.f{idx}"),
                 image.clone(),
@@ -195,7 +195,7 @@ impl Swapchain {
             in_flight_fences,
             current_frame: 0,
             present_mode,
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&swapchain, name);
 
@@ -270,7 +270,7 @@ impl Swapchain {
         }
     }
 
-    pub fn resize(&mut self, device: &RenderDevice, extent: vk::Extent2D) -> Result<()> {
+    pub fn resize(&mut self, device: &Arc<RenderDevice>, extent: vk::Extent2D) -> Result<()> {
         if self.extent == extent {
             return Ok(());
         }
@@ -303,7 +303,7 @@ impl Swapchain {
         let mut textures = Vec::with_capacity(images.len());
 
         for (idx, image) in images.iter().enumerate() {
-            let texture = Texture::from_swapchain_image(
+            let texture = Texture::from_swapchain(
                 &device,
                 format!("swapchain.backbuffer.f{idx}"),
                 image.clone(),
@@ -468,7 +468,7 @@ fn get_swapchain_extent(
 }
 
 fn create_sync_objects(
-    device: &RenderDevice,
+    device: &Arc<RenderDevice>,
     count: usize,
 ) -> Result<(Vec<Semaphore>, Vec<Semaphore>, Vec<Fence>), vk::Result> {
     let mut image_available = Vec::with_capacity(count);

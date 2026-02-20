@@ -1,19 +1,16 @@
 //! Vulkan Device - logical device and queue management.
 
 use crate::core::PhysicalDevice;
-use crate::defer_release::{DeferRelease, DeferReleaseQueue};
-use crate::resource_cache::TransientResourceCache;
 use crate::queue::Queue;
 use crate::synchronization::{Fence, Semaphore};
-use ash::{vk, Device, Instance};
-use std::cell::RefCell;
+use ash::{vk, Device};
 use std::sync::Arc;
 use parking_lot::Mutex;
 #[cfg(debug_assertions)]
 use std::ffi::CString;
 use std::default::Default;
 use zenith_core::collections::{SmallVec, hashset::HashSet};
-use crate::CommandEncoder;
+use crate::{CommandEncoder, RhiCore};
 use crate::bindless::BindlessCaps;
 
 #[cfg(debug_assertions)]
@@ -70,12 +67,7 @@ fn get_required_device_extensions() -> Vec<*const i8> {
     extensions
 }
 
-/// Vulkan logical device with queues.
 pub struct RenderDevice {
-    resource_caches: Vec<TransientResourceCache>,
-    defer_release_queues: RefCell<Vec<DeferReleaseQueue>>,
-    frame_resource_fences: Vec<Fence>,
-
     device: Device,
     parent_physical_device: PhysicalDevice,
     #[cfg(debug_assertions)]
@@ -83,9 +75,9 @@ pub struct RenderDevice {
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
 
-    current_frame: u8,
+    num_frames: u8,
+    current_frame: Mutex<u8>,
     bindless_caps: BindlessCaps,
-    bindless_pool: Option<Arc<Mutex<crate::BindlessPool>>>,
 }
 
 impl DebuggableObject for RenderDevice {
@@ -95,13 +87,11 @@ impl DebuggableObject for RenderDevice {
 }
 
 impl RenderDevice {
-    /// Create a new logical device from a physical device.
     pub fn new(
-        instance: &Instance,
+        core: &RhiCore,
         physical_device: &PhysicalDevice,
         num_frames: u32,
-    ) -> Result<Self, vk::Result> {
-        // Collect unique queue families
+    ) -> Result<Arc<Self>, vk::Result> {
         let unique_families: HashSet<u32> = [physical_device.graphics_queue_family(), physical_device.present_queue_family()]
             .into_iter()
             .collect();
@@ -123,7 +113,7 @@ impl RenderDevice {
         let mut desc_index_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
         let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut desc_index_features);
         unsafe {
-            instance.get_physical_device_features2(physical_device.handle(), &mut features2);
+            core.instance().get_physical_device_features2(physical_device.handle(), &mut features2);
         }
 
         let has_bindless =
@@ -140,7 +130,7 @@ impl RenderDevice {
         let mut desc_index_props = vk::PhysicalDeviceDescriptorIndexingProperties::default();
         let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut desc_index_props);
         unsafe {
-            instance.get_physical_device_properties2(physical_device.handle(), &mut props2);
+            core.instance().get_physical_device_properties2(physical_device.handle(), &mut props2);
         }
 
         // Clamp to the 29-bit index range used by BindlessResourceHandle.
@@ -195,47 +185,40 @@ impl RenderDevice {
             .push_next(&mut vulkan_12_features)
             .push_next(&mut vulkan_13_features);
 
-        let device = unsafe { instance.create_device(physical_device.handle(), &create_info, None)? };
+        let device = unsafe { core.instance().create_device(physical_device.handle(), &create_info, None)? };
         #[cfg(debug_assertions)]
-        let debug_utils = ash::ext::debug_utils::Device::new(instance, &device);
+        let debug_utils = ash::ext::debug_utils::Device::new(core.instance(), &device);
 
         let graphics_queue = unsafe { device.get_device_queue(physical_device.graphics_queue_family(), 0) };
         let present_queue = unsafe { device.get_device_queue(physical_device.present_queue_family(), 0) };
-        
-        let resource_caches: Vec<TransientResourceCache> =
-            (0..num_frames as usize).map(|_| TransientResourceCache::default()).collect();
 
-        let mut device = Self {
+        let device = Self {
             parent_physical_device: physical_device.clone(),
             device,
             #[cfg(debug_assertions)]
             debug_utils,
             graphics_queue,
             present_queue,
-            frame_resource_fences: Vec::with_capacity(num_frames as usize),
-            defer_release_queues: RefCell::new(Vec::with_capacity(num_frames as usize)),
-            resource_caches,
-            current_frame: 0,
+            num_frames: num_frames as u8,
+            current_frame: Mutex::new(0),
             bindless_caps,
-            bindless_pool: None,
         };
-        device.set_debug_name(&device, "device.main");
+        // device.set_debug_name(&device, "device.main");
 
-        // Initialize the bindless pool now that we have a complete device
-        let bindless_pool = Arc::new(Mutex::new(crate::BindlessPool::new(&device)?));
-        device.bindless_pool = Some(bindless_pool);
-
-        for _ in 0..num_frames {
-            device.frame_resource_fences.push(Fence::new("fence.execution", &device, true)?);
-            device.defer_release_queues.borrow_mut().push(
-                DeferReleaseQueue::new()
-            );
-        }
-
-        Ok(device)
+        Ok(Arc::new(device))
     }
 
-    /// Get a reference to the logical device.
+    #[inline]
+    pub fn begin_frame(&self) -> usize {
+        *self.current_frame.lock() as _
+    }
+
+    #[inline]
+    pub fn end_frame(&self) {
+        let mut current_frame = self.current_frame.lock();
+        *current_frame = (*current_frame + 1u8) % self.num_frames;
+    }
+
     #[inline]
     pub fn handle(&self) -> &Device { &self.device }
 
@@ -247,98 +230,16 @@ impl RenderDevice {
         let _ = (obj, name);
     }
 
-    pub fn begin_frame(&mut self) -> usize {
-        // wait and reset until execution of current frame completes on GPU side
-        unsafe {
-            let fence = self.frame_resource_fences[self.current_frame as usize].handle();
-            self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
-            self.device.reset_fences(&[fence]).unwrap();
-        }
-        self.current_frame as _
-    }
+    #[inline]
+    pub fn current_frame_index(&self) -> usize { *self.current_frame.lock() as _ }
 
     #[inline]
-    pub fn reset_frame_resources(&self) {
-        self.defer_release_queues.borrow_mut()[self.current_frame as usize].release_all();
-    }
+    pub fn num_frames(&self) -> usize { self.num_frames as _ }
 
-    #[inline]
-    pub fn defer_release<T: DeferRelease>(&self, value: T) {
-        self.defer_release_queues.borrow_mut()[self.current_frame as usize].push(value);
-    }
-
-    #[inline]
-    pub fn last_defer_release_stats(&self) -> crate::LastFreedStats {
-        self.defer_release_queues.borrow()[self.current_frame as usize]
-            .last_freed()
-            .clone()
-    }
-
-    #[inline]
-    pub fn end_frame(&mut self) {
-        self.current_frame = (self.current_frame + 1) % (self.defer_release_queues.borrow().len() as u8);
-    }
-
-    #[inline]
-    pub fn current_frame_index(&self) -> usize { self.current_frame as _ }
-
-    #[inline]
-    pub fn num_frames(&self) -> usize { self.defer_release_queues.borrow().len() as _ }
-
-    pub fn acquire_buffer(&mut self, desc: &crate::BufferDesc) -> Result<crate::Buffer, vk::Result> {
-        let frame = self.current_frame as usize;
-        {
-            let cache = &mut self.resource_caches[frame];
-            if let Some(buf) = cache.pop_buffer(desc) {
-                return Ok(buf);
-            }
-        }
-        crate::Buffer::new(self, desc)
-    }
-
-    #[inline]
-    pub fn recycle_buffer(&mut self, desc: crate::BufferDesc, buffer: crate::Buffer) {
-        let frame = self.current_frame as usize;
-        self.resource_caches[frame].recycle_buffer(desc, buffer);
-    }
-
-    pub fn acquire_texture(&mut self, desc: &crate::TextureDesc) -> Result<crate::Texture, vk::Result> {
-        let frame = self.current_frame as usize;
-        {
-            let cache = &mut self.resource_caches[frame];
-            if let Some(tex) = cache.pop_texture(desc) {
-                return Ok(tex);
-            }
-        }
-        crate::Texture::new(self, desc)
-    }
-
-    #[inline]
-    pub fn recycle_texture(&mut self, desc: crate::TextureDesc, texture: crate::Texture) {
-        let frame = self.current_frame as usize;
-        self.resource_caches[frame].recycle_texture(desc, texture);
-    }
-
-    #[inline]
-    pub fn resource_cache(&self) -> &TransientResourceCache {
-        &self.resource_caches[self.current_frame as usize]
-    }
-
-    #[inline]
-    pub fn resource_cache_mut(&mut self) -> &mut TransientResourceCache {
-        &mut self.resource_caches[self.current_frame as usize]
-    }
-
-    pub fn frame_resource_fence(&self) -> &Fence {
-        &self.frame_resource_fences[self.current_frame as usize]
-    }
-
-    /// Get the physical device properties.
     pub fn properties(&self) -> &vk::PhysicalDeviceProperties {
         &self.parent_physical_device.properties()
     }
 
-    /// Get the physical device memory properties.
     pub fn memory_properties(&self) -> &vk::PhysicalDeviceMemoryProperties {
         &self.parent_physical_device.memory_properties()
     }
@@ -346,10 +247,6 @@ impl RenderDevice {
     #[inline]
     pub fn bindless_caps(&self) -> &BindlessCaps {
         &self.bindless_caps
-    }
-
-    pub fn bindless_pool(&self) -> &Arc<Mutex<crate::BindlessPool>> {
-        self.bindless_pool.as_ref().expect("Bindless pool not initialized")
     }
 
     pub fn graphics_queue(&self) -> Queue {
@@ -414,20 +311,8 @@ impl RenderDevice {
 
 impl Drop for RenderDevice {
     fn drop(&mut self) {
-        unsafe { self.device.device_wait_idle().unwrap(); }
+        self.wait_until_idle().unwrap();
 
-        for queue in self.defer_release_queues.get_mut() {
-            queue.release_all();
-        }
-        // Cached resources may still hold Buffers/Textures that require `Device` to destroy.
-        for cache in &mut self.resource_caches {
-            cache.clear();
-        }
-        self.resource_caches.clear();
-        self.frame_resource_fences.clear();
-
-        self.bindless_pool = None;
-        
         unsafe {
             self.device.destroy_device(None);
         }
@@ -439,7 +324,7 @@ pub(crate) mod sealed {
 }
 
 pub trait DeviceObject: sealed::Sealed {
-    fn device(&self) -> &Device;
+    fn device(&self) -> &Arc<RenderDevice>;
 }
 
 pub(crate) trait DebuggableObject {

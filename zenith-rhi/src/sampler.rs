@@ -2,6 +2,7 @@
 
 use ash::{vk};
 use zenith_rhi_derive::DeviceObject;
+use std::sync::Arc;
 use crate::{RenderDevice};
 use crate::descriptor::{BindableResource, ResourceBinding};
 use crate::device::DebuggableObject;
@@ -89,8 +90,7 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    /// Create a new sampler with the given configuration.
-    pub fn new(device: &RenderDevice, desc: &SamplerDesc) -> Result<Self, vk::Result> {
+    pub fn new(device: &Arc<RenderDevice>, desc: &SamplerDesc) -> Result<Self, vk::Result> {
         let create_info = vk::SamplerCreateInfo::default()
             .mag_filter(desc.mag_filter)
             .min_filter(desc.min_filter)
@@ -113,7 +113,7 @@ impl Sampler {
         Ok(Self {
             desc: desc.clone(),
             sampler,
-            device: device.handle().clone(),
+            device: device.clone(),
         })
     }
 
@@ -134,7 +134,7 @@ impl Sampler {
 impl Drop for Sampler {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_sampler(self.sampler, None);
+            self.device.handle().destroy_sampler(self.sampler, None);
         }
     }
 }

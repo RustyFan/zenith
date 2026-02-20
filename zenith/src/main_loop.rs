@@ -55,9 +55,9 @@ impl<A: RenderableApp> ApplicationHandler for EngineLoop<A> {
                 .unwrap(),
         );
 
-        let engine = Engine::new(main_window.clone()).unwrap();
+        let mut engine = Engine::new(main_window.clone()).unwrap();
 
-        self.app.prepare(&engine.render_device, main_window.clone()).unwrap();
+        self.app.prepare(&engine.render_device, &mut engine.bindless_pool, main_window.clone()).unwrap();
         self.engine = Some(engine);
 
         main_window.request_redraw();
@@ -153,14 +153,13 @@ impl<A: RenderableApp> EngineLoop<A> {
         if last_time_print_elapsed > 1. {
             let fps: u32 = (self.frame_count as f32 / last_time_print_elapsed).ceil() as u32;
             let engine = self.engine.as_ref().unwrap();
-            let stats = engine.render_device.last_defer_release_stats();
             info!(
                 "Frame rate: {} fps, pipelines: {}, deferred: {}b/{}t/{}p",
                 fps,
                 engine.pipeline_cache_size(),
-                stats.buffer_count,
-                stats.texture_count,
-                stats.pool_count,
+                engine.defer_release_queue().buffer_count(),
+                engine.defer_release_queue().texture_count(),
+                engine.defer_release_queue().pool_count(),
             );
             self.fps_timer.reset();
             self.frame_count = 0;

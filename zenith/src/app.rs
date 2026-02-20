@@ -2,37 +2,37 @@ use std::sync::Arc;
 use winit::event::{DeviceEvent, WindowEvent};
 use winit::window::Window;
 use zenith_core::cli::EngineArgs;
-use zenith_rhi::{RenderDevice, Swapchain, Texture, vk};
+use zenith_rhi::{RenderDevice, Swapchain, Texture, vk, BindlessPool};
 use zenith_rendergraph::{RenderGraphBuilder};
 
 pub trait App: Sized + 'static {
     fn new(args: &EngineArgs) -> anyhow::Result<Self>;
-    fn on_window_event(&mut self, _event: &WindowEvent, _window: &Window) {}
-    fn on_device_event(&mut self, _event: &DeviceEvent) {}
-    fn tick(&mut self, _delta_time: f32) {}
+    #[allow(unused)]
+    fn on_window_event(&mut self, event: &WindowEvent, window: &Window) {}
+    #[allow(unused)]
+    fn on_device_event(&mut self, event: &DeviceEvent) {}
+    #[allow(unused)]
+    fn tick(&mut self, delta_time: f32) {}
 }
 
 pub struct RenderContext<'a> {
-    device: &'a RenderDevice,
+    pub bindless_pool: &'a mut BindlessPool,
     swapchain: &'a Swapchain,
     frame_index: usize,
 }
 
 impl<'a> RenderContext<'a> {
     pub fn new(
-        device: &'a RenderDevice,
+        bindless_pool: &'a mut BindlessPool,
         swapchain: &'a Swapchain,
         frame_index: usize,
     ) -> Self {
         Self {
-            device,
+            bindless_pool,
             swapchain,
             frame_index,
         }
     }
-
-    #[inline]
-    pub fn device(&self) -> &RenderDevice { self.device }
 
     #[inline]
     pub fn swapchain_texture(&self) -> Arc<Texture> { self.swapchain.swapchain_texture(self.frame_index).clone() }
@@ -45,7 +45,9 @@ impl<'a> RenderContext<'a> {
 }
 
 pub trait RenderableApp: App {
-    fn prepare(&mut self, _render_device: &RenderDevice, _window: Arc<Window>) -> anyhow::Result<()> { Ok(()) }
-    fn resize(&mut self, _width: u32, _height: u32) {}
-    fn render(&mut self, builder: &mut RenderGraphBuilder<'_>, context: RenderContext<'_>);
+    #[allow(unused)]
+    fn prepare(&mut self, render_device: &Arc<RenderDevice>, bindless_pool: &mut BindlessPool, window: Arc<Window>) -> anyhow::Result<()> { Ok(()) }
+    #[allow(unused)]
+    fn resize(&mut self, width: u32, height: u32) {}
+    fn render<'a>(&mut self, builder: &mut RenderGraphBuilder, context: RenderContext<'a>);
 }

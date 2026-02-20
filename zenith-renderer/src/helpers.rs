@@ -19,7 +19,7 @@ pub struct DefaultRenderResources {
 }
 
 impl DefaultRenderResources {
-    pub fn new(device: &RenderDevice) -> anyhow::Result<Self> {
+    pub fn new(device: &Arc<RenderDevice>) -> anyhow::Result<Self> {
         let screen_vertices = get_screen_vertices();
         let screen_indices = get_screen_indices();
 

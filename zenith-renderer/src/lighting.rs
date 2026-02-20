@@ -22,7 +22,7 @@ pub struct DirectLightingRenderer {
 }
 
 impl DirectLightingRenderer {
-    pub fn new(device: &RenderDevice, width: u32, height: u32) -> anyhow::Result<Self> {
+    pub fn new(device: &Arc<RenderDevice>, width: u32, height: u32) -> anyhow::Result<Self> {
         let lighting_fragment_shader = Arc::new(Shader::from_file(
             "shader.lighting.ps",
             device,
@@ -82,7 +82,7 @@ impl DirectLightingRenderer {
         self.height = height;
     }
 
-    pub fn set_skybox(&mut self, device: &RenderDevice, texture_asset: &zenith_asset::texture::Texture) -> anyhow::Result<()> {
+    pub fn set_skybox(&mut self, device: &Arc<RenderDevice>, texture_asset: &zenith_asset::texture::Texture) -> anyhow::Result<()> {
         // Create GPU cubemap texture
         let gpu_texture = Texture::new(
             device,
@@ -115,6 +115,7 @@ impl DirectLightingRenderer {
     pub fn render(
         &self,
         builder: &mut RenderGraphBuilder,
+        bindless_pool: &mut BindlessPool,
         scene_texture: SceneTextures,
         view: &RenderGraphResource<Buffer>,
         output: &mut RenderGraphResource<Texture>,
@@ -160,15 +161,15 @@ impl DirectLightingRenderer {
 
         let width = self.width;
         let height = self.height;
+        let bindless_set = bindless_pool.set();
         node.execute(move |ctx| {
             if let Some(pipeline) = ctx.bind_pipeline(pipeline_handle) {
-                pipeline.bind_raw(BindlessPool::SET_INDEX, &[ctx.device().bindless_pool().lock().set()], &[])
+                pipeline.bind_raw(BindlessPool::SET_INDEX, &[bindless_set], &[])
                     .bind("view", view)?
                     .bind("base_color_tex", gbuffer_base)?
                     .bind("normal_mra_tex", gbuffer_nmr)?
                     .bind("depth_tex", scene_depth)?
-                    .bind("skybox_cubemap", skybox_handle)?
-                    .finish();
+                    .bind("skybox_cubemap", skybox_handle)?;
 
                 ctx.begin_rendering(
                     (width, height),

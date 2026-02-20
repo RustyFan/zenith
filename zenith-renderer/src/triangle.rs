@@ -22,7 +22,7 @@ pub struct TriangleRenderer {
 }
 
 impl TriangleRenderer {
-    pub fn new(device: &RenderDevice) -> anyhow::Result<Self> {
+    pub fn new(device: &Arc<RenderDevice>) -> anyhow::Result<Self> {
         let vertices = [
             Vertex { position: [0.0, 0.5, 0.0], color: [1.0, 0.0, 0.0] },
             Vertex { position: [-0.5, -0.5, 0.0], color: [0.0, 1.0, 0.0] },
@@ -110,9 +110,8 @@ impl TriangleRenderer {
                     .as_range(..)
                     .write(bytemuck::bytes_of(&elapsed))
                     .map_err(|e| anyhow!("Failed to write time buffer: {e:?}"))?;
-                
-                pipe.bind("time", tb)?
-                    .finish();
+
+                pipe.bind("time", tb)?;
 
                 ctx.begin_rendering(
                     (width, height),
@@ -126,7 +125,7 @@ impl TriangleRenderer {
 
                 ctx.end_rendering();
             }
-            
+
             Ok(())
         });
     }

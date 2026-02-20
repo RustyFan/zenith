@@ -2,7 +2,7 @@
 
 use ash::vk;
 use std::fmt;
-
+use std::sync::Arc;
 use crate::{
     Buffer, BufferDesc, BufferState, ImmediateCommandEncoder, RenderDevice,
     BufferBarrier, PipelineStage, PipelineStages,
@@ -118,7 +118,7 @@ impl<'a> UploadPool<'a> {
         }
     }
 
-    fn start_new_batch(&mut self, device: &RenderDevice, required_size: vk::DeviceSize) -> Result<(), UploadError> {
+    fn start_new_batch(&mut self, device: &Arc<RenderDevice>, required_size: vk::DeviceSize) -> Result<(), UploadError> {
         if let Some(batch) = self.current.take() {
             if !batch.pending.is_empty() || !batch.pending_textures.is_empty() {
                 self.batches.push(batch);
@@ -162,7 +162,7 @@ impl<'a> UploadPool<'a> {
 
     pub fn enqueue_copy_buffer(
         &mut self,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         dst: BufferRange<'a>,
         data: &[u8],
         final_state: BufferState,
@@ -201,7 +201,7 @@ impl<'a> UploadPool<'a> {
 
     pub fn enqueue_upload_texture(
         &mut self,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         dst: TextureRange<'a>,
         data: &[u8],
         final_state: TextureState,
@@ -412,38 +412,6 @@ impl<'a> UploadPool<'a> {
 
         self.write_head = 0;
         Ok(())
-    }
-
-    /// Convenience: enqueue then flush (blocking).
-    pub fn upload_buffer(
-        &mut self,
-        device: &RenderDevice,
-        immediate: &ImmediateCommandEncoder,
-        dst: BufferRange<'a>,
-        data: &[u8],
-        final_state: BufferState,
-    ) -> Result<(), UploadError> {
-        if self.enqueue_copy_buffer(device, dst, data, final_state).is_err() {
-            self.flush(immediate, device)?;
-            self.enqueue_copy_buffer(device, dst, data, final_state)?;
-        }
-        self.flush(immediate, device)
-    }
-
-    /// Convenience: enqueue then flush (blocking).
-    pub fn upload_texture(
-        &mut self,
-        device: &RenderDevice,
-        immediate: &ImmediateCommandEncoder,
-        dst: TextureRange<'a>,
-        data: &[u8],
-        final_state: TextureState,
-    ) -> Result<(), UploadError> {
-        if self.enqueue_upload_texture(device, dst, data, final_state).is_err() {
-            self.flush(immediate, device)?;
-            self.enqueue_upload_texture(device, dst, data, final_state)?;
-        }
-        self.flush(immediate, device)
     }
 }
 

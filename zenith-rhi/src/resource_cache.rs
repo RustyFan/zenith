@@ -1,5 +1,6 @@
 use crate::{vk, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Default)]
 pub struct TransientResourceCache {
@@ -20,7 +21,7 @@ impl TransientResourceCache {
 
     pub fn acquire_buffer(
         &mut self,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         desc: &BufferDesc,
     ) -> Result<Buffer, vk::Result> {
         if let Some(buf) = self.pop_buffer(desc) {
@@ -35,7 +36,7 @@ impl TransientResourceCache {
 
     pub fn acquire_texture(
         &mut self,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         desc: &TextureDesc,
     ) -> Result<Texture, vk::Result> {
         if let Some(tex) = self.pop_texture(desc) {

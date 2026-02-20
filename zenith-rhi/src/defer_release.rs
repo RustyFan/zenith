@@ -1,11 +1,12 @@
-﻿use crate::{Buffer, DescriptorPool, Texture};
+﻿use std::cell::RefCell;
+use crate::{Buffer, DescriptorPool, Texture};
 
 pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
 pub trait DeferRelease: sealed::Sealed {
-    fn enqueue(self, q: &mut DeferReleaseQueue);
+    fn enqueue(self, defer_release: &DeferReleaseQueue);
 }
 
 impl sealed::Sealed for Buffer {}
@@ -14,42 +15,30 @@ impl sealed::Sealed for DescriptorPool {}
 
 impl DeferRelease for Buffer {
     #[inline]
-    fn enqueue(self, q: &mut DeferReleaseQueue) {
-        q.add_buffer(self)
+    fn enqueue(self, defer_release: &DeferReleaseQueue) {
+        defer_release.add_buffer(self)
     }
 }
 
 impl DeferRelease for Texture {
     #[inline]
-    fn enqueue(self, q: &mut DeferReleaseQueue) {
-        q.add_texture(self)
+    fn enqueue(self, defer_release: &DeferReleaseQueue) {
+        defer_release.add_texture(self)
     }
 }
 
 impl DeferRelease for DescriptorPool {
     #[inline]
-    fn enqueue(self, q: &mut DeferReleaseQueue) {
-        q.add_pool(self)
+    fn enqueue(self, defer_release: &DeferReleaseQueue) {
+        defer_release.add_pool(self)
     }
 }
 
-#[derive(Default, Clone, Debug)]
-pub struct LastFreedStats {
-    pub buffer_count: usize,
-    pub texture_count: usize,
-    pub pool_count: usize,
-    pub total_count: usize,
-
-    pub buffer_names: Vec<String>,
-    pub texture_names: Vec<String>,
-    pub pool_names: Vec<String>,
-}
 
 pub struct DeferReleaseQueue {
-    buffers: Vec<Buffer>,
-    textures: Vec<Texture>,
-    pools: Vec<DescriptorPool>,
-    last_freed: LastFreedStats,
+    buffers: RefCell<Vec<Buffer>>,
+    textures: RefCell<Vec<Texture>>,
+    pools: RefCell<Vec<DescriptorPool>>,
 }
 
 impl DeferReleaseQueue {
@@ -58,56 +47,43 @@ impl DeferReleaseQueue {
             buffers: Default::default(),
             textures: Default::default(),
             pools: Default::default(),
-            last_freed: LastFreedStats::default(),
         }
     }
 
-    pub fn add_buffer(&mut self, buffer: Buffer) { 
-        self.buffers.push(buffer); 
-    }
-
-    pub fn add_texture(&mut self, texture: Texture) {
-        self.textures.push(texture);
-    }
-
-    pub fn add_pool(&mut self, pool: DescriptorPool) {
-        self.pools.push(pool);
-    }
-
-    pub(crate) fn push<T: DeferRelease>(&mut self, value: T) {
+    pub fn defer_release<T: DeferRelease>(&self, value: T) {
         value.enqueue(self)
     }
 
-    pub fn release_all(&mut self) {
-        // Update last freed stats before actual drops.
-        self.last_freed.buffer_count = self.buffers.len();
-        self.last_freed.texture_count = self.textures.len();
-        self.last_freed.pool_count = self.pools.len();
-        self.last_freed.total_count =
-            self.last_freed.buffer_count + self.last_freed.texture_count + self.last_freed.pool_count;
-
-        self.last_freed.buffer_names = self.buffers.iter().map(|b| b.name().to_owned()).collect();
-        self.last_freed.texture_names = self.textures.iter().map(|t| t.name().to_owned()).collect();
-        self.last_freed.pool_names = self.pools.iter().map(|p| p.name().to_owned()).collect();
-
-        self.buffers.clear();
-        self.textures.clear();
-        self.pools.clear();
+    pub fn release_all(&self) {
+        self.buffers.borrow_mut().clear();
+        self.textures.borrow_mut().clear();
+        self.pools.borrow_mut().clear();
     }
 
-    pub fn last_freed(&self) -> &LastFreedStats {
-        &self.last_freed
-    }
-
+    #[inline]
     pub fn buffer_count(&self) -> usize {
-        self.buffers.len()
+        self.buffers.borrow().len()
     }
 
+    #[inline]
     pub fn texture_count(&self) -> usize {
-        self.textures.len()
+        self.textures.borrow().len()
     }
-    
+
+    #[inline]
     pub fn pool_count(&self) -> usize {
-        self.pools.len()
+        self.pools.borrow().len()
+    }
+
+    pub(crate) fn add_buffer(&self, buffer: Buffer) {
+        self.buffers.borrow_mut().push(buffer);
+    }
+
+    pub(crate) fn add_texture(&self, texture: Texture) {
+        self.textures.borrow_mut().push(texture);
+    }
+
+    pub(crate) fn add_pool(&self, pool: DescriptorPool) {
+        self.pools.borrow_mut().push(pool);
     }
 }

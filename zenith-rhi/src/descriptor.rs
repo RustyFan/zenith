@@ -35,7 +35,7 @@ pub struct DescriptorSetLayout {
 impl DescriptorSetLayout {
     pub fn new(
         name: &str,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         bindings: &[LayoutBinding],
         layout_flags: vk::DescriptorSetLayoutCreateFlags,
     ) -> Result<Self, vk::Result> {
@@ -74,7 +74,7 @@ impl DescriptorSetLayout {
             layout,
             bindings: bindings.to_vec(),
             binding_map,
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&layout, name);
         Ok(layout)
@@ -83,7 +83,7 @@ impl DescriptorSetLayout {
     /// Create a descriptor set layout from shader reflection for a specific set index.
     pub fn from_reflection(
         name: &str,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         shader_bindings: &[ShaderBinding],
         set_index: u32,
     ) -> Result<Self, vk::Result> {
@@ -131,7 +131,7 @@ impl DescriptorSetLayout {
 impl Drop for DescriptorSetLayout {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_descriptor_set_layout(self.layout, None);
+            self.device.handle().destroy_descriptor_set_layout(self.layout, None);
         }
     }
 }
@@ -158,7 +158,7 @@ pub struct DescriptorPool {
 impl DescriptorPool {
     pub fn new(
         name: &str,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         max_sets: u32,
         sizes: &[vk::DescriptorPoolSize],
         flags: vk::DescriptorPoolCreateFlags,
@@ -174,7 +174,7 @@ impl DescriptorPool {
             name: name.to_owned(),
             pool,
             max_sets,
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&pool, name);
         Ok(pool)
@@ -189,13 +189,13 @@ impl DescriptorPool {
             .descriptor_pool(self.pool)
             .set_layouts(&layouts);
 
-        let sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info)? };
+        let sets = unsafe { self.device.handle().allocate_descriptor_sets(&alloc_info)? };
         Ok(sets[0])
     }
 
     #[inline]
     pub fn reset(&self) -> Result<(), vk::Result> {
-        unsafe { self.device.reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty()) }
+        unsafe { self.device.handle().reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty()) }
     }
 
     #[inline]
@@ -208,7 +208,7 @@ impl DescriptorPool {
 impl Drop for DescriptorPool {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_descriptor_pool(self.pool, None);
+            self.device.handle().destroy_descriptor_pool(self.pool, None);
         }
     }
 }
@@ -241,7 +241,7 @@ impl std::error::Error for DescriptorBindingError {}
 
 /// Shader resource binder that binds resources by name using shader reflection.
 pub struct DescriptorSetBinder<'a> {
-    device: &'a RenderDevice,
+    device: &'a Arc<RenderDevice>,
     reflection: &'a ShaderReflection,
     layouts: &'a [Arc<DescriptorSetLayout>],
     resource_ty_sizes: HashMap<vk::DescriptorType, u32>,
@@ -251,7 +251,7 @@ pub struct DescriptorSetBinder<'a> {
 
 impl<'a> DescriptorSetBinder<'a> {
     pub fn new(
-        device: &'a RenderDevice,
+        device: &'a Arc<RenderDevice>,
         reflection: &'a ShaderReflection,
         layouts: &'a [Arc<DescriptorSetLayout>],
     ) -> Self {
@@ -290,7 +290,7 @@ impl<'a> DescriptorSetBinder<'a> {
         Ok(self)
     }
 
-    pub fn finish(self, device: &RenderDevice) -> anyhow::Result<(u32, Vec<vk::DescriptorSet>), DescriptorBindingError> {
+    pub fn finish(self) -> anyhow::Result<(u32, DescriptorPool, Vec<vk::DescriptorSet>), DescriptorBindingError> {
          let pool_sizes = self.resource_ty_sizes.into_iter()
             .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
                 ty,
@@ -307,7 +307,6 @@ impl<'a> DescriptorSetBinder<'a> {
                 pool.allocate(layout).map_err(DescriptorBindingError::AllocationFailed)
             })
             .collect();
-        device.defer_release(pool);
         let sets = sets?;
 
         let writes = self.writer.write_to(base_set, &sets);
@@ -317,7 +316,7 @@ impl<'a> DescriptorSetBinder<'a> {
             }
         }
 
-        Ok((base_set, sets))
+        Ok((base_set, pool, sets))
     }
 }
 

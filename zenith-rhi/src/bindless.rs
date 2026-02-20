@@ -223,7 +223,7 @@ impl BindlessPool {
         bindings
     }
 
-    pub fn new(device: &RenderDevice) -> Result<Self, vk::Result> {
+    pub fn new(device: &Arc<RenderDevice>) -> Result<Self, vk::Result> {
         let caps = device.bindless_caps();
         let bindings = Self::descriptor_layout_bindings(caps);
         let set_layout = Arc::new(DescriptorSetLayout::new(

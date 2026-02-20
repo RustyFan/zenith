@@ -90,7 +90,7 @@ impl PipelineRegistry {
 
     pub fn register_graph_pipeline(
         &mut self,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         desc: &GraphicPipelineDesc,
     ) -> Result<PipelineHandle, vk::Result> {
         debug_assert!(self.pipeline_storages.len() < u32::MAX as _);
@@ -123,7 +123,7 @@ impl PipelineRegistry {
 
     pub fn register_compute_pipeline(
         &mut self,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         desc: &ComputePipelineDesc,
     ) -> Result<PipelineHandle, vk::Result> {
         debug_assert!(self.pipeline_storages.len() < u32::MAX as _);

@@ -7,8 +7,6 @@ use anyhow::anyhow;
 use winit::window::Window;
 use zenith_core::log;
 
-use crate::device::RenderDevice;
-use crate::NUM_BACK_BUFFERS;
 use crate::swapchain::SwapchainWindow;
 
 /// Validation layers to enable in debug builds.
@@ -62,7 +60,6 @@ pub struct RhiCore {
 }
 
 impl RhiCore {
-    /// Create a new Vulkan core with instance and physical device.
     #[profiling::function]
     pub fn new(window: &Window) -> Result<Self, anyhow::Error> {
         let entry = unsafe { Entry::load()? };
@@ -84,21 +81,12 @@ impl RhiCore {
         })
     }
 
-    /// Create a logical device from this core.
-    pub fn create_render_device(&self, physical_device: &PhysicalDevice) -> Result<RenderDevice, vk::Result> {
-        RenderDevice::new(
-            &self.instance,
-            physical_device,
-            NUM_BACK_BUFFERS,
-        )
-    }
-
-    /// Get the entry point.
+    #[inline]
     pub fn entry(&self) -> &Entry {
         &self.entry
     }
 
-    /// Get a reference to the Vulkan instance.
+    #[inline]
     pub fn instance(&self) -> &Instance {
         &self.instance
     }

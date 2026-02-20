@@ -96,7 +96,7 @@ impl GpuViewData {
 }
 
 impl WorldRenderer {
-    pub fn new(device: &RenderDevice, width: u32, height: u32) -> anyhow::Result<Self> {
+    pub fn new(device: &Arc<RenderDevice>, bindless_pool: &mut BindlessPool, width: u32, height: u32) -> anyhow::Result<Self> {
         let vertex_shader = Shader::from_file(
             "shader.defer_shading.vs",
             device,
@@ -116,12 +116,11 @@ impl WorldRenderer {
         let nearest_repeat = Arc::new(Sampler::new(device, &SamplerDesc::nearest())?);
         let nearest_clamp = Arc::new(Sampler::new(device, &SamplerDesc::nearest().with_address_mode(vk::SamplerAddressMode::CLAMP_TO_EDGE))?);
 
-        let mut pool = device.bindless_pool().lock();
-        pool.upload(&*linear_repeat)?;
-        pool.upload(&*linear_clamp)?;
-        pool.upload(&*nearest_repeat)?;
-        pool.upload(&*nearest_clamp)?;
-        pool.flush(device);
+        bindless_pool.upload(&*linear_repeat)?;
+        bindless_pool.upload(&*linear_clamp)?;
+        bindless_pool.upload(&*nearest_repeat)?;
+        bindless_pool.upload(&*nearest_clamp)?;
+        bindless_pool.flush(device);
 
         Ok(Self {
             vertex_shader: Arc::new(vertex_shader),
@@ -149,11 +148,11 @@ impl WorldRenderer {
         self.direct_lighting_renderer.resize(width, height);
     }
 
-    pub fn set_skybox(&mut self, device: &RenderDevice, skybox: &zenith_asset::texture::Texture) -> anyhow::Result<()> {
+    pub fn set_skybox(&mut self, device: &Arc<RenderDevice>, skybox: &zenith_asset::texture::Texture) -> anyhow::Result<()> {
         self.direct_lighting_renderer.set_skybox(device, skybox)
     }
 
-    pub fn add_scene(&mut self, device: &RenderDevice, scene: AssetHandle<Scene>) -> anyhow::Result<()> {
+    pub fn add_scene(&mut self, device: &Arc<RenderDevice>, bindless_pool: &mut BindlessPool, scene: AssetHandle<Scene>) -> anyhow::Result<()> {
         let collection = scene
             .get()
             .ok_or_else(|| anyhow!("MeshCollection not loaded/registered (call AssetManager::request_load first)"))?;
@@ -209,8 +208,6 @@ impl WorldRenderer {
                 .map(|url| AssetHandle::<Material>::new(url.clone()));
 
             if let Some(handle) = &handle {
-                let mut bindless_pool = device.bindless_pool().lock();
-
                 let mat = handle.get()
                     .ok_or_else(|| anyhow!("Material not loaded: {:?}", handle.url().as_ref()))?;
 
@@ -376,6 +373,7 @@ impl WorldRenderer {
     pub fn render(
         &mut self,
         builder: &mut RenderGraphBuilder,
+        bindless_pool: &mut BindlessPool,
         camera: &Camera,
         output: &mut RenderGraphResource<Texture>,
     ) {
@@ -383,20 +381,21 @@ impl WorldRenderer {
             BufferDesc::uniform("view", size_of::<GpuViewData>() as _)
         );
 
-        let scene_textures = self.render_meshes(builder, camera, &view);
-        self.direct_lighting_renderer.render(builder, scene_textures, &view, output);
+        let scene_textures = self.render_meshes(builder, bindless_pool, camera, &view);
+        self.direct_lighting_renderer.render(builder, bindless_pool, scene_textures, &view, output);
     }
 
     fn render_meshes(
         &mut self,
         builder: &mut RenderGraphBuilder,
+        bindless_pool: &mut BindlessPool,
         camera: &Camera,
         view: &RenderGraphResource<Buffer>,
     ) -> SceneTextures {
         let mut scene_textures = SceneTextures::new(builder, self.width, self.height);
 
         let pipeline_desc = GraphicPipelineDesc::new(
-            "gbuffer",
+            "mesh_rasterization",
             GraphicShaderInputBuilder::default()
                 .vertex_shader(self.vertex_shader.clone())
                 .fragment_shader(self.fragment_shader.clone())
@@ -442,6 +441,7 @@ impl WorldRenderer {
         let view_data = GpuViewData::from_view_data(&camera.view_data());
         let width = self.width;
         let height = self.height;
+        let bindless_set = bindless_pool.set();
         node.execute(move |ctx| {
             if let Some(pipe) = ctx.bind_pipeline(pipeline_handle) {
                 ctx.get(&view)
@@ -449,9 +449,8 @@ impl WorldRenderer {
                     .write(bytemuck::bytes_of(&view_data))
                     .map_err(|e| anyhow!("failed to write view buffer: {e:?}"))?;
 
-                pipe.bind_raw(BindlessPool::SET_INDEX, &[ctx.device().bindless_pool().lock().set()], &[])
-                    .bind("view", view)?
-                    .finish();
+                pipe.bind_raw(BindlessPool::SET_INDEX, &[bindless_set], &[])
+                    .bind("view", view)?;
 
                 ctx.begin_rendering(
                     (width, height),

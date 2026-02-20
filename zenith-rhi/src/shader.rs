@@ -6,6 +6,7 @@
 use ash::{vk, Device};
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::sync::Arc;
 use zenith_rhi_derive::DeviceObject;
 use crate::RenderDevice;
 use crate::device::DebuggableObject;
@@ -24,20 +25,12 @@ pub struct Shader {
 impl Shader {
     pub fn from_file(
         name: &str,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         path: impl AsRef<Path>,
         stage: ShaderStage,
     ) -> Result<Self, ShaderError> {
         let path = path.as_ref();
-        Self::from_slang_file(name, device, path, stage)
-    }
 
-    pub fn from_slang_file(
-        name: &str,
-        device: &RenderDevice,
-        path: &Path,
-        stage: ShaderStage,
-    ) -> Result<Self, ShaderError> {
         #[cfg(debug_assertions)]
         let debug = true;
         #[cfg(not(debug_assertions))]
@@ -52,9 +45,10 @@ impl Shader {
             stage,
             entry_point: CString::new("main").unwrap(),
             reflection,
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&shader, name);
+
         Ok(shader)
     }
 
@@ -99,7 +93,7 @@ impl DebuggableObject for Shader {
 impl Drop for Shader {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_shader_module(self.module, None);
+            self.device.handle().destroy_shader_module(self.module, None);
         }
     }
 }

@@ -24,8 +24,8 @@ pub struct Pipeline {
 impl Drop for Pipeline {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_pipeline_layout(self.layout, None);
-            self.device.destroy_pipeline(self.handle, None);
+            self.device.handle().destroy_pipeline_layout(self.layout, None);
+            self.device.handle().destroy_pipeline(self.handle, None);
         }
     }
 }
@@ -968,7 +968,7 @@ pub struct GraphicPipeline {
 
 impl GraphicPipeline {
     pub fn new(
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         desc: &GraphicPipelineDesc,
         descriptor_layouts: &[Arc<DescriptorSetLayout>],
     ) -> Result<Self, vk::Result> {
@@ -1068,7 +1068,7 @@ impl GraphicPipeline {
             handle: pipelines[0],
             layout,
             descriptor_layouts: descriptor_layouts.to_owned(),
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&inner_pipe, &format!("graphic.{}", desc.name));
 
@@ -1174,7 +1174,7 @@ pub struct ComputePipeline {
 
 impl ComputePipeline {
     pub fn new(
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         desc: &ComputePipelineDesc,
         descriptor_layouts: &[Arc<DescriptorSetLayout>],
     ) -> Result<Self, vk::Result> {
@@ -1212,7 +1212,7 @@ impl ComputePipeline {
             handle: pipelines[0],
             layout,
             descriptor_layouts: descriptor_layouts.to_owned(),
-            device: device.handle().clone(),
+            device: device.clone(),
         };
         device.set_debug_name(&inner_pipe, &format!("compute.{}", desc.name));
 

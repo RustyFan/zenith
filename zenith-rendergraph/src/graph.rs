@@ -1,18 +1,15 @@
 //! Render graph execution and resource management.
 
 use crate::interface::{Buffer, BufferDesc, BufferState, ResourceState, Texture, TextureDesc, TextureState};
-use crate::node::{NodePipelineState, RenderGraphNode};
+use crate::node::{NodeState, RenderGraphNode};
 use crate::resource::{GraphBindable, GraphResource, GraphResourceId, GraphResourceState, GraphResourceView, InitialResourceStorage, RenderGraphResourceAccess, Rt, Srv};
-use std::cell::Cell;
+use std::cell::{Cell};
 use std::sync::{Arc};
 use bytemuck::NoUninit;
-use parking_lot::Mutex;
 use zenith_core::collections::SmallVec;
 use zenith_core::color;
-use zenith_rhi::{vk, RenderDevice, Swapchain, BindlessPool, CommandEncoder, BufferBarrier, TextureBarrier,
-                 PipelineStages, ShaderReflection, CommandPool, TextureLayout,
-                 ColorAttachmentDesc, DepthStencilAttachmentDesc,
-                 DescriptorBindingError, DescriptorSetBinder, PipelineRegistry, PipelineHandle};
+use zenith_rhi::{vk, RenderDevice, Swapchain, CommandEncoder, BufferBarrier, TextureBarrier, PipelineStages, ShaderReflection, CommandPool, TextureLayout, ColorAttachmentDesc, DepthStencilAttachmentDesc, DescriptorBindingError, DescriptorSetBinder, PipelineRegistry, PipelineHandle, TransientResourceCache, Fence};
+use zenith_rhi::defer_release::DeferReleaseQueue;
 use crate::node::GraphPipelineHandle;
 
 pub enum ResourceStorage {
@@ -103,17 +100,16 @@ impl RenderGraph {
     #[profiling::function]
     pub fn compile(
         mut self,
-        device: &mut RenderDevice,
-        _pipeline_cache: &mut PipelineRegistry,
+        device: &Arc<RenderDevice>,
+        resource_cache: &mut TransientResourceCache,
     ) -> CompiledRenderGraph {
-        // Create resources from initial resource descriptors
         let resources: Vec<ResourceStorage> = self.initial_resources
             .into_iter()
             .map(|res| {
                 match res {
                     InitialResourceStorage::ManagedBuffer(desc) => {
-                        let resource = device
-                            .acquire_buffer(&desc)
+                        let resource = resource_cache
+                            .acquire_buffer(device, &desc)
                             .expect("Failed to create buffer");
                         ResourceStorage::ManagedBuffer {
                             desc,
@@ -122,8 +118,8 @@ impl RenderGraph {
                         }
                     }
                     InitialResourceStorage::ManagedTexture(desc) => {
-                        let resource = device
-                            .acquire_texture(&desc)
+                        let resource = resource_cache
+                            .acquire_texture(device, &desc)
                             .expect("Failed to create texture");
                         ResourceStorage::ManagedTexture {
                             desc,
@@ -143,7 +139,6 @@ impl RenderGraph {
             })
             .collect();
 
-        // Validate nodes
         for node in &mut self.nodes {
             if !node.pipeline_state.valid() {
                 log::warn!("Incomplete information for render graph node [{}]. Skipped.", node.name);
@@ -176,14 +171,12 @@ impl RenderGraph {
             (self.nodes, vec![])
         };
 
-        let serial_nodes_count = serial_nodes.len();
-
-        // Pipeline handles were registered at build time in node.register_pipeline(); collect them per node.
         let node_pipeline_handles: Vec<Vec<PipelineHandle>> = serial_nodes.iter()
             .chain(present_nodes.iter())
             .map(|node| node.pipeline_state.pipeline_handles().to_vec())
             .collect();
 
+        let serial_nodes_count = serial_nodes.len();
         CompiledRenderGraph {
             serial_nodes,
             present_nodes,
@@ -206,14 +199,14 @@ pub struct CompiledRenderGraph {
 
 impl CompiledRenderGraph {
     #[profiling::function]
-    pub fn execute(&mut self, device: &RenderDevice, cmd_pool: &CommandPool, pipeline_cache: &PipelineRegistry) -> anyhow::Result<()>  {
+    pub fn execute(&mut self, device: &Arc<RenderDevice>, cmd_pool: &CommandPool, pipeline_cache: &PipelineRegistry, defer_release: &DeferReleaseQueue, fence: &Fence) -> anyhow::Result<()>  {
         let encoder = CommandEncoder::new("cmd.rendergraph.execute", device, cmd_pool)?;
 
         encoder.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
         encoder.begin_debug_label("render_graph::execution", color::LIGHT_GREEN);
 
         let nodes = std::mem::take(&mut self.serial_nodes);
-        self.record_nodes(device, &encoder, pipeline_cache, nodes, 0);
+        self.record_nodes(device, &encoder, pipeline_cache, defer_release, nodes, 0);
 
         encoder.end_debug_label();
         encoder.end()?;
@@ -225,13 +218,13 @@ impl CompiledRenderGraph {
             vk::PipelineStageFlags2::NONE,
             &[],
             vk::PipelineStageFlags2::NONE,
-            device.frame_resource_fence(),
+            fence,
         );
 
         Ok(())
     }
 
-    pub fn present(mut self, device: &mut RenderDevice, cmd_pool: &CommandPool, pipeline_cache: &PipelineRegistry, swapchain: &mut Swapchain, image_index: u32) -> anyhow::Result<RetiredRenderGraph> {
+    pub fn present(mut self, device: &Arc<RenderDevice>, cmd_pool: &CommandPool, pipeline_cache: &PipelineRegistry, defer_release: &DeferReleaseQueue, swapchain: &mut Swapchain, image_index: u32) -> anyhow::Result<RetiredRenderGraph> {
         cmd_pool.reset()?;
 
         // update the swapchain texture reference to the acquired image
@@ -250,7 +243,7 @@ impl CompiledRenderGraph {
 
         let nodes = std::mem::take(&mut self.present_nodes);
         let serial_nodes_count = self.serial_nodes_count;
-        self.record_nodes(device, &encoder, pipeline_cache, nodes, serial_nodes_count);
+        self.record_nodes(device, &encoder, pipeline_cache, defer_release, nodes, serial_nodes_count);
 
         // make sure the swapchain texture has the right image layout for presentation
         Self::transition_resources(
@@ -282,9 +275,10 @@ impl CompiledRenderGraph {
 
     fn record_nodes(
         &mut self,
-        device: &RenderDevice,
+        device: &Arc<RenderDevice>,
         encoder: &CommandEncoder,
         pipeline_cache: &PipelineRegistry,
+        defer_release: &DeferReleaseQueue,
         nodes: Vec<RenderGraphNode>,
         node_start_index: usize,
     ) {
@@ -304,7 +298,7 @@ impl CompiledRenderGraph {
             };
 
             match node.pipeline_state {
-                NodePipelineState::Graphic { ref pipeline_handles, mut job_functor } => {
+                NodeState::Graphic { ref pipeline_handles, mut job_functor } => {
                     let reflections: Vec<&ShaderReflection> = pipeline_handles.iter()
                         .filter_map(|h| pipeline_cache.try_get_pipeline(*h).map(|e| e.shader_reflection()))
                         .collect();
@@ -324,6 +318,7 @@ impl CompiledRenderGraph {
                             binding_ctx: NodeBindingContext {
                                 resources: &self.resources,
                                 device,
+                                defer_release,
                                 encoder,
                                 pipeline_handles,
                                 pipeline_cache,
@@ -336,7 +331,7 @@ impl CompiledRenderGraph {
                         log::warn!("Missing job of graphic node {}!", name);
                     }
                 }
-                NodePipelineState::Compute { ref pipeline_handles, mut job_functor } => {
+                NodeState::Compute { ref pipeline_handles, mut job_functor } => {
                     let reflections: Vec<&ShaderReflection> = pipeline_handles.iter()
                         .filter_map(|h| pipeline_cache.try_get_pipeline(*h).map(|e| e.shader_reflection()))
                         .collect();
@@ -356,6 +351,7 @@ impl CompiledRenderGraph {
                             binding_ctx: NodeBindingContext {
                                 resources: &self.resources,
                                 device,
+                                defer_release,
                                 encoder,
                                 pipeline_handles,
                                 pipeline_cache,
@@ -368,7 +364,7 @@ impl CompiledRenderGraph {
                         log::warn!("Missing job of compute node {}!", name);
                     }
                 }
-                NodePipelineState::Lambda { mut job_functor } => {
+                NodeState::Lambda { mut job_functor } => {
                     transition_resources(None);
 
                     let name = node.name;
@@ -381,6 +377,7 @@ impl CompiledRenderGraph {
                             binding_ctx: NodeBindingContext {
                                 resources: &self.resources,
                                 device,
+                                defer_release,
                                 encoder,
                                 pipeline_handles: &[],
                                 pipeline_cache,
@@ -584,7 +581,7 @@ fn shader_stage_to_pipeline_stage(stage_flags: vk::ShaderStageFlags) -> vk::Pipe
 }
 
 pub struct PipelineResourceBinder<'a> {
-    device: &'a RenderDevice,
+    defer_release: &'a DeferReleaseQueue,
     encoder: &'a CommandEncoder<'a>,
     binding_ctx: &'a NodeBindingContext<'a>,
     binder: Option<DescriptorSetBinder<'a>>,
@@ -593,9 +590,7 @@ pub struct PipelineResourceBinder<'a> {
 }
 
 impl<'a> Drop for PipelineResourceBinder<'a> {
-    fn drop(&mut self) {
-        self.finish_impl();
-    }
+    fn drop(&mut self) { self.finish_impl(); }
 }
 
 impl<'a> PipelineResourceBinder<'a> {
@@ -606,10 +601,6 @@ impl<'a> PipelineResourceBinder<'a> {
     ) -> Result<Self, DescriptorBindingError> {
         self.binder.as_mut().unwrap().bind(name, &access.into_bindable(self.binding_ctx))?;
         Ok(self)
-    }
-
-    pub fn finish(mut self) {
-        self.finish_impl();
     }
 
     pub fn bind_raw(
@@ -630,7 +621,8 @@ impl<'a> PipelineResourceBinder<'a> {
 
     fn finish_impl(&mut self) {
         if let Some(binder) = self.binder.take() {
-            let (base_set, sets) = binder.finish(self.device).unwrap();
+            let (base_set, pool, sets) = binder.finish().unwrap();
+            self.defer_release.defer_release(pool);
             self.encoder.bind_descriptor_sets(
                 self.bind_point,
                 self.layout.clone(),
@@ -736,7 +728,8 @@ impl DepthStencilAttachment {
 
 pub struct NodeBindingContext<'node> {
     pub(crate) resources: &'node Vec<ResourceStorage>,
-    pub(crate) device: &'node RenderDevice,
+    pub(crate) device: &'node Arc<RenderDevice>,
+    pub(crate) defer_release: &'node DeferReleaseQueue,
     pub(crate) encoder: &'node CommandEncoder<'node>,
     pub(crate) pipeline_handles: &'node [PipelineHandle],
     pub(crate) pipeline_cache: &'node PipelineRegistry,
@@ -765,7 +758,6 @@ impl<'node> NodeBindingContext<'node> {
         }
     }
 
-    /// Bind a pipeline by graph-scoped handle. Returns None if the pipeline is not found in the cache.
     pub fn bind_pipeline(&self, handle: GraphPipelineHandle) -> Option<PipelineResourceBinder<'_>> {
         let cache_handle = *self.pipeline_handles.get(handle.0 as usize)?;
         let entry = self.pipeline_cache.try_get_pipeline(cache_handle)?;
@@ -779,7 +771,7 @@ impl<'node> NodeBindingContext<'node> {
         self.encoder.bind_pipeline(entry.bind_point(), entry.handle());
 
         Some(PipelineResourceBinder {
-            device: self.device,
+            defer_release: self.defer_release,
             encoder: self.encoder,
             binding_ctx: self,
             binder: Some(binder),
@@ -827,7 +819,6 @@ impl<'node> GraphicNodeExecutionContext<'node> {
     #[inline]
     pub fn encoder(&self) -> &CommandEncoder<'node> { self.encoder }
 
-    /// Bind a pipeline by graph-scoped handle. Returns None if the pipeline is not found in the cache.
     #[inline]
     pub fn bind_pipeline(&self, handle: GraphPipelineHandle) -> Option<PipelineResourceBinder<'_>> {
         self.binding_ctx.bind_pipeline(handle)
@@ -941,9 +932,6 @@ impl<'node> LambdaNodeExecutionContext<'node> {
 
     #[inline]
     pub fn command_encoder(&self) -> &CommandEncoder<'node> { self.encoder }
-
-    #[inline]
-    pub fn bindless_pool(&self) -> &Arc<Mutex<BindlessPool>> { self.device.bindless_pool() }
 }
 
 pub struct ComputeNodeExecutionContext<'node> {
@@ -964,7 +952,6 @@ impl<'node> ComputeNodeExecutionContext<'node> {
     #[inline]
     pub fn encoder(&self) -> &CommandEncoder<'node> { self.encoder }
 
-    /// Bind a pipeline by graph-scoped handle. Returns None if the pipeline is not found in the cache.
     #[inline]
     pub fn bind_pipeline(&self, handle: GraphPipelineHandle) -> Option<PipelineResourceBinder<'_>> {
         self.binding_ctx.bind_pipeline(handle)
@@ -985,14 +972,14 @@ pub struct RetiredRenderGraph {
 }
 
 impl RetiredRenderGraph {
-    pub fn release_frame_resources(self, device: &mut RenderDevice) {
+    pub fn release_frame_resources(self, resource_cache: &mut TransientResourceCache) {
         for resource in self.resources.into_iter() {
             match resource {
                 ResourceStorage::ManagedBuffer { desc, resource, .. } => {
-                    device.recycle_buffer(desc, resource);
+                    resource_cache.recycle_buffer(desc, resource);
                 }
                 ResourceStorage::ManagedTexture { desc, resource, .. } => {
-                    device.recycle_texture(desc, resource);
+                    resource_cache.recycle_texture(desc, resource);
                 }
                 _ => {}
             }

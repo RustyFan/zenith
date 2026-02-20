@@ -20,7 +20,7 @@ pub fn DeviceObject(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let syn::Fields::Named(fields_named) = &mut output_struct.fields else {
         return syn::Error::new(
             output_struct.span(),
-            "DeviceObject only supports structs with named fields",
+            "DeviceObject: only supports structs with named fields",
         )
         .to_compile_error()
         .into();
@@ -30,19 +30,17 @@ pub fn DeviceObject(_attr: TokenStream, item: TokenStream) -> TokenStream {
     if fields_named.named.iter().any(|f| f.ident.as_ref().is_some_and(|id| id == "device")) {
         return syn::Error::new(
             fields_named.span(),
-            "DeviceObject: struct already has a `device` field; remove it and let the macro inject `pub(crate) device: ash::Device`",
+            "DeviceObject: struct already has a `device` field; remove it and let the macro inject `pub(crate) device: Arc<RenderDevice>`",
         )
         .to_compile_error()
         .into();
     }
 
-    // Inject: `pub(crate) device: ::ash::Device`
     let device_field: syn::Field = syn::parse_quote! {
-        pub(crate) device: ::ash::Device
+        pub(crate) device: Arc<RenderDevice>
     };
     fields_named.named.push(device_field);
 
-    // Generate sealed + DeviceObject impls (crate-local paths).
     let expanded = quote! {
         #output_struct
 
@@ -50,7 +48,7 @@ pub fn DeviceObject(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         impl #impl_generics crate::device::DeviceObject for #ident #ty_generics #where_clause {
             #[inline]
-            fn device(&self) -> &::ash::Device { &self.device }
+            fn device(&self) -> &Arc<RenderDevice> { &self.device }
         }
     };
 

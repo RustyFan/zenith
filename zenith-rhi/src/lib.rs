@@ -17,7 +17,7 @@ pub mod swapchain;
 pub mod texture;
 pub mod upload;
 pub mod queue;
-mod defer_release;
+pub mod defer_release;
 mod barrier;
 mod synchronization;
 mod utility;
@@ -25,7 +25,7 @@ pub mod bindless;
 
 pub(crate) use paste::paste;
 
-pub(crate) const NUM_BACK_BUFFERS: u32 = 3;
+pub const NUM_BACK_BUFFERS: u32 = 3;
 
 pub use memoffset;
 pub use zenith_rhi_derive::VertexLayout;
@@ -68,7 +68,7 @@ pub use barrier::{
 pub use synchronization::{Semaphore, Fence};
 pub use upload::UploadPool;
 
-pub use defer_release::{DeferRelease, LastFreedStats};
+pub use defer_release::{DeferRelease};
 
 pub use bindless::{
     BindlessCaps, BindlessPool, BindlessHandle, ResourceType,

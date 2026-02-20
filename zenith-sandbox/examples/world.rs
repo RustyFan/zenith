@@ -6,7 +6,7 @@ use winit::window::Window;
 use winit::keyboard::KeyCode;
 
 use zenith::{launch, App, Args, RenderableApp, RenderContext};
-use zenith::rhi::TextureState;
+use zenith::rhi::{BindlessPool, RenderDevice, TextureState};
 use zenith::renderer::WorldRenderer;
 use zenith::asset::manager::AssetRequestor;
 use zenith::asset::{AssetHandle, AssetLoadRequestBuilder};
@@ -64,7 +64,7 @@ impl App for WorldApp {
 }
 
 impl RenderableApp for WorldApp {
-    fn prepare(&mut self, render_device: &zenith::rhi::RenderDevice, window: Arc<Window>) -> Result<(), anyhow::Error> {
+    fn prepare(&mut self, render_device: &Arc<RenderDevice>, bindless_pool: &mut BindlessPool, window: Arc<Window>) -> anyhow::Result<()> {
         let mut prepare_timer = Timer::new();
         prepare_timer.start();
 
@@ -99,14 +99,14 @@ impl RenderableApp for WorldApp {
 
         let mut renderer_new_timer = Timer::new();
         renderer_new_timer.start();
-        let mut renderer = WorldRenderer::new(render_device, size.width, size.height)?;
+        let mut renderer = WorldRenderer::new(render_device, bindless_pool, size.width, size.height)?;
         renderer_new_timer.stop();
         let renderer_new_ms = renderer_new_timer.elapsed_total::<Milliseconds>().value();
 
         let collection = AssetHandle::<Scene>::new(PathBuf::from("mesh/cerberus/scene.scene").into());
         let mut upload_timer = Timer::new();
         upload_timer.start();
-        renderer.add_scene(render_device, collection)?;
+        renderer.add_scene(render_device, bindless_pool, collection)?;
 
         let skybox_handle = AssetHandle::<zenith::asset::texture::Texture>::new(
             PathBuf::from("texture/minedump_flats_4k.tex").into()
@@ -140,7 +140,7 @@ impl RenderableApp for WorldApp {
         self.world_renderer.as_mut().unwrap().resize(width, height);
     }
 
-    fn render(&mut self, builder: &mut RenderGraphBuilder<'_>, context: RenderContext<'_>) {
+    fn render<'a>(&mut self, builder: &mut RenderGraphBuilder, context: RenderContext<'a>) {
         let extent = context.extent();
         if extent.width == 0 || extent.height == 0 {
             return;
@@ -152,7 +152,7 @@ impl RenderableApp for WorldApp {
         self.world_renderer
             .as_mut()
             .unwrap()
-            .render(builder, &self.camera, &mut output);
+            .render(builder, context.bindless_pool, &self.camera, &mut output);
     }
 }
 
