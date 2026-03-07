@@ -13,6 +13,7 @@ glam = { workspace = true }
 profiling = { workspace = true }
 ash = { workspace = true }
 
+rayon = "1.10"
 ispc-texcomp = "0.1.20"
 zstd = "0.13.3"
 half = "2.7.1"

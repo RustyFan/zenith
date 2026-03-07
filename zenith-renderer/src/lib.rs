@@ -3,6 +3,7 @@ mod triangle;
 mod world;
 mod lighting;
 mod helpers;
+mod ibl;
 
 use std::sync::{Arc, OnceLock};
 use parking_lot::Mutex;
@@ -10,7 +11,7 @@ use zenith_rhi::RenderDevice;
 use crate::helpers::DefaultRenderResources;
 
 pub use triangle::TriangleRenderer;
-pub use world::WorldRenderer;
+pub use world::{WorldRenderer, DebugMode};
 
 static DEFAULT_RENDER_RESOURCES: OnceLock<Mutex<Option<DefaultRenderResources>>> = OnceLock::new();
 

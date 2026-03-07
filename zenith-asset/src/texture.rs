@@ -63,6 +63,18 @@ impl TextureFormat {
         }
     }
 
+    pub fn mip_chain_size_bytes(&self, base_width: u32, base_height: u32, mip_levels: u32) -> usize {
+        let mut total = 0usize;
+        let mut w = base_width;
+        let mut h = base_height;
+        for _ in 0..mip_levels {
+            total += self.data_size_in_bytes(w, h);
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+        }
+        total
+    }
+
     pub fn to_vk(&self) -> ash::vk::Format {
         match self {
             TextureFormat::R8 => ash::vk::Format::R8_UNORM,
@@ -93,6 +105,8 @@ pub struct Texture {
     pub pixels: Vec<u8>,
     #[builder(default)]
     pub is_cubemap: bool,
+    #[builder(default = "1")]
+    pub mip_levels: u32,
 }
 
 impl Asset for Texture {

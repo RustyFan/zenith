@@ -38,8 +38,8 @@ impl TriangleRenderer {
 
         {
             let mut upload_pool = UploadPool::new()?;
-            upload_pool.enqueue_copy_buffer(device, vertex_buffer.as_range(..), vertex_data, BufferState::Vertex)?;
-            upload_pool.enqueue_copy_buffer(device, index_buffer.as_range(..), index_data, BufferState::Index)?;
+            upload_pool.enqueue_buffer_copy(device, vertex_buffer.as_range(..), vertex_data, BufferState::Vertex)?;
+            upload_pool.enqueue_buffer_copy(device, index_buffer.as_range(..), index_data, BufferState::Index)?;
 
             let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
             upload_pool.flush(&immediate, device)?;
@@ -84,7 +84,7 @@ impl TriangleRenderer {
                 .vertex_layout::<Vertex>()
                 .build().unwrap(),
             GraphicPipelineStateBuilder::default()
-                .rasterization(RasterizationStateBuilder::default().cull_mode(vk::CullModeFlags::NONE).build().unwrap())
+                .rasterization(RasterizationStateBuilder::default().no_culling().build().unwrap())
                 .build().unwrap(),
             GraphicPipelineAttachmentsBuilder::default()
                 .color_no_blending(output.desc(builder).format)

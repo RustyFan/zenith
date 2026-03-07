@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use enumflags2::{make_bitflags, BitFlag};
 use glam::Vec3;
 use winit::event::{DeviceEvent, WindowEvent};
 use winit::window::Window;
@@ -7,7 +8,7 @@ use winit::keyboard::KeyCode;
 
 use zenith::{launch, App, Args, RenderableApp, RenderContext};
 use zenith::rhi::{BindlessPool, RenderDevice, TextureState};
-use zenith::renderer::WorldRenderer;
+use zenith::renderer::{DebugMode, WorldRenderer};
 use zenith::asset::manager::AssetRequestor;
 use zenith::asset::{AssetHandle, AssetLoadRequestBuilder};
 use zenith::asset::mesh::Scene;
@@ -60,6 +61,19 @@ impl App for WorldApp {
             up,
             std::iter::once(&mut self.camera),
         );
+
+        if self.input.is_action_just_pressed("toggle_diffuse_sh") {
+            if let Some(ref mut renderer) = self.world_renderer {
+                static mut TOGGLE: bool = false;
+
+                let toggle = unsafe { TOGGLE = !TOGGLE; TOGGLE };
+                if toggle {
+                    renderer.set_debug_mode(make_bitflags!(DebugMode::DiffuseSH));
+                } else {
+                    renderer.set_debug_mode(DebugMode::empty());
+                }
+            }
+        }
     }
 }
 
@@ -71,6 +85,7 @@ impl RenderableApp for WorldApp {
         self.input.register_axis("walk", [KeyCode::KeyW], [KeyCode::KeyS], 0.2);
         self.input.register_axis("strafe", [KeyCode::KeyD], [KeyCode::KeyA], 0.2);
         self.input.register_axis("lift", [KeyCode::KeyE], [KeyCode::KeyQ], 0.2);
+        self.input.register_action("toggle_diffuse_sh", [KeyCode::KeyM]);
 
         let size = window.inner_size();
         let aspect = if size.height == 0 {
@@ -103,10 +118,10 @@ impl RenderableApp for WorldApp {
         renderer_new_timer.stop();
         let renderer_new_ms = renderer_new_timer.elapsed_total::<Milliseconds>().value();
 
-        let collection = AssetHandle::<Scene>::new(PathBuf::from("mesh/cerberus/scene.scene").into());
+        let scene = AssetHandle::<Scene>::new(PathBuf::from("mesh/cerberus/scene.scene").into());
         let mut upload_timer = Timer::new();
         upload_timer.start();
-        renderer.add_scene(render_device, bindless_pool, collection)?;
+        renderer.add_scene(render_device, bindless_pool, scene)?;
 
         let skybox_handle = AssetHandle::<zenith::asset::texture::Texture>::new(
             PathBuf::from("texture/minedump_flats_4k.tex").into()

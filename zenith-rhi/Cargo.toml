@@ -9,22 +9,20 @@ edition = "2024"
 shader_debug_print = []
 
 [dependencies]
-ash = { workspace = true }
+ash = { version = "0.38", features = ["std", "debug", "loaded"] }
+ash-window = "0.13"
+raw-window-handle = "0.6"
+memoffset = "0.9.1"
+enumflags2 = { workspace = true }
 winit = { workspace = true }
 anyhow = { workspace = true }
 profiling = { workspace = true }
 derive_builder = { workspace = true }
-paste = { workspace = true }
-parking_lot = { workspace = true }
-glam = { workspace = true }
-bytemuck = { workspace = true }
-
-shader-slang = { git = "https://github.com/FloatyMonkey/slang-rs" }
-
-memoffset = "0.9"
-ash-window = "0.13"
-raw-window-handle = "0.6"
-enumflags2 = "0.7"
+paste.workspace = true
+parking_lot.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
 
 zenith-core = { path = "../zenith-core" }
 zenith-rhi-derive = { path = "../zenith-rhi-derive" }
+shader-slang = { git = "https://github.com/FloatyMonkey/slang-rs" }

@@ -31,7 +31,7 @@ pub fn flush_all_memory_writes<'a>() -> vk::MemoryBarrier2<'a> {
 }
 
 #[enumflags2::bitflags]
-#[repr(u64)]
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PipelineStage {
     Host = 1 << 0,
@@ -491,10 +491,10 @@ impl<'a> TextureBarrier<'a> {
             .image(self.texture.texture().handle())
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: self.texture.texture().aspect(),
-                base_mip_level: 0,
-                level_count: vk::REMAINING_MIP_LEVELS,
-                base_array_layer: 0,
-                layer_count: vk::REMAINING_ARRAY_LAYERS,
+                base_mip_level: self.texture.subresource().base_mip,
+                level_count: self.texture.subresource().num_mips,
+                base_array_layer: self.texture.subresource().base_layer,
+                layer_count: self.texture.subresource().num_layers,
             })
     }
 }

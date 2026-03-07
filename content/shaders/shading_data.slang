@@ -34,7 +34,7 @@ struct ShadingData {
         return data;
     }
 
-    void export_to_gbuffer(out float4 gbuffer_basecolor, out float4 gbuffer_normal_mra) {
+    func export_to_gbuffer(out float4 gbuffer_basecolor, out float4 gbuffer_normal_mra) {
         gbuffer_basecolor = float4(basecolor, 1.0);
         gbuffer_normal_mra = encode_normal_mra(normal, metallic, roughness);
     }

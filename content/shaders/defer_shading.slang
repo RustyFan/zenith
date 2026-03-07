@@ -40,7 +40,6 @@ VSOutput main(VSInput input) {
     VSOutput output;
     const float4 world_pos = mul(constant.model, float4(input.position, 1.0));
     output.position = mul(view.view_proj, world_pos);
-    // Keep `normal` as a live vertex input for reflection/layout, without affecting output.
     output.psout.uv = input.tex_coord;
     output.psout.normal = input.normal;
     return output;

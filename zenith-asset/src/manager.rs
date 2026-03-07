@@ -18,7 +18,7 @@ pub struct AssetRequestor {
 
 /// Bump this when asset structs (Scene, Mesh, Material, Texture, AssetUrl) or bincode layout change
 /// so existing baked caches are invalidated and re-baked.
-const CACHE_VERSION: &str = "a1b2c3d4-5e6f-42c7-b4c4-daed2c7d3952";
+const CACHE_VERSION: &str = "18797930-6c96-4c99-8b8d-dd74b85299a3";
 const CACHE_VERSION_FILE: &str = ".cache_version";
 
 #[derive(Debug, Clone, Copy)]

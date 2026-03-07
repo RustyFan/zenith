@@ -36,8 +36,8 @@ impl DefaultRenderResources {
             let vertex_data = bytemuck::cast_slice(&screen_vertices);
             let index_data = bytemuck::cast_slice(&screen_indices);
             let mut upload_pool = UploadPool::new()?;
-            upload_pool.enqueue_copy_buffer(device, screen_vb.as_range(..), vertex_data, BufferState::Vertex)?;
-            upload_pool.enqueue_copy_buffer(device, screen_ib.as_range(..), index_data, BufferState::Index)?;
+            upload_pool.enqueue_buffer_copy(device, screen_vb.as_range(..), vertex_data, BufferState::Vertex)?;
+            upload_pool.enqueue_buffer_copy(device, screen_ib.as_range(..), index_data, BufferState::Index)?;
 
             let immediate = ImmediateCommandEncoder::new(device, device.graphics_queue())?;
             upload_pool.flush(&immediate, device)?;
@@ -147,5 +147,5 @@ pub fn get_screen_vertices() -> [ScreenVertex; 4] {
 }
 
 pub fn get_screen_indices() -> [u16; 6] {
-    [0, 1, 2, 1, 2, 3]
+    [0, 2, 1, 2, 3, 1]
 }

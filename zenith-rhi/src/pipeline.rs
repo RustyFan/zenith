@@ -702,6 +702,18 @@ impl RasterizationState {
     }
 }
 
+impl RasterizationStateBuilder {
+    pub fn no_culling(&mut self) -> &mut Self {
+        self.cull_mode.replace(vk::CullModeFlags::NONE);
+        self
+    }
+
+    pub fn cull_front_face(&mut self) -> &mut Self {
+        self.cull_mode.replace(vk::CullModeFlags::FRONT);
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Builder)]
 #[builder(setter(into))]
 pub struct MultisampleState {

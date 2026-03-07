@@ -141,13 +141,19 @@ impl RenderDevice {
         // Bindless set uses part of it; reserve some for other sets (e.g. material/camera bindings).
         const RESERVE_PER_STAGE_SAMPLED: u32 = 32;
         let max_per_stage_sampled = desc_index_props.max_per_stage_descriptor_update_after_bind_sampled_images;
+        let max_per_stage_ub = desc_index_props.max_per_stage_descriptor_update_after_bind_uniform_buffers;
+        let max_per_stage_sb = desc_index_props.max_per_stage_descriptor_update_after_bind_storage_buffers;
         let max_textures_capped = clamp29(desc_index_props.max_descriptor_set_update_after_bind_sampled_images)
             .min(max_per_stage_sampled.saturating_sub(RESERVE_PER_STAGE_SAMPLED));
+        let max_ub_capped = clamp29(desc_index_props.max_descriptor_set_update_after_bind_uniform_buffers)
+            .min(max_per_stage_ub.saturating_sub(RESERVE_PER_STAGE_SAMPLED));
+        let max_sb_capped = clamp29(desc_index_props.max_descriptor_set_update_after_bind_storage_buffers)
+            .min(max_per_stage_sb.saturating_sub(RESERVE_PER_STAGE_SAMPLED));
 
         let bindless_caps = BindlessCaps {
             max_textures: max_textures_capped,
-            max_uniform_buffers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_uniform_buffers),
-            max_storage_buffers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_storage_buffers),
+            max_uniform_buffers: max_ub_capped,
+            max_storage_buffers: max_sb_capped,
             max_samplers: clamp29(desc_index_props.max_descriptor_set_update_after_bind_samplers),
         };
 

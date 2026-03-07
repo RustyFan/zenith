@@ -62,60 +62,17 @@ pub struct UploadPool<'a> {
 impl<'a> UploadPool<'a> {
     pub const POOL_SIZE_IN_BYTES: u64 = 1024 * 16;
 
-    fn map_vk_error(result: vk::Result) -> UploadError {
-        match result {
-            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => UploadError::OutOfDeviceMemory,
-            vk::Result::ERROR_VALIDATION_FAILED_EXT => UploadError::ValidationFailed,
-            _ => UploadError::BackendFailure,
-        }
-    }
-    fn align_up(value: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::DeviceSize {
-        if alignment <= 1 {
-            return value;
-        }
-        (value + alignment - 1) / alignment * alignment
+    pub fn new() -> Result<Self, UploadError> {
+        Self::new_sized(Self::POOL_SIZE_IN_BYTES)
     }
 
-    fn texture_block_size(format: vk::Format) -> vk::DeviceSize {
-        match format {
-            vk::Format::BC5_UNORM_BLOCK
-            | vk::Format::BC7_UNORM_BLOCK
-            | vk::Format::BC7_SRGB_BLOCK => 16,
-            _ => 1,
-        }
-    }
-
-    /// Size in bytes of one array layer (one face for cubemap) for buffer-to-image copy.
-    fn texture_layer_size_bytes(extent: vk::Extent3D, format: vk::Format) -> vk::DeviceSize {
-        let (block_w, block_h, bytes_per_block) = match format {
-            vk::Format::BC5_UNORM_BLOCK
-            | vk::Format::BC6H_UFLOAT_BLOCK
-            | vk::Format::BC6H_SFLOAT_BLOCK
-            | vk::Format::BC7_UNORM_BLOCK
-            | vk::Format::BC7_SRGB_BLOCK => (4u32, 4, 16),
-            _ => (1, 1, Self::bytes_per_pixel(format)),
-        };
-        let blocks_x = (extent.width + block_w - 1) / block_w;
-        let blocks_y = (extent.height + block_h - 1) / block_h;
-        (blocks_x as vk::DeviceSize) * (blocks_y as vk::DeviceSize) * (bytes_per_block as vk::DeviceSize)
-    }
-
-    fn bytes_per_pixel(format: vk::Format) -> u32 {
-        use vk::Format;
-        match format {
-            Format::R8_UNORM | Format::R8_SNORM => 1,
-            Format::R8G8_UNORM | Format::R8G8_SNORM | Format::R16_UNORM | Format::R16_SFLOAT => 2,
-            Format::R8G8B8A8_UNORM
-            | Format::R8G8B8A8_SRGB
-            | Format::R32_SFLOAT
-            | Format::R16G16_UNORM
-            | Format::R16G16_SFLOAT => 4,
-            Format::R16G16B16A16_UNORM
-            | Format::R16G16B16A16_SFLOAT
-            | Format::R32G32_SFLOAT => 8,
-            Format::R32G32B32A32_SFLOAT => 16,
-            _ => 4, // fallback
-        }
+    pub fn new_sized(pool_size: u64) -> Result<Self, UploadError> {
+        Ok(Self {
+            default_size: pool_size,
+            write_head: 0,
+            current: None,
+            batches: Vec::new(),
+        })
     }
 
     fn start_new_batch(&mut self, device: &Arc<RenderDevice>, required_size: vk::DeviceSize) -> Result<(), UploadError> {
@@ -137,19 +94,6 @@ impl<'a> UploadPool<'a> {
         Ok(())
     }
 
-    pub fn new() -> Result<Self, UploadError> {
-        Self::new_sized(Self::POOL_SIZE_IN_BYTES)
-    }
-
-    pub fn new_sized(pool_size: u64) -> Result<Self, UploadError> {
-        Ok(Self {
-            default_size: pool_size,
-            write_head: 0,
-            current: None,
-            batches: Vec::new(),
-        })
-    }
-
     #[inline]
     pub fn staging_size(&self) -> vk::DeviceSize { self.default_size }
 
@@ -160,7 +104,7 @@ impl<'a> UploadPool<'a> {
             .unwrap_or(self.default_size)
     }
 
-    pub fn enqueue_copy_buffer(
+    pub fn enqueue_buffer_copy(
         &mut self,
         device: &Arc<RenderDevice>,
         dst: BufferRange<'a>,
@@ -199,14 +143,14 @@ impl<'a> UploadPool<'a> {
         Ok(())
     }
 
-    pub fn enqueue_upload_texture(
+    pub fn enqueue_texture_upload(
         &mut self,
         device: &Arc<RenderDevice>,
         dst: TextureRange<'a>,
         data: &[u8],
         final_state: TextureState,
     ) -> Result<(), UploadError> {
-        let block_size = Self::texture_block_size(dst.texture().format());
+        let (_, _, block_size) = Self::texture_format_block_info(dst.texture().format());
         let aligned_head = Self::align_up(self.write_head, block_size);
         if aligned_head != self.write_head {
             self.write_head = aligned_head;
@@ -217,6 +161,10 @@ impl<'a> UploadPool<'a> {
             return Ok(());
         }
         if block_size > 1 && size % block_size != 0 {
+            return Err(UploadError::ValidationFailed);
+        }
+        let expected_size = Self::texture_upload_size_bytes(&dst);
+        if size != expected_size {
             return Err(UploadError::ValidationFailed);
         }
 
@@ -265,10 +213,10 @@ impl<'a> UploadPool<'a> {
         
         let queue = device.graphics_queue();
         
-        let submit_batch = |staging: &Buffer, pending: Vec<PendingBufferCopy<'a>>, pending_textures: Vec<PendingTextureCopy<'a>>| -> Result<(), UploadError> {
+        let submit_batch = |staging: &Buffer, pending_buffers: Vec<PendingBufferCopy<'a>>, pending_textures: Vec<PendingTextureCopy<'a>>| -> Result<(), UploadError> {
             let staging_size = staging.size() as usize;
             let result = immediate.submit_and_wait(|encoder| {
-                let mut pre: Vec<BufferBarrier> = Vec::with_capacity(1 + pending.len());
+                let mut pre: Vec<BufferBarrier> = Vec::with_capacity(1 + pending_buffers.len());
                 // Staging: HOST_WRITE -> TRANSFER_READ (as TRANSFER_SRC)
                 pre.push(
                     BufferBarrier::new(
@@ -283,7 +231,7 @@ impl<'a> UploadPool<'a> {
                     .with_range(0, staging_size),
                 );
                 // Dst buffers: Undefined -> TransferDst
-                for p in pending.iter() {
+                for p in pending_buffers.iter() {
                     pre.push(BufferBarrier::new(
                         p.dst.buffer().as_range(..),
                         BufferState::Undefined,
@@ -315,7 +263,7 @@ impl<'a> UploadPool<'a> {
                 }
 
                 // Copies
-                for p in pending.iter() {
+                for p in pending_buffers.iter() {
                     let region = vk::BufferCopy::default()
                         .src_offset(p.src_offset)
                         .dst_offset(p.dst.offset() as vk::DeviceSize)
@@ -325,27 +273,38 @@ impl<'a> UploadPool<'a> {
 
                 for p in pending_textures.iter() {
                     let aspect = p.dst.texture().aspect();
-                    let extent = p.dst.texture().extent();
-                    let num_layers = p.dst.subresource().num_layers;
-                    let layer_size = Self::texture_layer_size_bytes(extent, p.dst.texture().format());
+                    let subresource = p.dst.subresource();
+                    let format = p.dst.texture().format();
+                    let base_extent = p.dst.texture().extent();
 
-                    let regions: Vec<vk::BufferImageCopy> = (0..num_layers)
-                        .map(|layer_idx| {
+                    let mut regions: Vec<vk::BufferImageCopy> = Vec::with_capacity(subresource.num_mips as usize);
+                    for mip_idx in 0..subresource.num_mips {
+                        let mip_level = subresource.base_mip + mip_idx;
+                        let mip_extent = Self::texture_mip_extent(base_extent, mip_level);
+                        let mip_offset = p.src_offset + Self::texture_mip_block_offset_bytes(
+                            base_extent,
+                            format,
+                            subresource.base_mip,
+                            subresource.num_layers,
+                            mip_idx,
+                        );
+
+                        regions.push(
                             vk::BufferImageCopy::default()
-                                .buffer_offset(p.src_offset + layer_idx as vk::DeviceSize * layer_size)
+                                .buffer_offset(mip_offset)
                                 .buffer_row_length(0)
                                 .buffer_image_height(0)
                                 .image_subresource(
                                     vk::ImageSubresourceLayers::default()
                                         .aspect_mask(aspect)
-                                        .mip_level(p.dst.subresource().base_mip)
-                                        .base_array_layer(p.dst.subresource().base_layer + layer_idx)
-                                        .layer_count(1),
+                                        .mip_level(mip_level)
+                                        .base_array_layer(subresource.base_layer)
+                                        .layer_count(subresource.num_layers),
                                 )
                                 .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                                .image_extent(extent)
-                        })
-                        .collect();
+                                .image_extent(mip_extent),
+                        );
+                    }
 
                     encoder.copy_buffer_to_image(
                         staging,
@@ -356,8 +315,8 @@ impl<'a> UploadPool<'a> {
                 }
 
                 // Post-copy barriers: TRANSFER_DST -> final_state
-                let mut post: Vec<BufferBarrier> = Vec::with_capacity(pending.len());
-                for p in pending.iter() {
+                let mut post: Vec<BufferBarrier> = Vec::with_capacity(pending_buffers.len());
+                for p in pending_buffers.iter() {
                     let dst_stage = match p.final_state {
                         BufferState::Vertex => PipelineStage::VertexAttributeInput.into(),
                         BufferState::Index => PipelineStage::IndexInput.into(),
@@ -375,7 +334,7 @@ impl<'a> UploadPool<'a> {
                         queue,
                     ).with_range(p.dst.offset() as usize, p.size as usize));
                 }
-                encoder.pipeline_barriers(&[], &[], &pre);
+                encoder.pipeline_barriers(&[], &[], &post);
 
                 if !pending_textures.is_empty() {
                     let mut post_img: Vec<TextureBarrier> = Vec::with_capacity(pending_textures.len());
@@ -412,6 +371,107 @@ impl<'a> UploadPool<'a> {
 
         self.write_head = 0;
         Ok(())
+    }
+
+    fn map_vk_error(result: vk::Result) -> UploadError {
+        match result {
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => UploadError::OutOfDeviceMemory,
+            vk::Result::ERROR_VALIDATION_FAILED_EXT => UploadError::ValidationFailed,
+            _ => UploadError::BackendFailure,
+        }
+    }
+    fn align_up(value: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::DeviceSize {
+        if alignment <= 1 {
+            return value;
+        }
+        (value + alignment - 1) / alignment * alignment
+    }
+
+    fn texture_upload_size_bytes(dst: &TextureRange<'_>) -> vk::DeviceSize {
+        let sub = dst.subresource();
+        Self::texture_layer_size_bytes(
+            dst.texture().extent(),
+            dst.texture().format(),
+            sub.base_mip,
+            sub.num_mips,
+        ) * sub.num_layers as vk::DeviceSize
+    }
+
+    fn texture_mip_extent(base_extent: vk::Extent3D, mip_level: u32) -> vk::Extent3D {
+        let shift = mip_level.min(31);
+        vk::Extent3D {
+            width: (base_extent.width >> shift).max(1),
+            height: (base_extent.height >> shift).max(1),
+            depth: (base_extent.depth >> shift).max(1),
+        }
+    }
+
+    fn texture_mip_size_bytes(extent: vk::Extent3D, format: vk::Format) -> vk::DeviceSize {
+        let (block_w, block_h, bytes_per_block) = Self::texture_format_block_info(format);
+        let blocks_x = (extent.width + block_w - 1) / block_w;
+        let blocks_y = (extent.height + block_h - 1) / block_h;
+        (blocks_x as vk::DeviceSize)
+            * (blocks_y as vk::DeviceSize)
+            * (extent.depth as vk::DeviceSize)
+            * bytes_per_block
+    }
+
+    fn texture_format_block_info(format: vk::Format) -> (u32, u32, vk::DeviceSize) {
+        match format {
+            vk::Format::BC5_UNORM_BLOCK
+            | vk::Format::BC6H_UFLOAT_BLOCK
+            | vk::Format::BC6H_SFLOAT_BLOCK
+            | vk::Format::BC7_UNORM_BLOCK
+            | vk::Format::BC7_SRGB_BLOCK => (4u32, 4u32, 16),
+            _ => (1u32, 1u32, Self::bytes_per_pixel(format) as vk::DeviceSize),
+        }
+    }
+
+    fn texture_layer_size_bytes(
+        base_extent: vk::Extent3D,
+        format: vk::Format,
+        base_mip: u32,
+        num_mips: u32,
+    ) -> vk::DeviceSize {
+        let mut total = 0;
+        for mip in 0..num_mips {
+            let mip_extent = Self::texture_mip_extent(base_extent, base_mip + mip);
+            total += Self::texture_mip_size_bytes(mip_extent, format);
+        }
+        total
+    }
+
+    fn texture_mip_block_offset_bytes(
+        base_extent: vk::Extent3D,
+        format: vk::Format,
+        base_mip: u32,
+        num_layers: u32,
+        mip_idx: u32,
+    ) -> vk::DeviceSize {
+        let mut offset = 0;
+        for m in 0..mip_idx {
+            let mip_extent = Self::texture_mip_extent(base_extent, base_mip + m);
+            offset += Self::texture_mip_size_bytes(mip_extent, format) * num_layers as vk::DeviceSize;
+        }
+        offset
+    }
+
+    fn bytes_per_pixel(format: vk::Format) -> u32 {
+        use vk::Format;
+        match format {
+            Format::R8_UNORM | Format::R8_SNORM => 1,
+            Format::R8G8_UNORM | Format::R8G8_SNORM | Format::R16_UNORM | Format::R16_SFLOAT => 2,
+            Format::R8G8B8A8_UNORM
+            | Format::R8G8B8A8_SRGB
+            | Format::R32_SFLOAT
+            | Format::R16G16_UNORM
+            | Format::R16G16_SFLOAT => 4,
+            Format::R16G16B16A16_UNORM
+            | Format::R16G16B16A16_SFLOAT
+            | Format::R32G32_SFLOAT => 8,
+            Format::R32G32B32A32_SFLOAT => 16,
+            _ => 4, // fallback
+        }
     }
 }
 

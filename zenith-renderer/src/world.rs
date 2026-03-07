@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
+use enumflags2::{BitFlag, BitFlags};
 use glam::{Mat4};
 use zenith_asset::{AssetHandle};
 use zenith_asset::material::Material;
@@ -11,7 +12,15 @@ use zenith_rhi::{vk, RenderDevice, Buffer, BufferDesc, BufferState, Shader, Text
 use zenith_rhi::pipeline::{GraphicPipelineAttachmentsBuilder};
 use zenith_rendergraph::{RenderGraphBuilder, RenderGraphResource, VertexLayout, GraphicShaderInputBuilder, ColorAttachment, DepthStencilAttachment};
 use crate::defer_shading::SceneTextures;
+use crate::ibl::ImageBasedLightingRenderer;
 use crate::lighting::DirectLightingRenderer;
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug)]
+#[enumflags2::bitflags]
+pub enum DebugMode {
+    DiffuseSH = 1 << 0,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, VertexLayout)]
@@ -66,7 +75,10 @@ pub struct WorldRenderer {
     // 0=LinearRepeat, 1=LinearClamp, 2=NearestRepeat, 3=NearestClamp
     _samplers: Vec<Arc<Sampler>>,
 
+    debug_mode: BitFlags<DebugMode>,
+
     direct_lighting_renderer: DirectLightingRenderer,
+    ibl_renderer: ImageBasedLightingRenderer,
 }
 
 #[repr(C)]
@@ -129,7 +141,9 @@ impl WorldRenderer {
             width,
             height,
             _samplers: vec![linear_repeat, linear_clamp, nearest_repeat, nearest_clamp],
+            debug_mode: DebugMode::empty(),
             direct_lighting_renderer: DirectLightingRenderer::new(device, width, height)?,
+            ibl_renderer: ImageBasedLightingRenderer::new(device)?,
         })
     }
 
@@ -148,8 +162,12 @@ impl WorldRenderer {
         self.direct_lighting_renderer.resize(width, height);
     }
 
+    pub fn set_debug_mode(&mut self, debug_mode: BitFlags<DebugMode>) {
+        self.debug_mode = debug_mode;
+    }
+
     pub fn set_skybox(&mut self, device: &Arc<RenderDevice>, skybox: &zenith_asset::texture::Texture) -> anyhow::Result<()> {
-        self.direct_lighting_renderer.set_skybox(device, skybox)
+        self.ibl_renderer.set_skybox(device, skybox)
     }
 
     pub fn add_scene(&mut self, device: &Arc<RenderDevice>, bindless_pool: &mut BindlessPool, scene: AssetHandle<Scene>) -> anyhow::Result<()> {
@@ -302,8 +320,8 @@ impl WorldRenderer {
                 .get()
                 .ok_or_else(|| anyhow!("Mesh not loaded: {:?}", p.mesh_url.as_ref()))?;
 
-            upload_pool.enqueue_copy_buffer(device, p.gpu.vertex_buffer.as_range(..), mesh.vertices_bytes(), BufferState::Vertex)?;
-            upload_pool.enqueue_copy_buffer(device, p.gpu.index_buffer.as_range(..), mesh.indices_bytes(), BufferState::Index)?;
+            upload_pool.enqueue_buffer_copy(device, p.gpu.vertex_buffer.as_range(..), mesh.vertices_bytes(), BufferState::Vertex)?;
+            upload_pool.enqueue_buffer_copy(device, p.gpu.index_buffer.as_range(..), mesh.indices_bytes(), BufferState::Index)?;
 
             if let (Some(gpu_tex), Some(url)) = (&p.gpu.material.base_color_tex, p.tex_urls[0].as_ref()) {
                 let tex_handle = AssetHandle::<zenith_asset::texture::Texture>::new(url.clone());
@@ -312,7 +330,7 @@ impl WorldRenderer {
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
                 validate_texture_data_size(&tex)?;
-                upload_pool.enqueue_upload_texture(
+                upload_pool.enqueue_texture_upload(
                     device,
                     gpu_tex.as_range(TextureLayout::Undefined, .., ..),
                     tex.pixels.as_slice(),
@@ -326,7 +344,7 @@ impl WorldRenderer {
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
                 validate_texture_data_size(&tex)?;
-                upload_pool.enqueue_upload_texture(
+                upload_pool.enqueue_texture_upload(
                     device,
                     gpu_tex.as_range(TextureLayout::Undefined, .., ..),
                     tex.pixels.as_slice(),
@@ -340,7 +358,7 @@ impl WorldRenderer {
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
                 validate_texture_data_size(&tex)?;
-                upload_pool.enqueue_upload_texture(
+                upload_pool.enqueue_texture_upload(
                     device,
                     gpu_tex.as_range(TextureLayout::Undefined, .., ..),
                     tex.pixels.as_slice(),
@@ -354,7 +372,7 @@ impl WorldRenderer {
                     .ok_or_else(|| anyhow!("Texture not loaded: {:?}", url.as_ref()))?;
 
                 validate_texture_data_size(&tex)?;
-                upload_pool.enqueue_upload_texture(
+                upload_pool.enqueue_texture_upload(
                     device,
                     gpu_tex.as_range(TextureLayout::Undefined, .., ..),
                     tex.pixels.as_slice(),
@@ -377,12 +395,23 @@ impl WorldRenderer {
         camera: &Camera,
         output: &mut RenderGraphResource<Texture>,
     ) {
+        let sh = self.ibl_renderer.render(builder, bindless_pool);
+
         let view = builder.create(
             BufferDesc::uniform("view", size_of::<GpuViewData>() as _)
         );
 
         let scene_textures = self.render_meshes(builder, bindless_pool, camera, &view);
-        self.direct_lighting_renderer.render(builder, bindless_pool, scene_textures, &view, output);
+        self.direct_lighting_renderer.render(
+            builder,
+            bindless_pool,
+            scene_textures,
+            self.ibl_renderer.skybox_texture.clone(),
+            view,
+            sh,
+            self.debug_mode,
+            output
+        );
     }
 
     fn render_meshes(
